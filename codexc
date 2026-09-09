@@ -1,0 +1,320 @@
+#!/bin/bash
+# codexc — Codex with auto-continue when a turn dies from transient errors
+# (429 rate limit / exceeded retry limit / stream disconnects), wrapped in
+# per-directory tmux sessions.
+#
+# How it works:
+#   Runs `codex` inside a tmux session. A lightweight watcher polls Codex's
+#   internal log store (~/.codex/logs_2.sqlite). Every fatal turn error is
+#   logged there as "Turn error: ...". When one matches a transient-error
+#   pattern, the watcher types "continue" + Enter into the TUI pane — the
+#   same thing you would type by hand.
+#
+# Usage (keep it simple — usually just `codexc`):
+#   codexc                         enter the tmux session for the current
+#                                  directory; create it if needed. The
+#                                  session name is the directory name, and
+#                                  name collisions resolve by walking up the
+#                                  parent dirs until the name is unique
+#                                  (e.g. api, then a-api, then x-a-api).
+#   codexc -n <name> [codex args]  explicit session name instead of the
+#                                  automatic per-directory one
+#   codexc resume --last           any other args are passed through to codex
+#   codexc "do the task"           (session name comes from the directory)
+#   codexc ls                      list all tmux sessions
+#   codexc -h                      show this help
+#
+# Environment overrides:
+#   CODEXC_SESSION         tmux session name (default: auto from $PWD)
+#   CODEXC_MESSAGE         injected prompt text      (default: continue)
+#   CODEXC_COOLDOWN        min seconds between sends (default: 10)
+#   CODEXC_MAX_CONTINUES   max auto-continues        (default: 30, then notification)
+#   CODEXC_POLL            watcher poll interval     (default: 2)
+#
+# Notes:
+#   - Usage-limit / subscription-cap errors ("usage limit reached", "upgrade
+#     to ...") are NOT auto-continued — waiting for the reset is the only fix.
+#   - Don't leave half-typed text in the composer during unattended runs; the
+#     watcher checks that the composer is an empty placeholder before typing.
+#   - Detach with the tmux prefix + d (prefix is Ctrl+a per ~/.tmux.conf);
+#     codex keeps running in the background and `codexc` re-attaches.
+
+set -u
+
+CODEXC_SESSION="${CODEXC_SESSION:-}"
+CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
+CODEXC_COOLDOWN="${CODEXC_COOLDOWN:-10}"
+CODEXC_MAX_CONTINUES="${CODEXC_MAX_CONTINUES:-30}"
+CODEXC_POLL="${CODEXC_POLL:-2}"
+
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+
+# Transient provider/relay errors worth an automatic "continue". Covers the
+# 429 quota storms, dropped streams, the relay's intermittent
+# "Invalid request parameters, please check the request body and try again"
+# (a new-api style upstream hiccup — a genuinely malformed body would fail
+# every turn, not intermittently), and the relay's brief windows where every
+# request 401s (observed 30s burst on 2026-09-06; key itself stayed valid).
+TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before completion|error sending request|connection closed|timed out|check the request body|401 Unauthorized|INVALID_API_KEY'
+
+command -v tmux    >/dev/null || { echo "codexc: tmux is required" >&2; exit 1; }
+command -v sqlite3 >/dev/null || { echo "codexc: sqlite3 is required" >&2; exit 1; }
+
+WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+
+# ---- self-heal: config switchers (CC Switch etc.) rewrite config.toml from
+# stale stored templates and wipe these retry keys — re-add before launch ----
+ensure_retry_config() {
+    local cfg="$CODEX_HOME_DIR/config.toml"
+    [ -f "$cfg" ] || return 0
+    grep -q "request_max_retries" "$cfg" && return 0
+    python3 - "$cfg" <<'PYEOF'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split("\n")
+out, in_provider, inserted = [], False, False
+keys = ["request_max_retries = 8", "stream_max_retries = 10", "stream_idle_timeout_ms = 300000"]
+for ln in lines:
+    if in_provider and ln.startswith("["):
+        out += keys
+        inserted = True
+        in_provider = False
+    if ln.strip() == "[model_providers.custom]":
+        in_provider = True
+    out.append(ln)
+if in_provider and not inserted:
+    out += keys
+    inserted = True
+if inserted:
+    open(p, "w").write("\n".join(out))
+    print(f"codexc: re-added retry keys to {p} (a config switcher had wiped them)", file=sys.stderr)
+PYEOF
+    grep -q "request_max_retries" "$cfg" && \
+        echo "$(date '+%F %T') self-heal: retry keys re-added to config.toml" >> "${CODEX_HOME_DIR}/codexc-watch.log"
+}
+
+# ---- session-name resolution ------------------------------------------------
+# tmux session names may not contain ':' or '.'; replace anything exotic with
+# '-' so paths survive as session names.
+sanitize_name() {
+    printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-'
+}
+
+# Pick a stable session name for the current directory:
+#   1. start with the directory basename (api);
+#   2. if that name is taken by ANOTHER directory, prepend parent dir names
+#      one level at a time until the name is free (a-api, x-a-api, ...).
+# The absolute path is unique, so this loop always terminates.
+resolve_session_name() {
+    local name cand p spath
+    cand="$(basename "$PWD")"
+    p="$PWD"
+    while :; do
+        name="$(sanitize_name "$cand")"
+        if ! tmux has-session -t "$name" 2>/dev/null; then
+            echo "$name"; return 0
+        fi
+        # taken — is it ours (same startup directory)?
+        spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
+        if [ "$spath" = "$PWD" ]; then
+            echo "$name"; return 0
+        fi
+        # taken by another directory: widen the scope with the parent name
+        p="$(dirname "$p")"
+        [ "$p" = "/" ] && p="$PWD"   # safety: never walk past the root
+        [ "$p" = "$PWD" ] && { echo "$name"; return 0; }
+        cand="$(basename "$p")-$cand"
+    done
+}
+
+usage() {
+    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---- watcher: runs as a background child inside the codex pane -------------
+# $1 = pid to follow (this shell, which blocks on the codex child process)
+
+# find the rollout file of the ACTIVE session: walk the codex process tree
+# (node -> native binary), collect open session files, keep the newest —
+# /resume or forks switch files, and the active one is written most recently
+find_active_rollout() {
+    local all p f m newest="" newest_m=0
+    all="$follow_pid"
+    for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
+    for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
+    for p in $all; do
+        for f in $(lsof -p "$p" 2>/dev/null | grep -o "$CODEX_HOME_DIR/sessions/[^ ]*\.jsonl" | sort -u); do
+            m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
+            [ "$m" -gt "$newest_m" ] && { newest_m=$m; newest="$f"; }
+        done
+    done
+    # fallback while nothing is held open yet (startup race)
+    if [ -z "$newest" ]; then
+        newest="$(find "$CODEX_HOME_DIR/sessions" -name '*.jsonl' -mmin -2 2>/dev/null | while read -r f; do echo "$(stat -f '%m' "$f" 2>/dev/null) $f"; done | sort -rn | head -1 | awk '{print $2}')"
+    fi
+    echo "$newest"
+}
+
+thread_id_from_rollout() {
+    basename "$1" .jsonl | awk -F- '{print $(NF-4)"-"$(NF-3)"-"$(NF-2)"-"$(NF-1)"-"$NF}'
+}
+
+# re-discover which session is active; logs the switch (e.g. after /resume)
+rediscover_thread() {
+    local rollout new_id
+    rollout="$(find_active_rollout)"
+    [ -z "$rollout" ] && return
+    new_id="$(thread_id_from_rollout "$rollout")"
+    if [ "$new_id" != "$thread_id" ]; then
+        echo "$(date '+%F %T') active thread: ${thread_id:-<none>} -> $new_id" >> "$WATCHLOG"
+        thread_id="$new_id"
+    fi
+}
+
+watch_and_run() {
+    local follow_pid="$1" pane="$2"
+    local last_id row_id head body thread_id count=0 ts_last=0 now logdb poll_n=0 row_thread
+
+    # codex creates its log store on first run; wait for it
+    logdb=""
+    for _ in $(seq 1 30); do
+        logdb="$(ls -t "$CODEX_HOME_DIR"/logs_*.sqlite 2>/dev/null | head -1)"
+        [ -n "$logdb" ] && break
+        kill -0 "$follow_pid" 2>/dev/null || return 0
+        sleep 1
+    done
+    [ -n "$logdb" ] || { echo "$(date '+%F %T') no logs db appeared, watcher giving up" >> "$WATCHLOG"; return 0; }
+
+    # initial session discovery; retried lazily later (/resume switches files)
+    thread_id=""
+    rediscover_thread
+
+    # only rows logged after the watcher started count; last_id stays 0 until
+    # the thread id is known so pre-discovery errors are still evaluated
+    local start_floor=$(( $(date +%s) - 5 ))
+    last_id=0
+
+    while kill -0 "$follow_pid" 2>/dev/null; do
+        sleep "$CODEXC_POLL"
+        poll_n=$((poll_n + 1))
+        # periodic re-discovery: /resume or forks switch the active session
+        [ $((poll_n % 3)) -eq 0 ] && rediscover_thread
+
+        local rows
+        rows="$(sqlite3 -readonly "$logdb" \
+            "SELECT id,
+                    substr(feedback_log_body, 1, 120),
+                    substr(feedback_log_body, instr(feedback_log_body, 'Turn error'), 200)
+             FROM logs
+             WHERE id > $last_id AND ts >= $start_floor
+               AND feedback_log_body LIKE '%Turn error:%'
+             ORDER BY id;" 2>/dev/null)" || continue
+        [ -n "$rows" ] || continue
+
+        while IFS='|' read -r row_id head body; do
+            [ -n "${row_id:-}" ] || continue
+            # only advance the cursor once we know which session is ours
+            [ -n "$thread_id" ] && last_id="$row_id"
+            row_thread="$(echo "$head" | sed -n 's/.*thread_id=\([0-9a-f-]*\).*/\1/p')"
+            # an unknown thread id means the session was resumed/forked
+            if [ -n "$row_thread" ] && [ "$row_thread" != "$thread_id" ]; then
+                rediscover_thread
+            fi
+            [ -n "$thread_id" ] && [ "$row_thread" = "$thread_id" ] || continue
+            # only transient errors; quota/usage-limit ones need a human
+            echo "$body" | grep -qE "$TRANSIENT_RE" || continue
+
+            # transient error: wait out the cooldown, then fire — never drop it
+            now=$(date +%s)
+            while [ $((now - ts_last)) -lt "$CODEXC_COOLDOWN" ]; do
+                sleep 1
+                kill -0 "$follow_pid" 2>/dev/null || return 0
+                now=$(date +%s)
+            done
+            if [ "$count" -ge "$CODEXC_MAX_CONTINUES" ]; then
+                command -v osascript >/dev/null && \
+                    osascript -e "display notification \"已连续自动 continue $count 次，暂停自动重试\" with title \"codexc\"" 2>/dev/null
+                echo "$(date '+%F %T') reached max continues ($count), stopping" >> "$WATCHLOG"
+                return 0
+            fi
+
+            # only type into an idle TUI (a running turn shows "esc to interrupt")
+            if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
+                echo "$(date '+%F %T') turn still active, skipping send" >> "$WATCHLOG"
+                continue
+            fi
+
+            sleep 3   # let the TUI render the error and settle
+            echo "$(date '+%F %T') Turn error in $thread_id -> auto-continue #$((count+1)): ${body##*Turn error: }" >> "$WATCHLOG"
+            # text and Enter must be sent as separate writes — a single burst
+            # makes the TUI drop the Enter keypress
+            tmux send-keys -t "$pane" -l "$CODEXC_MESSAGE"
+            sleep 0.4
+            tmux send-keys -t "$pane" Enter
+            count=$((count + 1))
+            ts_last=$(date +%s)
+            # skip any sibling rows of the same event window
+            last_id="$(sqlite3 -readonly "$logdb" "SELECT COALESCE(MAX(id),0) FROM logs;" 2>/dev/null || echo "$last_id")"
+            break
+        done <<< "$rows"
+    done
+    echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
+}
+
+# ---- argument parsing (outside tmux) ---------------------------------------
+# -n/--name takes the next arg as an explicit session name; "ls" lists
+# sessions; anything else is passed through to codex unchanged. Without an
+# explicit name the session is auto-resolved from the current directory.
+ACTION=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--name)
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a session name" >&2; exit 1; }
+            CODEXC_SESSION="$2"; shift 2 ;;
+        ls)  ACTION="ls"; shift ;;
+        -h|--help|help) ACTION="help"; shift ;;
+        *)   break ;;
+    esac
+done
+
+if [ "$ACTION" = "help" ]; then
+    usage; exit 0
+fi
+if [ "$ACTION" = "ls" ]; then
+    tmux ls 2>/dev/null || echo "codexc: no tmux sessions (tmux server not started?)" >&2
+    exit 0
+fi
+if [ -z "$CODEXC_SESSION" ]; then
+    CODEXC_SESSION="$(resolve_session_name)"
+fi
+
+# ---- inside tmux: run codex + watcher in this pane -------------------------
+if [ -n "${TMUX:-}" ]; then
+    PANE="$(tmux display-message -p '#{pane_id}')"
+    ensure_retry_config
+    WATCH_PID_FILE="$(mktemp)"
+    ( watch_and_run "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) &
+    watcher=$!
+    echo "$watcher" > "$WATCH_PID_FILE"
+    codex "$@"
+    rc=$?
+    kill "$watcher" 2>/dev/null
+    rm -f "$WATCH_PID_FILE"
+    exit $rc
+fi
+
+# ---- outside tmux: create a session running this script, then attach ------
+if tmux has-session -t "$CODEXC_SESSION" 2>/dev/null; then
+    exec tmux attach -t "$CODEXC_SESSION"
+fi
+
+inner="env CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") \
+CODEXC_COOLDOWN=$CODEXC_COOLDOWN \
+CODEXC_MAX_CONTINUES=$CODEXC_MAX_CONTINUES \
+CODEXC_POLL=$CODEXC_POLL \
+CODEXC_SESSION=$(printf '%q' "$CODEXC_SESSION") \
+$(printf '%q' "$0") $(printf '%q ' "$@")"
+
+tmux new-session -d -s "$CODEXC_SESSION" "$inner; rm -f /tmp/.codexc-done-$CODEXC_SESSION"
+tmux set-option -t "$CODEXC_SESSION" remain-on-exit off >/dev/null 2>&1
+exec tmux attach -t "$CODEXC_SESSION"
