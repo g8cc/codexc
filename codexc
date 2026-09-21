@@ -21,6 +21,12 @@
 #                                  automatic per-directory one
 #   codexc resume --last           any other args are passed through to codex
 #   codexc "do the task"           (session name comes from the directory)
+#   codexc -t 10:00 "do the task"  scheduled task: codex starts now (idle) and
+#                                  the prompt is typed at 10:00. HH:MM that
+#                                  already passed today fires tomorrow;
+#                                  "+2h"/"+30m"/"+45s"/"+90" (minutes) are
+#                                  relative. Works with an existing session
+#                                  too (queues the prompt into it).
 #   codexc ls                      list all tmux sessions
 #   codexc -h                      show this help
 #
@@ -30,12 +36,29 @@
 #   CODEXC_COOLDOWN        min seconds between sends (default: 10)
 #   CODEXC_MAX_CONTINUES   max auto-continues        (default: 30, then notification)
 #   CODEXC_POLL            watcher poll interval     (default: 2)
+#   CODEXC_AT              scheduled-fire spec (same as -t, e.g. "10:00")
+#   CODEXC_EXTRA_RE        extra auto-continue regex, OR'd with the built-ins
+#   CODEXC_AUTO_YES        auto-approve mode: 1 = full-auto (default: skip all
+#                          approval prompts, no sandbox), 2 = skip prompts but
+#                          keep the workspace sandbox, 0 = off (codex asks)
 #
 # Notes:
+#   - Auto-continue fires on transient errors: 429 storms, dropped streams,
+#     5xx/relay hiccups, network failures, ... Extend the list with one
+#     grep -E regex per line in ~/.codex/codexc.patterns (# comments ok) or
+#     via the CODEXC_EXTRA_RE env var (read at watcher startup).
 #   - Usage-limit / subscription-cap errors ("usage limit reached", "upgrade
-#     to ...") are NOT auto-continued — waiting for the reset is the only fix.
-#   - Don't leave half-typed text in the composer during unattended runs; the
-#     watcher checks that the composer is an empty placeholder before typing.
+#     to ...") are NEVER auto-continued — this blocklist wins even over
+#     custom patterns. Waiting for the reset is the only fix; schedule the
+#     retry instead: codexc -t 10:00 "continue".
+#   - codexc launches codex in full-auto mode by default (auto-"yes": no
+#     approval popups; the current directory is pre-trusted so the "Do you
+#     trust this directory?" gate never blocks unattended runs). Set
+#     CODEXC_AUTO_YES=0 to keep codex's normal prompts, or 2 to skip prompts
+#     while keeping the workspace sandbox.
+#   - The watcher (and the scheduler) never type while a turn is running
+#     (they look for "esc to interrupt" in the pane); still, don't leave
+#     half-typed text in the composer during unattended runs.
 #   - Detach with the tmux prefix + d (prefix is Ctrl+a per ~/.tmux.conf);
 #     codex keeps running in the background and `codexc` re-attaches.
 
@@ -46,16 +69,30 @@ CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
 CODEXC_COOLDOWN="${CODEXC_COOLDOWN:-10}"
 CODEXC_MAX_CONTINUES="${CODEXC_MAX_CONTINUES:-30}"
 CODEXC_POLL="${CODEXC_POLL:-2}"
+CODEXC_AT="${CODEXC_AT:-}"
+CODEXC_EXTRA_RE="${CODEXC_EXTRA_RE:-}"
+CODEXC_AUTO_YES="${CODEXC_AUTO_YES:-1}"
+case "$CODEXC_AUTO_YES" in 0|off|no|false) CODEXC_AUTO_YES=0 ;; esac
+CODEXC_PROMPT=""
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 # Transient provider/relay errors worth an automatic "continue". Covers the
-# 429 quota storms, dropped streams, the relay's intermittent
-# "Invalid request parameters, please check the request body and try again"
-# (a new-api style upstream hiccup — a genuinely malformed body would fail
-# every turn, not intermittently), and the relay's brief windows where every
-# request 401s (observed 30s burst on 2026-09-06; key itself stayed valid).
-TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before completion|error sending request|connection closed|timed out|check the request body|401 Unauthorized|INVALID_API_KEY'
+# 429 quota storms, dropped streams, 5xx server/relay hiccups (Bad Gateway,
+# Service Unavailable, "server error", overloaded), client-side network
+# failures (fetch failed, socket hang up, connection reset), the relay's
+# intermittent "Invalid request parameters, please check the request body
+# and try again" (a new-api style upstream hiccup — a genuinely malformed
+# body would fail every turn, not intermittently), and the relay's brief
+# windows where every request 401s (observed 30s burst on 2026-09-06; key
+# itself stayed valid). Extendable via ~/.codex/codexc.patterns or
+# CODEXC_EXTRA_RE — see load_extra_patterns().
+TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before completion|error sending request|connection closed|connection reset|timed out|check the request body|401 Unauthorized|INVALID_API_KEY|server error|Bad Gateway|Service Unavailable|Internal Server Error|overloaded|fetch failed|socket hang up|premature close|network error|ECONNRESET|empty response'
+
+# Hard caps that must never be auto-continued (checked BEFORE TRANSIENT_RE so
+# even a broad custom pattern can't cause pointless retries): quotas and
+# subscription caps only clear when the window resets or the plan upgrades.
+BLOCK_RE='usage limit|upgrade to|subscription|plan limit'
 
 command -v tmux    >/dev/null || { echo "codexc: tmux is required" >&2; exit 1; }
 command -v sqlite3 >/dev/null || { echo "codexc: sqlite3 is required" >&2; exit 1; }
@@ -93,6 +130,18 @@ PYEOF
         echo "$(date '+%F %T') self-heal: retry keys re-added to config.toml" >> "${CODEX_HOME_DIR}/codexc-watch.log"
 }
 
+# ---- self-heal: pre-trust the current directory so codex's first-run
+# "Do you trust the contents of this directory?" gate never blocks ----
+ensure_project_trust() {
+    local cfg="$CODEX_HOME_DIR/config.toml" dir
+    [ "$CODEXC_AUTO_YES" != "0" ] || return 0
+    [ -f "$cfg" ] || : > "$cfg"   # brand-new codex installs may not have one yet
+    dir="$(pwd -P)"
+    grep -Fq -- "[projects.\"$dir\"]" "$cfg" && return 0
+    printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$dir" >> "$cfg"
+    echo "$(date '+%F %T') self-heal: trusted project added to config.toml: $dir" >> "$WATCHLOG"
+}
+
 # ---- session-name resolution ------------------------------------------------
 # tmux session names may not contain ':' or '.'; replace anything exotic with
 # '-' so paths survive as session names.
@@ -128,7 +177,82 @@ resolve_session_name() {
 }
 
 usage() {
-    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+    # whole header comment: everything from line 2 up to "# Notes:"
+    awk 'NR == 1 { next } /^# Notes:/ { exit } { sub(/^# ?/, ""); print }' "$0"
+}
+
+# ---- user-extensible auto-continue patterns --------------------------------
+# ~/.codex/codexc.patterns: one grep -E regex per line, '#' starts a comment;
+# CODEXC_EXTRA_RE adds one more inline. All OR'd with the built-in list.
+# Read once at watcher startup — restart the session to pick up edits.
+load_extra_patterns() {
+    local f="$CODEX_HOME_DIR/codexc.patterns" out=""
+    if [ -f "$f" ]; then
+        out="$(sed -e 's/[[:space:]]*$//' "$f" | grep -vE '^[[:space:]]*(#|$)' | paste -sd '|' -)"
+    fi
+    [ -n "$CODEXC_EXTRA_RE" ] && out="${out:+$out|}$CODEXC_EXTRA_RE"
+    printf '%s' "$out"
+}
+
+# ---- scheduler: type a prompt into a pane at a given time ------------------
+# $1 = time spec ("10:00" or "+2h"/"+30m"/"+45s"/"+90" minutes), $2 = pane
+# id, $3 = prompt. Sleeps until the target (gives up if the pane disappears),
+# waits for an idle TUI, then sends prompt + Enter (same two-stage send as
+# the watcher — a single burst makes the TUI drop the Enter keypress).
+parse_schedule_epoch() {
+    python3 - "$1" <<'PYEOF'
+import sys, datetime
+spec = sys.argv[1].strip()
+now = datetime.datetime.now().astimezone()
+try:
+    if spec.startswith("+"):
+        s = spec[1:].lower()
+        if s.endswith("h"):   delta = datetime.timedelta(hours=float(s[:-1]))
+        elif s.endswith("m"): delta = datetime.timedelta(minutes=float(s[:-1]))
+        elif s.endswith("s"): delta = datetime.timedelta(seconds=float(s[:-1]))
+        else:                 delta = datetime.timedelta(minutes=float(s))
+        target = now + delta
+    else:
+        h, m = spec.split(":")
+        target = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+    print(int(target.timestamp()))
+except Exception:
+    pass
+PYEOF
+}
+
+run_scheduler() {
+    local spec="$1" pane="$2" prompt="$3" target now left
+    target="$(parse_schedule_epoch "$spec")"
+    if [ -z "$target" ]; then
+        echo "$(date '+%F %T') scheduler: bad time spec '$spec' (use HH:MM or +N[h|m|s])" >> "$WATCHLOG"
+        return 1
+    fi
+    echo "$(date '+%F %T') scheduler: prompt queued for $pane at $(date -r "$target" '+%F %T') (spec: $spec): $prompt" >> "$WATCHLOG"
+    while :; do
+        now=$(date +%s)
+        [ "$now" -ge "$target" ] && break
+        tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || {
+            echo "$(date '+%F %T') scheduler: pane gone before fire time, giving up" >> "$WATCHLOG"
+            return 0
+        }
+        left=$(( target - now )); [ "$left" -gt 60 ] && left=60
+        sleep "$left"
+    done
+    # fire only into an idle TUI (a running turn shows "esc to interrupt")
+    while tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; do
+        sleep 5
+        tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || return 0
+    done
+    sleep 1
+    echo "$(date '+%F %T') scheduler: firing scheduled prompt: $prompt" >> "$WATCHLOG"
+    command -v osascript >/dev/null && \
+        osascript -e 'display notification "Scheduled prompt fired" with title "codexc"' 2>/dev/null
+    tmux send-keys -t "$pane" -l "$prompt"
+    sleep 0.4
+    tmux send-keys -t "$pane" Enter
 }
 
 # ---- watcher: runs as a background child inside the codex pane -------------
@@ -174,6 +298,7 @@ rediscover_thread() {
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local last_id row_id head body thread_id count=0 ts_last=0 now logdb poll_n=0 row_thread
+    local match_re extra_re
 
     # codex creates its log store on first run; wait for it
     logdb=""
@@ -193,6 +318,12 @@ watch_and_run() {
     # the thread id is known so pre-discovery errors are still evaluated
     local start_floor=$(( $(date +%s) - 5 ))
     last_id=0
+
+    # auto-continue match set: built-in transient list OR'd with the user's
+    # extensions (~/.codex/codexc.patterns + CODEXC_EXTRA_RE)
+    match_re="$TRANSIENT_RE"
+    extra_re="$(load_extra_patterns)"
+    [ -n "$extra_re" ] && match_re="$match_re|$extra_re"
 
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
@@ -221,8 +352,12 @@ watch_and_run() {
                 rediscover_thread
             fi
             [ -n "$thread_id" ] && [ "$row_thread" = "$thread_id" ] || continue
-            # only transient errors; quota/usage-limit ones need a human
-            echo "$body" | grep -qE "$TRANSIENT_RE" || continue
+            # hard caps first: usage-limit/subscription errors are NEVER
+            # auto-continued — the blocklist wins even over custom patterns
+            echo "$body" | grep -qiE "$BLOCK_RE" && continue
+            # transient (built-in list + user extensions) -> auto-continue
+            # (case-insensitive: codex capitalizes error text inconsistently)
+            echo "$body" | grep -qiE "$match_re" || continue
 
             # transient error: wait out the cooldown, then fire — never drop it
             now=$(date +%s)
@@ -233,7 +368,7 @@ watch_and_run() {
             done
             if [ "$count" -ge "$CODEXC_MAX_CONTINUES" ]; then
                 command -v osascript >/dev/null && \
-                    osascript -e "display notification \"已连续自动 continue $count 次，暂停自动重试\" with title \"codexc\"" 2>/dev/null
+                    osascript -e "display notification \"Auto-continued $count times, pausing auto-retry\" with title \"codexc\"" 2>/dev/null
                 echo "$(date '+%F %T') reached max continues ($count), stopping" >> "$WATCHLOG"
                 return 0
             fi
@@ -261,6 +396,15 @@ watch_and_run() {
     echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
 }
 
+# ---- internal: detached scheduler entry ------------------------------------
+# codexc calls this via nohup to queue a scheduled prompt into an
+# already-running session; not a documented interface.
+if [ "${1:-}" = "__schedule_run" ]; then
+    [ $# -ge 4 ] || { echo "codexc: __schedule_run needs <spec> <pane> <prompt>" >&2; exit 1; }
+    run_scheduler "$2" "$3" "$4"
+    exit $?
+fi
+
 # ---- argument parsing (outside tmux) ---------------------------------------
 # -n/--name takes the next arg as an explicit session name; "ls" lists
 # sessions; anything else is passed through to codex unchanged. Without an
@@ -271,6 +415,9 @@ while [ $# -gt 0 ]; do
         -n|--name)
             [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a session name" >&2; exit 1; }
             CODEXC_SESSION="$2"; shift 2 ;;
+        -t|--at)
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a time (HH:MM or +N[h|m|s])" >&2; exit 1; }
+            CODEXC_AT="$2"; shift 2 ;;
         ls)  ACTION="ls"; shift ;;
         -h|--help|help) ACTION="help"; shift ;;
         *)   break ;;
@@ -284,37 +431,83 @@ if [ "$ACTION" = "ls" ]; then
     tmux ls 2>/dev/null || echo "codexc: no tmux sessions (tmux server not started?)" >&2
     exit 0
 fi
+# scheduled mode: everything left on the command line is the prompt to fire
+if [ -n "$CODEXC_AT" ]; then
+    CODEXC_PROMPT="$*"
+    if [ -z "$CODEXC_PROMPT" ]; then
+        echo "codexc: -t needs a prompt, e.g. codexc -t 10:00 \"continue the task\"" >&2
+        exit 1
+    fi
+    set --   # the prompt goes to the scheduler, not to codex's argv
+fi
+
 if [ -z "$CODEXC_SESSION" ]; then
     CODEXC_SESSION="$(resolve_session_name)"
 fi
 
-# ---- inside tmux: run codex + watcher in this pane -------------------------
+# ---- inside tmux: run codex + watcher (+ optional scheduler) in this pane --
 if [ -n "${TMUX:-}" ]; then
     PANE="$(tmux display-message -p '#{pane_id}')"
     ensure_retry_config
-    WATCH_PID_FILE="$(mktemp)"
+    ensure_project_trust
+    sched_pid=""
+    if [ -n "$CODEXC_AT" ]; then
+        CODEXC_PROMPT="${CODEXC_PROMPT:-$*}"
+        [ -n "$CODEXC_PROMPT" ] || { echo "codexc: scheduled mode needs a prompt" >&2; exit 1; }
+        ( run_scheduler "$CODEXC_AT" "$PANE" "$CODEXC_PROMPT" >> "$WATCHLOG" 2>&1 ) &
+        sched_pid=$!
+        set --   # the prompt goes to the scheduler, not to codex's argv
+    fi
     ( watch_and_run "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) &
     watcher=$!
-    echo "$watcher" > "$WATCH_PID_FILE"
-    codex "$@"
+    # auto-yes: official flags skip all approval prompts; never override
+    # approval/sandbox flags the user passed explicitly
+    codex_flags=""
+    case "$*" in
+        *--ask-for-approval*|*--sandbox*|*--dangerously-bypass*|*--full-auto*|*--yolo*|*-a\ *|*-s\ *) : ;;
+        *)
+            case "$CODEXC_AUTO_YES" in
+                1) codex_flags="--dangerously-bypass-approvals-and-sandbox" ;;
+                2) codex_flags="--ask-for-approval never --sandbox workspace-write" ;;
+            esac
+            ;;
+    esac
+    codex $codex_flags "$@"
     rc=$?
     kill "$watcher" 2>/dev/null
-    rm -f "$WATCH_PID_FILE"
+    [ -n "$sched_pid" ] && kill "$sched_pid" 2>/dev/null
     exit $rc
 fi
 
 # ---- outside tmux: create a session running this script, then attach ------
 if tmux has-session -t "$CODEXC_SESSION" 2>/dev/null; then
+    # session already running: queue the scheduled prompt into it from a
+    # detached helper so it survives this client attaching/detaching
+    if [ -n "$CODEXC_AT" ]; then
+        sched_pane="$(tmux display-message -p -t "$CODEXC_SESSION" '#{pane_id}')"
+        nohup "$0" __schedule_run "$CODEXC_AT" "$sched_pane" "$CODEXC_PROMPT" >> "$WATCHLOG" 2>&1 &
+        echo "codexc: scheduled ${CODEXC_AT} queued into session '${CODEXC_SESSION}' (log: ${WATCHLOG})" >&2
+    fi
     exec tmux attach -t "$CODEXC_SESSION"
 fi
+
+codex_args=""
+[ $# -gt 0 ] && codex_args="$(printf '%q ' "$@")"
 
 inner="env CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") \
 CODEXC_COOLDOWN=$CODEXC_COOLDOWN \
 CODEXC_MAX_CONTINUES=$CODEXC_MAX_CONTINUES \
 CODEXC_POLL=$CODEXC_POLL \
 CODEXC_SESSION=$(printf '%q' "$CODEXC_SESSION") \
-$(printf '%q' "$0") $(printf '%q ' "$@")"
+CODEXC_AT=$(printf '%q' "$CODEXC_AT") \
+CODEXC_PROMPT=$(printf '%q' "$CODEXC_PROMPT") \
+CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") \
+$(printf '%q' "$0") $codex_args"
 
-tmux new-session -d -s "$CODEXC_SESSION" "$inner; rm -f /tmp/.codexc-done-$CODEXC_SESSION"
+if [ -n "$CODEXC_AT" ]; then
+    echo "codexc: session '${CODEXC_SESSION}' created; prompt fires at ${CODEXC_AT} (log: ${WATCHLOG})" >&2
+fi
+
+tmux new-session -d -s "$CODEXC_SESSION" "$inner"
 tmux set-option -t "$CODEXC_SESSION" remain-on-exit off >/dev/null 2>&1
 exec tmux attach -t "$CODEXC_SESSION"

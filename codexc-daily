@@ -1,0 +1,304 @@
+#!/bin/bash
+# codexc-daily — daily scheduled auto-resume of the last codex task (launchd)
+#
+# At fire time it does exactly what you would do by hand:
+#   1. find the most recent codex session and its working directory
+#      (session_meta.cwd of the newest ~/.codex/sessions/**/rollout-*.jsonl)
+#   2. if that directory's tmux session is still alive -> wait for an idle
+#      TUI, then type continue + Enter
+#      if it is gone (cold start) -> open a tmux session in that directory
+#      running `codexc resume --last continue` (via codexc, so the 429
+#      auto-retry watchdog is armed too)
+#   3. send a system notification; log to ~/.codex/codexc-daily.log
+#
+# Usage:
+#   codexc-daily                 run one "resume last task" cycle now
+#   codexc-daily install 10:00   register daily at 10:00 via launchd (a missed
+#                                run while asleep fires once on wake; a
+#                                powered-off Mac skips)
+#   codexc-daily uninstall       remove the schedule
+#   codexc-daily status          registration status + recent runs
+#   codexc-daily pause / resume  pause / re-enable (vacations, "not today")
+#
+# It is a safety net, not an interrupt: if you are using the computer at fire
+# time (keyboard/mouse idle < 30 minutes) it skips and notifies; a turn that
+# is already running is never interrupted (it waits up to 60s, then skips).
+#
+# Env: CODEXC_MESSAGE      text sent at fire time (default: continue; baked
+#                          into the launchd config at install time)
+#     CODEXC_HOME         codex home (default: ~/.codex)
+#     CODEXC_DAILY_IDLE   "human at the computer" threshold in minutes
+#                         (default 30, 0 disables the check)
+
+set -u
+
+# launchd provides a minimal PATH; add the usual install locations
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
+
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
+CODEXC_DAILY_IDLE="${CODEXC_DAILY_IDLE:-30}"
+case "$CODEXC_DAILY_IDLE" in ''|*[!0-9]*) CODEXC_DAILY_IDLE=30 ;; esac
+CODEXC_AUTO_YES="${CODEXC_AUTO_YES:-1}"
+case "$CODEXC_AUTO_YES" in 0|off|no|false) CODEXC_AUTO_YES=0 ;; esac
+PAUSE_FILE="$CODEX_HOME_DIR/codexc-daily.pause"
+DAILYLOG="$CODEX_HOME_DIR/codexc-daily.log"
+WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+LABEL="com.codexc.daily"
+PLIST="${CODEXC_DAILY_PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+log() { echo "$(date '+%F %T') daily: $*" >> "$DAILYLOG"; }
+
+notify() {
+    command -v osascript >/dev/null && \
+        osascript -e "display notification \"$1\" with title \"codexc-daily\"" 2>/dev/null
+}
+
+# System-wide keyboard/mouse idle seconds (video playback doesn't count)
+idle_seconds() {
+    local ns
+    ns="$(ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print $NF; exit}')"
+    echo $(( ${ns:-0} / 1000000000 ))
+}
+
+pause_cmd()  { touch "$PAUSE_FILE"; echo "codexc-daily: paused (run 'codexc-daily resume' to re-enable)"; log "paused"; }
+resume_cmd() { rm -f "$PAUSE_FILE"; echo "codexc-daily: resumed"; log "resumed"; }
+
+# Working directory of the most recent codex session (session_meta.cwd of the newest rollout)
+latest_cwd() {
+    local f
+    f="$(find "$CODEX_HOME_DIR/sessions" -name '*.jsonl' -type f 2>/dev/null \
+        | while IFS= read -r x; do
+            printf '%s %s\n' "$(stat -f '%m' "$x" 2>/dev/null || echo 0)" "$x"
+          done | sort -rn | head -1 | awk '{print $2}')"
+    [ -n "$f" ] || return 0
+    python3 - "$f" <<'PYEOF'
+import sys, json
+with open(sys.argv[1]) as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line).get("payload") or {}
+        except Exception:
+            continue
+        cwd = payload.get("cwd")
+        if cwd:
+            print(cwd)
+            break
+PYEOF
+}
+
+sanitize_name() { printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-'; }
+
+# Same session-name collision walk as codexc: prepend parent dir names while the name is taken
+resolve_session_name() {
+    local dir="$1" name cand p spath
+    cand="$(basename "$dir")"
+    p="$dir"
+    while :; do
+        name="$(sanitize_name "$cand")"
+        if ! tmux has-session -t "$name" 2>/dev/null; then
+            echo "$name"; return 0
+        fi
+        spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
+        if [ "$spath" = "$dir" ]; then
+            echo "$name"; return 0
+        fi
+        p="$(dirname "$p")"
+        [ "$p" = "/" ] && p="$dir"
+        [ "$p" = "$dir" ] && { echo "$name"; return 0; }
+        cand="$(basename "$p")-$cand"
+    done
+}
+
+send_text() {  # $1=pane $2=text — two-stage send; a single burst makes the TUI drop Enter
+    tmux send-keys -t "$1" -l "$2"
+    sleep 0.4
+    tmux send-keys -t "$1" Enter
+}
+
+run_now() {
+    command -v tmux  >/dev/null || { echo "codexc-daily: tmux is required" >&2; exit 1; }
+    command -v codex >/dev/null || { echo "codexc-daily: codex CLI is required" >&2; exit 1; }
+
+    local cwd name pane cmd
+    if [ -f "$PAUSE_FILE" ]; then
+        log "paused, skipping"
+        notify "codexc-daily is paused, skipping"
+        return 0
+    fi
+    if [ "$CODEXC_DAILY_IDLE" -gt 0 ]; then
+        local idle
+        idle="$(idle_seconds)"
+        if [ "$idle" -lt $((CODEXC_DAILY_IDLE * 60)) ]; then
+            log "user active (idle ${idle}s < ${CODEXC_DAILY_IDLE}min), skipping"
+            notify "You seem to be at the computer, skipping this run"
+            return 0
+        fi
+        log "user away (idle ${idle}s >= ${CODEXC_DAILY_IDLE}min), proceeding"
+    fi
+    cwd="$(latest_cwd)"
+    if [ -z "$cwd" ]; then
+        log "no previous codex session found, skipping"
+        notify "No previous codex session found, skipping"
+        return 0
+    fi
+    if [ ! -d "$cwd" ]; then
+        log "last working dir no longer exists: $cwd, skipping"
+        notify "Previous working dir no longer exists, skipping"
+        return 0
+    fi
+    name="$(resolve_session_name "$cwd")"
+
+    if tmux has-session -t "$name" 2>/dev/null; then
+        # session alive: wait for the running turn to finish (up to 60s) before typing
+        pane="$(tmux display-message -p -t "$name" '#{pane_id}')"
+        log "session '$name' alive (cwd $cwd) -> will send '$CODEXC_MESSAGE'"
+        for _ in $(seq 1 30); do
+            tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt" || break
+            sleep 2
+        done
+        if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
+            log "turn still active after waiting, not sending"
+            notify "Turn still active, not sending"
+            return 0
+        fi
+        send_text "$pane" "$CODEXC_MESSAGE"
+        log "sent '$CODEXC_MESSAGE' -> $name/$pane"
+        notify "Resumed last task (session ${name})"
+        return 0
+    fi
+
+    # cold start: open a tmux session in the original dir, resume + fire via codexc
+    if bin="$(command -v codexc)"; then
+        cmd="$(printf '%q' "$bin") resume --last $(printf '%q' "$CODEXC_MESSAGE")"
+    else
+        cmd="codex resume --last $(printf '%q' "$CODEXC_MESSAGE")"
+        log "codexc launcher not found, falling back to plain codex"
+    fi
+    tmux new-session -d -s "$name" -c "$cwd" "$cmd"
+    log "cold start: created session '$name' (cwd $cwd): $cmd"
+    notify "Restored last session and resumed (session ${name})"
+}
+
+plist_time() {
+    local h m
+    h="$(plutil -extract StartCalendarInterval.Hour raw "$PLIST" 2>/dev/null)"
+    m="$(plutil -extract StartCalendarInterval.Minute raw "$PLIST" 2>/dev/null)"
+    printf '%02d:%02d' "${h:-?}" "${m:-?}"
+}
+
+install_schedule() {
+    local spec="${1:-10:00}" hour minute uid
+    case "$spec" in
+        *:*) hour="${spec%%:*}"; minute="${spec#*:}" ;;
+        *)   hour="$spec"; minute=0 ;;
+    esac
+    case "$hour$minute" in *[!0-9]*|"")
+        echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2; return 1 ;;
+    esac
+    hour=$((10#$hour)); minute=$((10#$minute))
+    if [ "$hour" -gt 23 ] || [ "$minute" -gt 59 ]; then
+        echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2
+        return 1
+    fi
+
+    uid="$(id -u)"
+    # idempotent: unload any previous registration first
+    launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1
+    [ -f "$PLIST" ] && launchctl unload "$PLIST" >/dev/null 2>&1
+
+    mkdir -p "$(dirname "$PLIST")"
+    cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SELF</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$PATH</string>
+        <key>CODEXC_MESSAGE</key>
+        <string>$CODEXC_MESSAGE</string>
+        <key>CODEXC_DAILY_IDLE</key>
+        <string>$CODEXC_DAILY_IDLE</string>
+        <key>CODEXC_AUTO_YES</key>
+        <string>$CODEXC_AUTO_YES</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$hour</integer>
+        <key>Minute</key>
+        <integer>$minute</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$DAILYLOG</string>
+    <key>StandardErrorPath</key>
+    <string>$DAILYLOG</string>
+</dict>
+</plist>
+EOF
+    plutil -lint "$PLIST" >/dev/null || { echo "codexc-daily: generated plist is invalid" >&2; return 1; }
+
+    if ! launchctl bootstrap "gui/$uid" "$PLIST" 2>/dev/null; then
+        launchctl load "$PLIST" || { echo "codexc-daily: launchctl load failed" >&2; return 1; }
+    fi
+    echo "codexc-daily: scheduled daily resume at $(printf '%02d:%02d' "$hour" "$minute")"
+    echo "  script: $SELF"
+    echo "  log: $DAILYLOG"
+    echo "  remove: codexc-daily uninstall"
+    log "installed launchd schedule at $(printf '%02d:%02d' "$hour" "$minute") (plist: $PLIST)"
+}
+
+uninstall_schedule() {
+    local uid; uid="$(id -u)"
+    launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1
+    [ -f "$PLIST" ] && launchctl unload "$PLIST" >/dev/null 2>&1
+    rm -f "$PLIST"
+    echo "codexc-daily: schedule removed"
+    log "uninstalled launchd schedule"
+}
+
+status() {
+    local uid; uid="$(id -u)"
+    if [ -f "$PLIST" ]; then
+        echo "Registered: daily resume at $(plist_time)"
+    else
+        echo "Not registered (run: codexc-daily install 10:00)"
+    fi
+    if [ -f "$PAUSE_FILE" ]; then
+        echo "State: paused (run 'codexc-daily resume' to re-enable)"
+    else
+        echo "State: normal"
+    fi
+    echo "Idle threshold: ${CODEXC_DAILY_IDLE} min (skips while you are using the computer)"
+    if launchctl print "gui/$uid/$LABEL" >/dev/null 2>&1; then
+        echo "launchd: loaded"
+    else
+        echo "launchd: not loaded"
+    fi
+    echo "---- Recent runs ($DAILYLOG):"
+    tail -n 5 "$DAILYLOG" 2>/dev/null || echo "(no log yet)"
+}
+
+case "${1:-run}" in
+    run)       shift; run_now "$@" ;;
+    install)   shift; install_schedule "${1:-10:00}" ;;
+    uninstall) uninstall_schedule ;;
+    status)    status ;;
+    pause)     pause_cmd ;;
+    resume)    resume_cmd ;;
+    -h|--help|help) awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0" ;;
+    *) echo "codexc-daily: unknown action '$1' (run|install|uninstall|status|pause|resume)" >&2; exit 1 ;;
+esac
