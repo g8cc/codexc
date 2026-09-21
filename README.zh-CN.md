@@ -68,6 +68,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 - 找到最近一次 codex 会话的工作目录（rollout 文件的 `session_meta.cwd`）；
 - 该目录的 tmux 会话还活着 — 等待空闲（回合在跑最多等 60 秒），然后发送 `continue`；
 - 会话已不在 — 在原目录冷启动 `codexc resume --last continue`，看门狗同时武装；
+- **若最近一次回合正常收尾（rollout 里的 `task_complete`）—— 整体跳过并通知**，不给已完成的任务发无意义的 continue；
 - **若最近 30 分钟内你用过电脑（键鼠）— 跳过并通知**（阈值 `CODEXC_DAILY_IDLE`，分钟；`0` 关闭检查）；暂停状态下不执行。
 
 ## 自动 Yes

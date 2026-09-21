@@ -9,7 +9,9 @@
 #      if it is gone (cold start) -> open a tmux session in that directory
 #      running `codexc resume --last continue` (via codexc, so the 429
 #      auto-retry watchdog is armed too)
-#   3. send a system notification; log to ~/.codex/codexc-daily.log
+#   3. skip entirely if the last turn ended cleanly (task_complete in the
+#      rollout) — a finished task gets no pointless "continue"
+#   4. send a system notification; log to ~/.codex/codexc-daily.log
 #
 # Usage:
 #   codexc-daily                 run one "resume last task" cycle now
@@ -65,13 +67,18 @@ idle_seconds() {
 pause_cmd()  { touch "$PAUSE_FILE"; echo "codexc-daily: paused (run 'codexc-daily resume' to re-enable)"; log "paused"; }
 resume_cmd() { rm -f "$PAUSE_FILE"; echo "codexc-daily: resumed"; log "resumed"; }
 
+# Path of the most recent codex session rollout (newest *.jsonl by mtime)
+latest_rollout() {
+    find "$CODEX_HOME_DIR/sessions" -name '*.jsonl' -type f 2>/dev/null \
+        | while IFS= read -r x; do
+            printf '%s %s\n' "$(stat -f '%m' "$x" 2>/dev/null || echo 0)" "$x"
+          done | sort -rn | head -1 | awk '{print $2}'
+}
+
 # Working directory of the most recent codex session (session_meta.cwd of the newest rollout)
 latest_cwd() {
     local f
-    f="$(find "$CODEX_HOME_DIR/sessions" -name '*.jsonl' -type f 2>/dev/null \
-        | while IFS= read -r x; do
-            printf '%s %s\n' "$(stat -f '%m' "$x" 2>/dev/null || echo 0)" "$x"
-          done | sort -rn | head -1 | awk '{print $2}')"
+    f="$(latest_rollout)"
     [ -n "$f" ] || return 0
     python3 - "$f" <<'PYEOF'
 import sys, json
@@ -88,6 +95,42 @@ with open(sys.argv[1]) as fh:
         if cwd:
             print(cwd)
             break
+PYEOF
+}
+
+# How did the newest session's last turn end?
+#   complete -> clean finish (task_complete): the task is done or waiting for
+#              the user — no reason to nudge it with a pointless "continue"
+#   died     -> error / turn_aborted / stream cut mid-turn: rescue candidate
+#   died is also the fallback for missing/unparseable rollouts (rescue bias)
+last_turn_state() {
+    local f
+    f="$(latest_rollout)"
+    [ -n "$f" ] || { echo died; return 0; }
+    python3 - "$f" <<'PYEOF'
+import sys, json
+BOOKKEEPING = {"token_count", "token_usage_record", "world_state",
+               "turn_context", "thread_settings_applied"}
+tail = []
+with open(sys.argv[1], errors="replace") as fh:
+    for line in fh:
+        line = line.strip()
+        if line:
+            tail.append(line)
+            if len(tail) > 200:
+                tail.pop(0)
+state = "unknown"
+for line in reversed(tail):
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    t = (d.get("payload") or {}).get("type") or d.get("type") or ""
+    if t in BOOKKEEPING:
+        continue
+    state = t
+    break
+print("complete" if state == "task_complete" else "died")
 PYEOF
 }
 
@@ -166,6 +209,11 @@ run_now() {
             notify "Turn still active, not sending"
             return 0
         fi
+        if [ "$(last_turn_state)" = "complete" ]; then
+            log "session '$name' alive but last turn completed cleanly, nothing to rescue"
+            notify "Last task already completed, skipping"
+            return 0
+        fi
         send_text "$pane" "$CODEXC_MESSAGE"
         log "sent '$CODEXC_MESSAGE' -> $name/$pane"
         notify "Resumed last task (session ${name})"
@@ -173,6 +221,11 @@ run_now() {
     fi
 
     # cold start: open a tmux session in the original dir, resume + fire via codexc
+    if [ "$(last_turn_state)" = "complete" ]; then
+        log "cold start skipped: last turn completed cleanly"
+        notify "Last task already completed, skipping"
+        return 0
+    fi
     if bin="$(command -v codexc)"; then
         cmd="$(printf '%q' "$bin") resume --last $(printf '%q' "$CODEXC_MESSAGE")"
     else
@@ -283,6 +336,11 @@ status() {
         echo "State: normal"
     fi
     echo "Idle threshold: ${CODEXC_DAILY_IDLE} min (skips while you are using the computer)"
+    if [ "$(last_turn_state)" = "complete" ]; then
+        echo "Last task: completed (daily job has nothing to rescue)"
+    else
+        echo "Last task: interrupted or unknown (daily job will resume it)"
+    fi
     if launchctl print "gui/$uid/$LABEL" >/dev/null 2>&1; then
         echo "launchd: loaded"
     else

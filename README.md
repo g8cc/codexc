@@ -66,6 +66,7 @@ Two safety valves:
 - finds the newest codex session's working directory (`session_meta.cwd` of the newest rollout file);
 - if that directory's tmux session is alive — waits for an idle TUI (up to 60s for a running turn), then sends `continue`;
 - if it's gone — cold-starts `codexc resume --last continue` in the original directory, watchdog armed;
+- **skips entirely if the last turn completed cleanly** (`task_complete` in the rollout) — a finished task never gets a pointless "continue";
 - **skips and notifies if you've used the computer in the last 30 minutes** (`CODEXC_DAILY_IDLE`, minutes; `0` disables), and never runs while paused.
 
 ## Auto-yes
