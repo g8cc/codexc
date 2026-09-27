@@ -10,12 +10,15 @@
 # Invoked by run-shell in ~/.tmux.conf at config load; after changing
 # prefix-table bindings re-run `tmux source-file ~/.tmux.conf` to sync.
 set -u
+set -o pipefail
 
 # 1. copy all prefix-table bindings into the prefix2 table
-tmux list-keys -T prefix 2>/dev/null | while IFS= read -r line; do
-    newline="$(printf '%s' "$line" | sed 's/-T prefix /-T prefix2 /')"
-    eval "tmux $newline" 2>/dev/null
-done
+tmpfile="$(mktemp "${TMPDIR:-/tmp}/codexc-prefix2.XXXXXX")" || exit 1
+trap 'rm -f "$tmpfile"' EXIT
+if ! tmux list-keys -T prefix 2>/dev/null | sed 's/-T prefix /-T prefix2 /' > "$tmpfile"; then
+    exit 1
+fi
+tmux source-file "$tmpfile" 2>/dev/null || exit 1
 
 # 2. fix: C-b C-b sends a real Ctrl+b (plain send-prefix would send Ctrl+a)
 tmux bind-key -T prefix2 C-b send-prefix -2 2>/dev/null

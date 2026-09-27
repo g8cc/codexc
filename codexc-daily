@@ -30,7 +30,7 @@
 #                          into the launchd config at install time)
 #     CODEXC_HOME         codex home (default: ~/.codex)
 #     CODEXC_DAILY_IDLE   "human at the computer" threshold in minutes
-#                         (default 30, 0 disables the check)
+#                         (0-10080; default 30, 0 disables the check)
 
 set -u
 
@@ -39,10 +39,32 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
+CODEXC_EXTRA_RE="${CODEXC_EXTRA_RE:-}"
 CODEXC_DAILY_IDLE="${CODEXC_DAILY_IDLE:-30}"
-case "$CODEXC_DAILY_IDLE" in ''|*[!0-9]*) CODEXC_DAILY_IDLE=30 ;; esac
+normalize_decimal() {
+    local value="$1" leading_zeroes
+    leading_zeroes="${value%%[!0]*}"
+    value="${value#"$leading_zeroes"}"
+    printf '%s' "${value:-0}"
+}
+case "$CODEXC_DAILY_IDLE" in
+    ''|*[!0-9]*) echo "codexc-daily: invalid CODEXC_DAILY_IDLE; using 30 minutes" >&2; CODEXC_DAILY_IDLE=30 ;;
+    *)
+        CODEXC_DAILY_IDLE="$(normalize_decimal "$CODEXC_DAILY_IDLE")"
+        if [ "${#CODEXC_DAILY_IDLE}" -gt 5 ] || [ "$CODEXC_DAILY_IDLE" -gt 10080 ]; then
+            echo "codexc-daily: CODEXC_DAILY_IDLE must be between 0 and 10080; using 30 minutes" >&2
+            CODEXC_DAILY_IDLE=30
+        else
+            CODEXC_DAILY_IDLE="$((10#$CODEXC_DAILY_IDLE))"
+        fi
+        ;;
+esac
 CODEXC_AUTO_YES="${CODEXC_AUTO_YES:-1}"
-case "$CODEXC_AUTO_YES" in 0|off|no|false) CODEXC_AUTO_YES=0 ;; esac
+case "$CODEXC_AUTO_YES" in
+    0|off|no|false) CODEXC_AUTO_YES=0 ;;
+    1|2) ;;
+    *) echo "codexc-daily: invalid CODEXC_AUTO_YES; disabling auto-yes" >&2; CODEXC_AUTO_YES=0 ;;
+esac
 PAUSE_FILE="$CODEX_HOME_DIR/codexc-daily.pause"
 DAILYLOG="$CODEX_HOME_DIR/codexc-daily.log"
 WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
@@ -50,7 +72,11 @@ LABEL="com.codexc.daily"
 PLIST="${CODEXC_DAILY_PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
-log() { echo "$(date '+%F %T') daily: $*" >> "$DAILYLOG"; }
+log() {
+    (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$DAILYLOG") 2>/dev/null || return 1
+    chmod 600 "$DAILYLOG" || return 1
+    echo "$(date '+%F %T') daily: $*" >> "$DAILYLOG"
+}
 
 notify() {
     command -v osascript >/dev/null && \
@@ -61,28 +87,57 @@ notify() {
 idle_seconds() {
     local ns
     ns="$(ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print $NF; exit}')"
-    echo $(( ${ns:-0} / 1000000000 ))
+    case "$ns" in ''|*[!0-9]*) echo 0; return ;; esac
+    ns="$(normalize_decimal "$ns")"
+    if [ "${#ns}" -gt 18 ]; then
+        echo 604801
+        return
+    fi
+    echo $((10#$ns / 1000000000))
 }
 
-pause_cmd()  { touch "$PAUSE_FILE"; echo "codexc-daily: paused (run 'codexc-daily resume' to re-enable)"; log "paused"; }
+pause_cmd()  { (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$PAUSE_FILE") || return 1; echo "codexc-daily: paused (run 'codexc-daily resume' to re-enable)"; log "paused"; }
 resume_cmd() { rm -f "$PAUSE_FILE"; echo "codexc-daily: resumed"; log "resumed"; }
 
 # Path of the most recent codex session rollout (newest *.jsonl by mtime)
 latest_rollout() {
-    find "$CODEX_HOME_DIR/sessions" -name '*.jsonl' -type f 2>/dev/null \
-        | while IFS= read -r x; do
-            printf '%s %s\n' "$(stat -f '%m' "$x" 2>/dev/null || echo 0)" "$x"
-          done | sort -rn | head -1 | awk '{print $2}'
+    python3 - "$CODEX_HOME_DIR/sessions" <<'PYEOF'
+import base64, os, stat, sys
+
+root = sys.argv[1]
+newest = None
+newest_mtime = -1
+for current, dirs, files in os.walk(root, onerror=lambda _error: None):
+    for name in files:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(current, name)
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        mtime = info.st_mtime_ns
+        if mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+if newest is not None:
+    print(base64.b64encode(os.fsencode(newest)).decode("ascii"))
+PYEOF
 }
 
 # Working directory of the most recent codex session (session_meta.cwd of the newest rollout)
 latest_cwd() {
-    local f
-    f="$(latest_rollout)"
-    [ -n "$f" ] || return 0
-    python3 - "$f" <<'PYEOF'
-import sys, json
-with open(sys.argv[1]) as fh:
+    local encoded
+    if [ "$#" -gt 0 ]; then encoded="$1"; else encoded="$(latest_rollout)"; fi
+    [ -n "$encoded" ] || return 0
+    python3 - "$encoded" <<'PYEOF'
+import base64, json, os, sys
+try:
+    fh = open(os.fsdecode(base64.b64decode(sys.argv[1])), "rb")
+except OSError:
+    raise SystemExit(0)
+with fh:
     for line in fh:
         line = line.strip()
         if not line:
@@ -91,9 +146,9 @@ with open(sys.argv[1]) as fh:
             payload = json.loads(line).get("payload") or {}
         except Exception:
             continue
-        cwd = payload.get("cwd")
-        if cwd:
-            print(cwd)
+        cwd = payload.get("cwd") if isinstance(payload, dict) else None
+        if isinstance(cwd, str) and cwd:
+            sys.stdout.write(cwd + ".")
             break
 PYEOF
 }
@@ -104,28 +159,40 @@ PYEOF
 #   died     -> error / turn_aborted / stream cut mid-turn: rescue candidate
 #   died is also the fallback for missing/unparseable rollouts (rescue bias)
 last_turn_state() {
-    local f
-    f="$(latest_rollout)"
-    [ -n "$f" ] || { echo died; return 0; }
-    python3 - "$f" <<'PYEOF'
-import sys, json
+    local encoded
+    if [ "$#" -gt 0 ]; then encoded="$1"; else encoded="$(latest_rollout)"; fi
+    [ -n "$encoded" ] || { echo died; return 0; }
+    python3 - "$encoded" <<'PYEOF'
+import base64, json, os, sys
 BOOKKEEPING = {"token_count", "token_usage_record", "world_state",
                "turn_context", "thread_settings_applied"}
-tail = []
-with open(sys.argv[1], errors="replace") as fh:
-    for line in fh:
-        line = line.strip()
-        if line:
-            tail.append(line)
-            if len(tail) > 200:
-                tail.pop(0)
+try:
+    fh = open(os.fsdecode(base64.b64decode(sys.argv[1])), "rb")
+except OSError:
+    print("died")
+    raise SystemExit
+with fh:
+    position = fh.seek(0, os.SEEK_END)
+    chunks = []
+    newline_count = 0
+    while position > 0 and newline_count < 201:
+        size = min(65536, position)
+        position -= size
+        fh.seek(position)
+        chunk = fh.read(size)
+        chunks.append(chunk)
+        newline_count += chunk.count(b"\n")
+tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()[-200:]
 state = "unknown"
 for line in reversed(tail):
     try:
         d = json.loads(line)
     except Exception:
         continue
-    t = (d.get("payload") or {}).get("type") or d.get("type") or ""
+    payload = d.get("payload") if isinstance(d, dict) else None
+    t = (payload.get("type") if isinstance(payload, dict) else None) or (d.get("type") if isinstance(d, dict) else None) or ""
+    if not isinstance(t, str):
+        continue
     if t in BOOKKEEPING:
         continue
     state = t
@@ -136,38 +203,55 @@ PYEOF
 
 sanitize_name() { printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-'; }
 
-# Same session-name collision walk as codexc: prepend parent dir names while the name is taken
+# Same session-name collision walk as codexc: prepend parent dir names while the name is taken.
+# Ownership is compared on PHYSICAL paths so symlinked routes to the same
+# directory (e.g. ~/Documents/ai -> .../AIworkspace) count as the same owner.
 resolve_session_name() {
-    local dir="$1" name cand p spath
-    cand="$(basename "$dir")"
-    p="$dir"
+    local dir="$1" name cand p spath spath_phys base suffix dir_phys
+    dir_phys="$(cd "$dir" 2>/dev/null && pwd -P)" || dir_phys="$dir"
+    cand="$(basename "$dir_phys")"
+    p="$dir_phys"
     while :; do
         name="$(sanitize_name "$cand")"
-        if ! tmux has-session -t "$name" 2>/dev/null; then
+        if ! tmux has-session -t "=$name" 2>/dev/null; then
             echo "$name"; return 0
         fi
         spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
-        if [ "$spath" = "$dir" ]; then
+        spath_phys="$(cd "$spath" 2>/dev/null && pwd -P)"
+        if [ "$spath_phys" = "$dir_phys" ]; then
             echo "$name"; return 0
         fi
+        if [ "$p" = "/" ]; then
+            base="$name"
+            suffix=2
+            while :; do
+                name="$(sanitize_name "$base-$suffix")"
+                if ! tmux has-session -t "=$name" 2>/dev/null; then
+                    echo "$name"; return 0
+                fi
+                spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
+                spath_phys="$(cd "$spath" 2>/dev/null && pwd -P)"
+                if [ "$spath_phys" = "$dir_phys" ]; then
+                    echo "$name"; return 0
+                fi
+                suffix=$((suffix + 1))
+            done
+        fi
         p="$(dirname "$p")"
-        [ "$p" = "/" ] && p="$dir"
-        [ "$p" = "$dir" ] && { echo "$name"; return 0; }
         cand="$(basename "$p")-$cand"
     done
 }
 
 send_text() {  # $1=pane $2=text — two-stage send; a single burst makes the TUI drop Enter
-    tmux send-keys -t "$1" -l "$2"
+    tmux send-keys -t "$1" -l "$2" || return 1
     sleep 0.4
     tmux send-keys -t "$1" Enter
 }
 
 run_now() {
     command -v tmux  >/dev/null || { echo "codexc-daily: tmux is required" >&2; exit 1; }
-    command -v codex >/dev/null || { echo "codexc-daily: codex CLI is required" >&2; exit 1; }
-
-    local cwd name pane cmd
+    command -v python3 >/dev/null || { echo "codexc-daily: python3 is required" >&2; exit 1; }
+    local cwd name pane cmd rollout session_path
     if [ -f "$PAUSE_FILE" ]; then
         log "paused, skipping"
         notify "codexc-daily is paused, skipping"
@@ -183,7 +267,9 @@ run_now() {
         fi
         log "user away (idle ${idle}s >= ${CODEXC_DAILY_IDLE}min), proceeding"
     fi
-    cwd="$(latest_cwd)"
+    rollout="$(latest_rollout)"
+    cwd="$(latest_cwd "$rollout")"
+    cwd="${cwd%.}"
     if [ -z "$cwd" ]; then
         log "no previous codex session found, skipping"
         notify "No previous codex session found, skipping"
@@ -196,8 +282,14 @@ run_now() {
     fi
     name="$(resolve_session_name "$cwd")"
 
-    if tmux has-session -t "$name" 2>/dev/null; then
+    if tmux has-session -t "=$name" 2>/dev/null; then
         # session alive: wait for the running turn to finish (up to 60s) before typing
+        session_path="$(tmux display-message -p -t "$name" '#{session_path}' 2>/dev/null)"
+        if [ "$(cd "$session_path" 2>/dev/null && pwd -P)" != "$(cd "$cwd" 2>/dev/null && pwd -P)" ]; then
+            log "session name '$name' changed ownership before send (expected $cwd, found $session_path), skipping"
+            notify "Session changed before resume; skipping"
+            return 1
+        fi
         pane="$(tmux display-message -p -t "$name" '#{pane_id}')"
         log "session '$name' alive (cwd $cwd) -> will send '$CODEXC_MESSAGE'"
         for _ in $(seq 1 30); do
@@ -209,30 +301,50 @@ run_now() {
             notify "Turn still active, not sending"
             return 0
         fi
-        if [ "$(last_turn_state)" = "complete" ]; then
+        if [ "$(last_turn_state "$rollout")" = "complete" ]; then
             log "session '$name' alive but last turn completed cleanly, nothing to rescue"
             notify "Last task already completed, skipping"
             return 0
         fi
-        send_text "$pane" "$CODEXC_MESSAGE"
+        if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+            log "pane disappeared before scheduled send"
+            return 0
+        fi
+        if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
+            log "turn became active before scheduled send, not sending"
+            notify "Turn became active, not sending"
+            return 0
+        fi
+        if ! send_text "$pane" "$CODEXC_MESSAGE"; then
+            log "failed to send prompt to '$name/$pane'"
+            notify "Could not send resume prompt"
+            return 1
+        fi
         log "sent '$CODEXC_MESSAGE' -> $name/$pane"
         notify "Resumed last task (session ${name})"
         return 0
     fi
 
     # cold start: open a tmux session in the original dir, resume + fire via codexc
-    if [ "$(last_turn_state)" = "complete" ]; then
+    if [ "$(last_turn_state "$rollout")" = "complete" ]; then
         log "cold start skipped: last turn completed cleanly"
         notify "Last task already completed, skipping"
         return 0
     fi
+    command -v codex >/dev/null || { echo "codexc-daily: codex CLI is required" >&2; return 1; }
+    local run_env
+    run_env="env PATH=$(printf '%q' "$PATH") CODEX_HOME=$(printf '%q' "$CODEX_HOME_DIR") CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") CODEXC_EXTRA_RE=$(printf '%q' "$CODEXC_EXTRA_RE")"
     if bin="$(command -v codexc)"; then
-        cmd="$(printf '%q' "$bin") resume --last $(printf '%q' "$CODEXC_MESSAGE")"
+        cmd="$run_env $(printf '%q' "$bin") resume --last $(printf '%q' "$CODEXC_MESSAGE")"
     else
-        cmd="codex resume --last $(printf '%q' "$CODEXC_MESSAGE")"
+        cmd="$run_env codex resume --last $(printf '%q' "$CODEXC_MESSAGE")"
         log "codexc launcher not found, falling back to plain codex"
     fi
-    tmux new-session -d -s "$name" -c "$cwd" "$cmd"
+    tmux new-session -d -s "$name" -c "$cwd" "$cmd" || {
+        log "cold start failed to create session '$name' (cwd $cwd)"
+        notify "Could not restore the previous session"
+        return 1
+    }
     log "cold start: created session '$name' (cwd $cwd): $cmd"
     notify "Restored last session and resumed (session ${name})"
 }
@@ -241,7 +353,11 @@ plist_time() {
     local h m
     h="$(plutil -extract StartCalendarInterval.Hour raw "$PLIST" 2>/dev/null)"
     m="$(plutil -extract StartCalendarInterval.Minute raw "$PLIST" 2>/dev/null)"
-    printf '%02d:%02d' "${h:-?}" "${m:-?}"
+    case "$h:$m" in *[!0-9:]*|:|*:|:*) printf 'unknown'; return ;; esac
+    if [ "${#h}" -gt 2 ] || [ "${#m}" -gt 2 ]; then printf 'unknown'; return; fi
+    h=$((10#$h)); m=$((10#$m))
+    if [ "$h" -gt 23 ] || [ "$m" -gt 59 ]; then printf 'unknown'; return; fi
+    printf '%02d:%02d' "$h" "$m"
 }
 
 install_schedule() {
@@ -250,59 +366,70 @@ install_schedule() {
         *:*) hour="${spec%%:*}"; minute="${spec#*:}" ;;
         *)   hour="$spec"; minute=0 ;;
     esac
+    if [ -z "$hour" ] || [ -z "$minute" ]; then
+        echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2
+        return 1
+    fi
     case "$hour$minute" in *[!0-9]*|"")
         echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2; return 1 ;;
     esac
+    hour="$(normalize_decimal "$hour")"
+    minute="$(normalize_decimal "$minute")"
+    if [ "${#hour}" -gt 2 ] || [ "${#minute}" -gt 2 ]; then
+        echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2
+        return 1
+    fi
     hour=$((10#$hour)); minute=$((10#$minute))
     if [ "$hour" -gt 23 ] || [ "$minute" -gt 59 ]; then
         echo "codexc-daily: bad time '$spec' (use HH:MM, e.g. 10:00)" >&2
         return 1
     fi
 
+    command -v python3 >/dev/null || { echo "codexc-daily: python3 is required" >&2; return 1; }
+    (umask 077; mkdir -p "$(dirname "$PLIST")" "$CODEX_HOME_DIR") || return 1
+    if ! python3 - "$PLIST" "$SELF" "$PATH" "$CODEX_HOME_DIR" "$CODEXC_MESSAGE" "$CODEXC_EXTRA_RE" "$CODEXC_DAILY_IDLE" "$CODEXC_AUTO_YES" "$DAILYLOG" "$LABEL" "$hour" "$minute" <<'PYEOF'
+import os, plistlib, sys, tempfile
+
+dest, script, path, codex_home, message, extra_re, idle, auto_yes, log, label, hour, minute = sys.argv[1:]
+data = {
+    "Label": label,
+    "ProgramArguments": [script, "run"],
+    "EnvironmentVariables": {
+        "PATH": path,
+        "CODEX_HOME": codex_home,
+        "CODEXC_MESSAGE": message,
+        "CODEXC_EXTRA_RE": extra_re,
+        "CODEXC_DAILY_IDLE": idle,
+        "CODEXC_AUTO_YES": auto_yes,
+    },
+    "StartCalendarInterval": {"Hour": int(hour), "Minute": int(minute)},
+    "StandardOutPath": log,
+    "StandardErrorPath": log,
+}
+directory = os.path.dirname(dest)
+fd, temporary = tempfile.mkstemp(prefix=".codexc-daily.", dir=directory)
+try:
+    with os.fdopen(fd, "wb") as stream:
+        plistlib.dump(data, stream, fmt=plistlib.FMT_XML, sort_keys=False)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, dest)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
+    raise
+PYEOF
+    then
+        echo "codexc-daily: failed to generate launchd plist" >&2
+        return 1
+    fi
+    plutil -lint "$PLIST" >/dev/null || { echo "codexc-daily: generated plist is invalid" >&2; return 1; }
+
     uid="$(id -u)"
-    # idempotent: unload any previous registration first
+    # idempotent: unload any previous registration after writing a valid replacement
     launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1
     [ -f "$PLIST" ] && launchctl unload "$PLIST" >/dev/null 2>&1
-
-    mkdir -p "$(dirname "$PLIST")"
-    cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$SELF</string>
-        <string>run</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>$PATH</string>
-        <key>CODEXC_MESSAGE</key>
-        <string>$CODEXC_MESSAGE</string>
-        <key>CODEXC_DAILY_IDLE</key>
-        <string>$CODEXC_DAILY_IDLE</string>
-        <key>CODEXC_AUTO_YES</key>
-        <string>$CODEXC_AUTO_YES</string>
-    </dict>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>$hour</integer>
-        <key>Minute</key>
-        <integer>$minute</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>$DAILYLOG</string>
-    <key>StandardErrorPath</key>
-    <string>$DAILYLOG</string>
-</dict>
-</plist>
-EOF
-    plutil -lint "$PLIST" >/dev/null || { echo "codexc-daily: generated plist is invalid" >&2; return 1; }
 
     if ! launchctl bootstrap "gui/$uid" "$PLIST" 2>/dev/null; then
         launchctl load "$PLIST" || { echo "codexc-daily: launchctl load failed" >&2; return 1; }

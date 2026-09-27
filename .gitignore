@@ -3,3 +3,8 @@
 nohup.out
 *.bak.*
 __pycache__/
+
+# runtime databases
+data/*.db
+data/*.db-shm
+data/*.db-wal

@@ -50,7 +50,7 @@ One tmux session per working directory, named after the directory (`codexc` base
 
 ## Auto-continue watchdog
 
-A watcher tails the pane for transient-failure text (case-insensitive), waits ~45s, then sends `continue` + Enter. Built-in patterns cover 429 rate limits, "server error", "stream error", overloaded, connection reset, fetch failed, timeouts, and similar. After **3 consecutive auto-continues** it stops and notifies, assuming something is genuinely broken.
+A watcher polls Codex's `logs_*.sqlite` store for transient turn failures (case-insensitive), enforces the configured minimum interval between sends (10 seconds by default), waits briefly for the TUI to settle, then sends `continue` + Enter. Built-in patterns cover 429 rate limits, "server error", "stream error", overloaded, connection reset, fetch failed, timeouts, and similar. After **30 auto-continues by default** it stops and notifies; set `CODEXC_MAX_CONTINUES` to change the limit (`0` disables retries).
 
 Two safety valves:
 
@@ -100,11 +100,11 @@ The config also makes tmux distinguish `Shift+Enter` from `Enter` (newline vs se
 | `CODEXC_AT` | schedule spec, same as `-t` | — |
 | `CODEXC_EXTRA_RE` | extra auto-continue regex (OR-ed with built-ins) | — |
 | `CODEXC_AUTO_YES` | `1` full auto / `2` sandboxed / `0` off | `1` |
-| `CODEXC_DAILY_IDLE` | daily-job idle threshold in minutes, `0` disables | `30` |
+| `CODEXC_DAILY_IDLE` | daily-job idle threshold in minutes, `0` disables (range `0`–`10080`) | `30` |
 
 ## How it works
 
-- `codexc` starts tmux (or attaches), injects codex flags + a self-healing retry config, and spawns a background watcher that tails the pane buffer for failure text.
+- `codexc` starts tmux (or attaches), injects codex flags + a self-healing retry config, and spawns a background watcher that polls Codex's SQLite error log; it inspects the pane to avoid typing during an active turn.
 - `codexc-daily` finds sessions by parsing the JSONL rollout files under `$CODEX_HOME/sessions/`; scheduling is delegated to launchd (`com.codexc.daily`).
 - The bundled `tmux.conf` links `sync-prefix2.sh`, which mirrors the `prefix` key table into tmux's otherwise-empty `prefix2` table so both prefixes behave identically.
 

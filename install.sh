@@ -13,11 +13,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CODEX_BIN_DIR="$HOME/.codex/bin"
 
 link() {  # link <src> <dest>
-    local src="$1" dest="$2"
+    local src="$1" dest="$2" stamp backup suffix
     mkdir -p "$(dirname "$dest")"
     if [ -f "$dest" ] && [ ! -L "$dest" ]; then
-        cp "$dest" "$dest.bak.$(date +%Y%m%d_%H%M%S)"
-        echo "  backed up existing: $dest.bak.*"
+        stamp="$(date +%Y%m%d_%H%M%S)"
+        backup="$dest.bak.$stamp"
+        suffix=1
+        while [ -e "$backup" ]; do
+            backup="$dest.bak.$stamp.$suffix"
+            suffix=$((suffix + 1))
+        done
+        cp -p "$dest" "$backup"
+        echo "  backed up existing: $backup"
     fi
     ln -sf "$src" "$dest"
     echo "  $dest -> $src"

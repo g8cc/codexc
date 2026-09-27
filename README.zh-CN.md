@@ -52,7 +52,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 
 ## 自动 continue 规则
 
-看门狗监控 pane 内容（大小写不敏感），命中瞬时错误后等约 45 秒再发送 `continue` + Enter。内置模式覆盖 429 限流、"server error"、"stream error"、overloaded、connection reset、fetch failed、超时等。**连续自动 continue 3 次**后暂停并通知（避免死循环刷错误）。
+看门狗轮询 Codex 的 `logs_*.sqlite` 错误记录（大小写不敏感），对连续发送执行冷却间隔（默认 10 秒），并短暂等待 TUI 稳定后发送 `continue` + Enter。内置模式覆盖 429 限流、"server error"、"stream error"、overloaded、connection reset、fetch failed、超时等。**默认累计自动 continue 30 次**后暂停并通知；可用 `CODEXC_MAX_CONTINUES` 调整上限（`0` 禁用自动重试）。
 
 两道保险：
 
@@ -102,11 +102,11 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `CODEXC_AT` | 定时规格（同 `-t`） | — |
 | `CODEXC_EXTRA_RE` | 追加的自动 continue 正则（与内置取 OR） | — |
 | `CODEXC_AUTO_YES` | `1` 全自动 / `2` 保留沙箱 / `0` 关闭 | `1` |
-| `CODEXC_DAILY_IDLE` | 每日任务空闲阈值（分钟），`0` 关闭 | `30` |
+| `CODEXC_DAILY_IDLE` | 每日任务空闲阈值（分钟），`0` 关闭（范围 `0`–`10080`） | `30` |
 
 ## 工作原理
 
-- `codexc` 创建/接入 tmux，注入 codex 参数与自愈重试配置，并启动后台看门狗监控 pane 缓冲区的错误文本。
+- `codexc` 创建/接入 tmux，注入 codex 参数与自愈重试配置，并启动后台看门狗轮询 Codex SQLite 错误日志；同时检查 pane，避免在回合运行时输入。
 - `codexc-daily` 解析 `$CODEX_HOME/sessions/` 下的 JSONL rollout 文件定位最近会话；调度委托给 launchd（`com.codexc.daily`）。
 - 随附 `tmux.conf` 通过 `sync-prefix2.sh` 把 `prefix` 键表镜像到 tmux 默认为空的 `prefix2` 表，两个前缀行为完全一致。
 
