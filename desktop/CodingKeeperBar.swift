@@ -219,17 +219,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return kill(pid, 0) == 0
     }
 
-    // 工具身份色点 (小横幅的"logo"; 真品牌图标可后续以资源图替换)
-    func toolDot(_ tool: String) -> String {
-        switch tool {
-        case "codex":    return "🟢"
-        case "claude":   return "🟠"
-        case "pi":       return "🔵"
-        case "opencode": return "🟣"
-        case "zcode":    return "🔴"
-        case "dsh":      return "⚫️"
-        default:         return "⚪️"
+    // 工具 logo: 优先 ~/.codingkeeper/assets/<tool>.png (真品牌图放这里即生效),
+    // 缺省绘制品牌色圆角章 + 白色首字母 (codex 绿=C, claude 橙=A, pi 蓝=π …)
+    func toolChip(_ tool: String) -> NSAttributedString {
+        let size = NSSize(width: 14, height: 14)
+        var image: NSImage?
+        let assetPath = NSHomeDirectory() + "/.codingkeeper/assets/\(tool).png"
+        if FileManager.default.fileExists(atPath: assetPath),
+           let img = NSImage(contentsOfFile: assetPath) {
+            image = img
+        } else {
+            let (color, glyph): (NSColor, String) = {
+                switch tool {
+                case "codex":    return (NSColor(srgbRed: 0x10/255.0, green: 0xA3/255.0, blue: 0x7F/255.0, alpha: 1), "C")
+                case "claude":   return (NSColor(srgbRed: 0xD9/255.0, green: 0x77/255.0, blue: 0x57/255.0, alpha: 1), "A")
+                case "pi":       return (NSColor.systemBlue, "π")
+                case "opencode": return (NSColor.systemIndigo, "O")
+                case "zcode":    return (NSColor.systemPurple, "Z")
+                case "dsh":      return (NSColor.systemGray, "D")
+                default:         return (NSColor.systemTeal, "?")
+                }
+            }()
+            image = NSImage(size: size, flipped: false) { _ in
+                let p = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 3.5, yRadius: 3.5)
+                color.setFill()
+                p.fill()
+                let para = NSMutableParagraphStyle()
+                para.alignment = .center
+                (glyph as NSString).draw(in: NSRect(x: 0, y: 1, width: size.width, height: size.height - 2),
+                                         withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .bold),
+                                                          .foregroundColor: NSColor.white,
+                                                          .paragraphStyle: para])
+                return true
+            }
         }
+        let att = NSTextAttachment()
+        att.image = image
+        att.bounds = NSRect(x: 0, y: -2, width: size.width, height: size.height)
+        return NSAttributedString(attachment: att)
     }
 
     // 回合时长: started_at 未知显示 "—"
@@ -292,18 +319,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDoneKeys = nowDoneKeys
         didBaseline = true
 
-        // 小横幅: 按客户端分段 — 身份色点 + 名称 + 运行数 + 待处理数
+        // 小横幅: 按客户端分段 — logo 章 + 名称 + 运行数 + 待处理数 (富文本)
         var counts: [String: (run: Int, pend: Int)] = [:]
         for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
         for a in attention { counts[a.tool, default: (0, 0)].pend += 1 }
-        let countText = counts.sorted { $0.key < $1.key }
-            .map { key, v -> String in
-                var s = "\(toolDot(key))\(key)"
-                if v.run > 0 { s += " \(v.run)" }
-                if v.pend > 0 { s += " ⚠️\(v.pend)" }
-                return s
+        let countAttr: NSAttributedString = {
+            let m = NSMutableAttributedString()
+            let segs = counts.sorted { $0.key < $1.key }
+            for (i, (key, v)) in segs.enumerated() {
+                if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
+                m.append(toolChip(key))
+                m.append(NSAttributedString(string: " \(key) \(v.run)",
+                                            attributes: [.foregroundColor: NSColor.white]))
+                if v.pend > 0 {
+                    m.append(NSAttributedString(string: " ⚠️\(v.pend)",
+                                                attributes: [.foregroundColor: NSColor.white]))
+                }
             }
-            .joined(separator: " · ")
+            return m
+        }()
         let lastDone = doneItems.max { $0.ts < $1.ts }
 
         // 展开面板: 任务表格 (行数决定高度, 封顶半屏, 超出滚动)
@@ -349,14 +383,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.bannerText.isHidden = false
                 if counts.isEmpty {
                     if let last = lastDone {
-                        self.bannerText.stringValue = "⚙︎ 空闲 · 上次完成 \(self.completionTime(last.ts))"
+                        self.bannerText.attributedStringValue = NSAttributedString(
+                            string: "⚙︎ 空闲 · 上次完成 \(self.completionTime(last.ts))",
+                            attributes: [.foregroundColor: NSColor.secondaryLabelColor])
                     } else {
-                        self.bannerText.stringValue = "⚙︎ 空闲"
+                        self.bannerText.attributedStringValue = NSAttributedString(
+                            string: "⚙︎ 空闲",
+                            attributes: [.foregroundColor: NSColor.secondaryLabelColor])
                     }
-                    self.bannerText.textColor = .secondaryLabelColor
                 } else {
-                    self.bannerText.stringValue = countText
-                    self.bannerText.textColor = .white
+                    self.bannerText.attributedStringValue = countAttr
                 }
             }
 
