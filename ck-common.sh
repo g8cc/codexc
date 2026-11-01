@@ -26,7 +26,13 @@ normalize_uint() {
     case "$value" in
         ''|*[!0-9]*) echo "$CK_LANE: invalid $name '$value'; using $fallback" >&2; printf '%s' "$fallback"; return ;;
     esac
-    number=$((10#$value))
+    # 64 位算术上限防护: 超长数字会被 bash 静默回绕成看似合法的正数
+    value="${value#"${value%%[!0]*}"}"
+    if [ "${#value}" -gt 18 ]; then
+        echo "$CK_LANE: $name must be between $minimum and $maximum; using $fallback" >&2
+        printf '%s' "$fallback"; return
+    fi
+    number=$((10#${value:-0}))
     if [ "$number" -lt "$minimum" ] || [ "$number" -gt "$maximum" ]; then
         echo "$CK_LANE: $name must be between $minimum and $maximum; using $fallback" >&2
         number=$fallback
@@ -236,13 +242,18 @@ snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
         "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
         "ts": int(__import__("time").time())}
-with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+# 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
+tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")
+with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(snap, fh, ensure_ascii=False)
+os.replace(tmp, os.path.join(pdir, "status.json"))
 PYEOF
     return 0
 }
 
 register_project() {
+    # /tmp 下的测试世界不注册 — 集成测试会污染真实注册表 (悬浮条/ck status)
+    case "$PWD" in /tmp/*|/private/tmp/*|"$TMPDIR"*) return 0 ;; esac
     mkdir -p "$HOME/.codingkeeper" 2>/dev/null
     local reg="$HOME/.codingkeeper/projects"
     grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s\n' "$PWD" >> "$reg"

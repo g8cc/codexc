@@ -46,7 +46,12 @@ node_pid=$!
 wait "$node_pid"; rc=$?
 raw="$(cat "$turn_out" 2>/dev/null)"
 rm -f "$turn_out"
-[ "$rc" = "0" ] || { echo "zcode turn failed (rc=$rc): $(tail -c 200 /dev/null 2>/dev/null)"; exit 1; }
+# 失败时把实际输出尾带回给 runner (stdout 落到 runner 的 outfile, 重试耗尽
+# park 时作为 tail 展示; stderr 会被 headless_turn 丢弃)
+if [ "$rc" != "0" ]; then
+    echo "zcode turn failed (rc=$rc): $(printf '%s' "$raw" | tail -c 200 | tr '\n' ' ')"
+    exit 1
+fi
 
 python3 - "$raw" "$ZCODE_SESSION_FILE" <<'PYEOF'
 import json, os, sys
@@ -54,16 +59,25 @@ raw, sess_file = sys.argv[1], sys.argv[2]
 try:
     d = json.loads(raw)
 except Exception:
-    # NDJSON fallback: scan lines for the one carrying sessionId/response
+    # NDJSON fallback: 最终响应在流末尾 — 倒序找第一条带非空 response 的行,
+    # 找不到再退回任何带 sessionId 的行 (供会话接力, 下一轮重试)
     d = {}
-    for line in raw.splitlines():
+    fallback = {}
+    for line in reversed(raw.splitlines()):
         try:
             cand = json.loads(line)
         except Exception:
             continue
-        if isinstance(cand, dict) and ("response" in cand or "sessionId" in cand):
+        if not isinstance(cand, dict):
+            continue
+        r = cand.get("response")
+        if not d and isinstance(r, str) and r.strip():
             d = cand
-            break
+            continue
+        if not fallback and "sessionId" in cand:
+            fallback = cand
+    if not d:
+        d = fallback
 if not isinstance(d, dict):
     raise SystemExit(1)
 resp = d.get("response")

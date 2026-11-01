@@ -155,17 +155,14 @@ run_runner() {
     log "headless runner armed (timeout=${CODEXC_HEADLESS_TIMEOUT}s retries=$CODEXC_TURN_RETRIES gate_retries=$CODEXC_GATE_RETRIES review_pass=$CODEXC_REVIEW_PASS burn=$([ -n "$IDLE_PROMPT" ] && echo on || echo off) dry=$CODEXC_LOOP_DRY)"
 
     # mode is "idle" (pick work / burn) or "halt" (parked). Every park path
-    # touches .codingkeeper/loop.halt, so the while condition is the single
-    # exit gate; "resumed from halt" covers the rm-halt-while-alive recovery.
+    # touches .codingkeeper/loop.halt and continues, so the while condition
+    # is the single exit gate: the runner always EXITS on park — resuming
+    # means re-running `codexc-headless run`.
     local mode="idle" idle_count=0 task_kind="" task="" task_b64=""
     local gate_rounds=0 review_rounds=0 zero_streak=0 fail_streak=0 empty_logged=0
     local head_at_feed="" line dirty head_now prompt marker rc bugs marked
 
     while [ ! -e ".codingkeeper/loop.halt" ]; do
-        if [ "$mode" = "halt" ]; then
-            log "resumed from halt"
-            mode="idle"; idle_count=0
-        fi
         # ---- pick the next turn: queue task first, else burn (or wait) ----
         line="$(queue_next ".codingkeeper/queue.md")"
         if [ -z "$line" ]; then
@@ -517,14 +514,16 @@ _status_row() {  # $1=project dir
     # status.json current task
     task_short=""
     if [ -f "$kd/status.json" ]; then
-        task_short="$(python3 -c "
-import json,sys
+        task_short="$(python3 - "$kd/status.json" <<'PYEOF'
+import json, sys
 try:
-    d=json.load(open('$kd/status.json'))
-    t=d.get('task','').replace(chr(10),' ').replace(chr(13),'')
-    print(t[:36]+'…' if len(t)>36 else t)
-except: pass
-" 2>/dev/null)"
+    d = json.load(open(sys.argv[1]))
+    t = str(d.get("task", "")).replace("\n", " ").replace("\r", "")
+    print(t[:36] + "…" if len(t) > 36 else t)
+except Exception:
+    pass
+PYEOF
+)"
     fi
     task_short="${task_short//$'\n'/ }"; task_short="${task_short//$'\r'/ }"
     last="${last//$'\n'/ }"

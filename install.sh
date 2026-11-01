@@ -41,7 +41,6 @@ link "$HERE/codexc-zcode-worker" "$CODEX_BIN_DIR/codexc-zcode-worker"
 link "$HERE/codexc-dsh-worker" "$CODEX_BIN_DIR/codexc-dsh-worker"
 link "$HERE/codexc-daily" "$CODEX_BIN_DIR/codexc-daily"
 link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"
-link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"
 
 echo
 echo "==== desktop menubar (可选, 需 swiftc) ===="

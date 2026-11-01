@@ -39,7 +39,9 @@ case "${1:-help}" in
         shift; exec "$REPO/codexc" fuel "$@" ;;
     init)
         TOOL="${2:-codex}"
-        exec "$REPO/codexc-headless" init ;;
+        # 委托给 codexc-loop init: 会探测测试命令生成 gate.sh, 且按 tool 选
+        # AGENTS.md/CLAUDE.md 约定 (codexc-headless init 只是占位脚手架)
+        exec env CODEXC_TOOL="$TOOL" "$REPO/codexc-loop" init ;;
     --help|-h|help)
         sed -n '3,16p' "$0" | sed 's/^# \?//'
         ;;

@@ -48,7 +48,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `codexc fuel [codex\|claude]` | boiler fuel gauge: current provider, cc-switch failover queue, today/month spend, recent relay errors |
 | `codexc -T claude` | drive **Claude Code** (loop, gate, reviews all work the same) |
 | `codexc -T opencode` | drive **opencode** (same pipeline; sessions read from opencode.db) |
-| `zcodec` | drive **ZCode's CLI** on the headless lane: one blocking turn per task via `zcode --prompt --mode yolo`, session continuity persisted to `.codingkeeper/zcode-session-id`. Requires `zcodec init` + gate.sh; needs Node >= 24 and the app's `zcode.cjs` (auto-detected) |
+| `ck zcode run` | drive **ZCode's CLI** on the headless lane: one blocking turn per task via `zcode --prompt --mode yolo`, session continuity persisted to `.codingkeeper/zcode-session-id`. Queue/gate auto-scaffold on first run; needs Node >= 24 and the app's `zcode.cjs` (auto-detected) |
 | `ck status` | **all-projects overview**: burning/parked/queue/last-acceptance for every registered project |
 | `ck fuel [tool]` | shorthand for `codexc fuel` |
 | `codexc -T pi` | drive **pi** (same pipeline; auto-continue keys off `stopReason: "error"`) |
@@ -98,7 +98,7 @@ codexc-loop init     # explicit scaffold (same thing, for scripted setups)
 - Each finished task is reviewed by a separate read-only `codex exec --ephemeral` reviewer context. `CODEXC_REVIEW_PASS` (default 2) consecutive zero-bug reviews accept the task; any found bug goes back to codex for fixing. Exhausted retries park the loop (touch `.codingkeeper/loop.halt` pauses; `rm` it resumes) and send a notification.
 - `CODEXC_LOOP_DRY=1 codexc loop` — log every action without touching the TUI.
 - **Desktop panel**: the runners publish `status.json` on every state change; the menubar app (`desktop/CodingKeeperBar.swift`, built by install) shows all projects' tasks/park state in one place. **Burn mode (default ON)**: when the queue runs dry, the loop feeds a standing improve-and-harden prompt — proceed with the worker's own stated next step, else a professional closure review (correctness, security, performance, reliability, robustness/edge-cases, maintainability, test coverage, dependency health, observability, docs consistency), fixing findings in small commits. When the worker reports genuinely nothing to do twice in a row, the boiler parks itself and notifies you. `CODEXC_LOOP_IDLE=0` disables; any other value replaces the prompt; `CODEXC_IDLE_PARK` tunes the no-op limit.
-- Tool notes: `codexc-daily` cold-starts codex sessions only. Claude's watcher keys off session JSONL (`isApiErrorMessage`, post-retry-exhaustion); pi's off `stopReason: "error"`; opencode's off errored assistant rows in `opencode.db`. Reviews always run on codex so the grader is a different model than the worker. Tools without a terminal TUI run on the **headless lane** instead: `codexc-headless` runs one blocking subprocess per task with the same queue/gate/review/burn semantics. `zcodec` is the bridge to ZCode's CLI this way; `dsh --profile headless` works the same once its credentials are configured (`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`).
+- Tool notes: `codexc-daily` cold-starts codex sessions only. Claude's watcher keys off session JSONL (`isApiErrorMessage`, post-retry-exhaustion); pi's off `stopReason: "error"`; opencode's off errored assistant rows in `opencode.db`. Reviews always run on codex so the grader is a different model than the worker. Tools without a terminal TUI run on the **headless lane** instead: `codexc-headless` runs one blocking subprocess per task with the same queue/gate/review/burn semantics. `ck zcode run` is the bridge to ZCode's CLI this way; `dsh --profile headless` works the same once its credentials are configured (`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`).
 
 ## Auto-yes
 
@@ -136,7 +136,7 @@ The config also makes tmux distinguish `Shift+Enter` from `Enter` (newline vs se
 ## How it works
 
 - `codexc` starts tmux (or attaches), injects codex flags + a self-healing retry config, and spawns a background watcher that polls Codex's SQLite error log; it inspects the pane to avoid typing during an active turn.
-- `codexc-daily` finds sessions by parsing the JSONL rollout files under `$CODEX_HOME/sessions/`; scheduling is delegated to launchd (`com.codingkeeper.daily`).
+- `codexc-daily` finds sessions by parsing the JSONL rollout files under `$CODEX_HOME/sessions/`; scheduling is delegated to launchd (`com.codexc.daily`).
 - The bundled `tmux.conf` links `sync-prefix2.sh`, which mirrors the `prefix` key table into tmux's otherwise-empty `prefix2` table so both prefixes behave identically.
 
 - [处理逻辑手册](docs/OPERATIONS.md) · [架构与不变量](docs/ARCHITECTURE.md) · [工具矩阵与凭证](docs/TOOLS.md) · [商业化路线](docs/COMMERCIALIZATION.md) · [Changelog](CHANGELOG.md)
@@ -146,7 +146,7 @@ The config also makes tmux distinguish `Shift+Enter` from `Enter` (newline vs se
 ```bash
 codexc-daily uninstall          # remove the launchd job (if installed)
 rm ~/.codex/bin/codexc ~/.codex/bin/claudec ~/.codex/bin/opencodec ~/.codex/bin/pic ~/.codex/bin/codexc-headless ~/.codex/bin/codexc-zcode-worker ~/.codex/bin/codexc-dsh-worker ~/.codex/bin/zcodec ~/.codex/bin/dshc ~/.codex/bin/codexc-daily ~/.codex/bin/codexc-loop ~/.codex/bin/sync-prefix2.sh
-rm -f ~/Library/LaunchAgents/com.codingkeeper.daily.plist
+rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 ```
 
 `install.sh` never overwrites without backing up (`*.bak.<timestamp>` next to the replaced file).

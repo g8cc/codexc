@@ -502,83 +502,6 @@ run_scheduler() {
 # ---- watcher: runs as a background child inside the codex pane -------------
 # $1 = pid to follow (this shell, which blocks on the codex child process)
 
-# find the rollout file of the ACTIVE session: walk the codex process tree
-# (node -> native binary), collect open session files, keep the newest —
-# /resume or forks switch files, and the active one is written most recently
-find_active_rollout() {
-    local all p f m files newest="" newest_m=0
-    all="$follow_pid"
-    for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
-    for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
-    for p in $all; do
-        files="$(lsof -Fn -p "$p" 2>/dev/null | sed -n 's/^n//p')"
-        while IFS= read -r f; do
-            case "$f" in
-                "$CODEX_HOME_DIR"/sessions/*) ;;
-                *) continue ;;
-            esac
-            case "$f" in
-                *.jsonl) ;;
-                *) continue ;;
-            esac
-            m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
-            [ "$m" -gt "$newest_m" ] && { newest_m=$m; newest="$f"; }
-        done <<< "$files"
-    done
-    # fallback while nothing is held open yet (startup race)
-    if [ -z "$newest" ]; then
-        local encoded
-        encoded="$(python3 - "$CODEX_HOME_DIR/sessions" <<'PYEOF'
-import base64, os, stat, sys, time
-
-root = sys.argv[1]
-cutoff = time.time() - 120
-newest = None
-newest_mtime = cutoff
-for current, dirs, files in os.walk(root, onerror=lambda _error: None):
-    for name in files:
-        if not name.endswith(".jsonl"):
-            continue
-        path = os.path.join(current, name)
-        try:
-            info = os.stat(path, follow_symlinks=False)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode) and info.st_mtime > newest_mtime:
-            newest, newest_mtime = path, info.st_mtime
-if newest is not None:
-    print(base64.b64encode(os.fsencode(newest)).decode("ascii"))
-PYEOF
-)"
-        if [ -n "$encoded" ]; then
-            newest="$(python3 - "$encoded" <<'PYEOF'
-import base64, os, sys
-sys.stdout.write(os.fsdecode(base64.b64decode(sys.argv[1])) + ".")
-PYEOF
-)"
-            newest="${newest%.}"
-        fi
-    fi
-    [ -n "$newest" ] && printf '%s.' "$newest"
-}
-
-thread_id_from_rollout() {
-    basename "$1" .jsonl | awk -F- '{print $(NF-4)"-"$(NF-3)"-"$(NF-2)"-"$(NF-1)"-"$NF}'
-}
-
-# re-discover which session is active; logs the switch (e.g. after /resume)
-rediscover_thread() {
-    local rollout new_id
-    rollout="$(find_active_rollout)"
-    [ -z "$rollout" ] && return
-    rollout="${rollout%.}"
-    new_id="$(thread_id_from_rollout "$rollout")"
-    if [ "$new_id" != "$thread_id" ]; then
-        echo "$(date '+%F %T') active thread: ${thread_id:-<none>} -> $new_id" >> "$WATCHLOG"
-        thread_id="$new_id"
-    fi
-}
-
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
@@ -837,14 +760,22 @@ snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
         "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
         "ts": int(time.time())}
-with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+# 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
+tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")
+with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(snap, fh, ensure_ascii=False)
+os.replace(tmp, os.path.join(pdir, "status.json"))
 PYEOF3
     return 0
 }
 
 spawn_watcher() {  # $1=follow_pid $2=pane — 先杀 pidfile 里的旧实例再换上新 watcher
     local fp="$1" pane="$2" old wpid
+    # 交互会话注册进面板 (纯手动项目也能被悬浮条/ck status 看到)
+    case "$PWD" in /tmp/*|/private/tmp/*|"$TMPDIR"*) ;; *)
+        mkdir -p "$HOME/.codingkeeper" 2>/dev/null
+        grep -qxF "$PWD" "$HOME/.codingkeeper/projects" 2>/dev/null || printf '%s\n' "$PWD" >> "$HOME/.codingkeeper/projects" ;;
+    esac
     mkdir -p ".codingkeeper" 2>/dev/null
     old="$(cat ".codingkeeper/watcher.pid" 2>/dev/null || true)"
     case "$old" in ''|*[!0-9]*) old="" ;; esac
@@ -977,7 +908,7 @@ while [ $# -gt 0 ]; do
         loop) ACTION="loop"; shift ;;
         --no-loop) CODEXC_LOOP=0; shift ;;
         -T|--tool)
-            [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a tool (codex|claude)" >&2; exit 1; }
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a tool (codex|claude|pi|opencode)" >&2; exit 1; }
             CODEXC_TOOL="$2"; shift 2 ;;
         fuel) ACTION="fuel"; shift ;;
         status) ACTION="status"; shift ;;
@@ -1010,7 +941,7 @@ if [ "$ACTION" = "fuel" ]; then
         echo "codexc fuel: cc-switch 数据库不存在 ($db) — 没有煤仓可显示"
         exit 0
     fi
-    q() { sqlite3 -readonly "$db" "$1" 2>/dev/null; }
+    q() { sqlite3 -readonly -cmd '.timeout 2000' "$db" "$1" 2>/dev/null; }
     echo "== 锅炉燃料表 $FUEL_TOOL $(date '+%F %T') =="
     cur="$(q "SELECT name FROM providers WHERE app_type='$FUEL_TOOL' AND is_current=1 LIMIT 1")"
     echo "当前煤: ${cur:-<无>}"
@@ -1233,3 +1164,4 @@ if ! tmux new-session -d -s "$CODEXC_SESSION" "$inner"; then
 fi
 tmux set-option -t "=$CODEXC_SESSION" remain-on-exit off >/dev/null 2>&1
 exec tmux attach -t "=$CODEXC_SESSION"
+

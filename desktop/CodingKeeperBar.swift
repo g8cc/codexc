@@ -28,7 +28,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var flashBody: NSTextField!
     var detailScroll: NSScrollView!
     var detailText: NSTextView!
-    var timer: Timer?
     var collapseTimer: Timer?
     var userExpanded = false
     var flashUntil = Date.distantPast
@@ -52,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        let screen = NSScreen.screens[0]
+        guard let screen = NSScreen.screens.first else { return }   // 无屏环境(如 SSH 启动)直接退出, 防越界崩溃
         let bx = (screen.frame.width - barW) / 2
 
         panel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hIdle,
@@ -173,11 +172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 悬停检测: 全局监听鼠标移动 (只读坐标, 不拦截事件 — 菜单栏照常可点)。
         // 光标进入横幅所在的菜单栏条带 → 弹出; 离开 → 收回细线
         hoverMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
-            guard let self = self else { return }
+            guard let self = self, let s0 = NSScreen.screens.first else { return }
             let p = NSEvent.mouseLocation
-            let bx = (NSScreen.screens[0].frame.width - self.barW) / 2
+            let bx = (s0.frame.width - self.barW) / 2
             let inStrip = p.x >= bx - 40 && p.x <= bx + self.barW + 40
-                          && p.y >= NSScreen.screens[0].frame.maxY - 24
+                          && p.y >= s0.frame.maxY - 24
             if inStrip != self.hoverActive {
                 self.hoverActive = inStrip
                 DispatchQueue.main.async { self.refresh() }
@@ -196,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reg = NSHomeDirectory() + "/.codingkeeper/projects"
         guard let s = try? String(contentsOfFile: reg, encoding: .utf8) else { return [] }
         return s.split(separator: "\n").map(String.init).filter {
-            FileManager.default.fileExists(atPath: $0)
+            FileManager.default.fileExists(atPath: $0) && !$0.hasPrefix("/tmp/")
         }
     }
 
@@ -412,7 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let detailHeight: CGFloat = cardCount == 0 ? 30 : CGFloat(cardCount) * 38 + 14
 
         DispatchQueue.main.async {
-            let screen = NSScreen.screens[0]
+            guard let screen = NSScreen.screens.first else { return }
             let bx = (screen.frame.width - self.barW) / 2
             let now = Date()
             let flashing = now < self.flashUntil
@@ -526,7 +525,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var flashCandidateTitle: String?
     var flashCandidateBody: String?
-    var detailLines: [String] = []
 }
 
 let app = NSApplication.shared

@@ -558,6 +558,9 @@ run_driver() {  # $1=pane
     # otherwise a previous task's stale completion could be accepted when a
     # fed turn dies without emitting its own terminal event
     local feed_size=0
+    # turn_status 结果缓存: rollout 只追加不改写, (路径,大小) 相同则状态必然
+    # 相同 — 跳过整文件重扫 (长会话 rollout 可达数十 MB, 此前每个轮询全量读)
+    local sts_path="" sts_size=-1 sts_val=""
     local gate_out review_out rc bugs cur_size
 
     migrate_state_dir
@@ -671,7 +674,8 @@ run_driver() {  # $1=pane
                 last_path=""; last_size=0
             fi
             feed_size=$(terminal_count "$rollout")
-            ready_n=$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || echo 0)
+            ready_n="$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || true)"
+            ready_n="${ready_n:-0}"   # grep -c 无匹配时打 0 但退出 1, 不能再 || echo 0 (会变成两行)
             banner_set "📋 $task ｜ 队列剩余 ${ready_n} │ 执行中"
             log "task fed: $task"
             continue
@@ -701,8 +705,13 @@ run_driver() {  # $1=pane
             activity=0
         fi
         last_path="$rollout"; last_size="$cur_size"
-        : > "$msgfile"
-        status="$(turn_status "$rollout" "$msgfile")"
+        if [ "$rollout" = "$sts_path" ] && [ "$cur_size" = "$sts_size" ] && [ -n "$sts_val" ]; then
+            status="$sts_val"   # 文件未增长 → 状态不变, 复用上次解析 (msgfile 内容亦未变)
+        else
+            : > "$msgfile"
+            status="$(turn_status "$rollout" "$msgfile")"
+            sts_path="$rollout"; sts_size="$cur_size"; sts_val="$status"
+        fi
         case "$status" in
             none)
                 log "turn outcome not visible yet; waiting"

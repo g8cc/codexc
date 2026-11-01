@@ -50,7 +50,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc fuel [codex\|claude]` | 锅炉燃料表：当前 provider、换煤队列、今日/本月消耗、中转错误 |
 | `codexc -T claude` | 驱动 **Claude Code**（循环/门禁/审查完全一致） |
 | `codexc -T opencode` | 驱动 **opencode**（同一管线；会话从 opencode.db 读取） |
-| `zcodec` | 在 headless 通道驱动 **ZCode 的 CLI**：每任务一次阻塞回合（`zcode --prompt --mode yolo`），会话接力持久化到 `.codingkeeper/zcode-session-id`。需 `zcodec init` + gate.sh；需 Node >= 24 与桌面应用自带的 `zcode.cjs`（自动探测） |
+| `ck zcode run` | 在 headless 通道驱动 **ZCode 的 CLI**：每任务一次阻塞回合（`zcode --prompt --mode yolo`），会话接力持久化到 `.codingkeeper/zcode-session-id`。队列/门禁首次运行自动生成；需 Node >= 24 与桌面应用自带的 `zcode.cjs`（自动探测） |
 | `ck status` | **跨项目总览**：所有已登记项目的燃烧/挂起/队列/最近验收 |
 | `ck fuel [tool]` | `codexc fuel` 的简写 |
 | `codexc -T pi` | 驱动 **pi**（同一管线；429 续命基于 `stopReason: "error"`） |
@@ -100,7 +100,7 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 - 每个完成的任务由独立的只读 `codex exec --ephemeral` 审查上下文。连续 `CODEXC_REVIEW_PASS`（默认 2）次零 bug 才算通过；发现 bug 就回灌修复。重试耗尽会挂起循环（`touch .codingkeeper/loop.halt` 暂停，`rm` 恢复）并发通知。
 - `CODEXC_LOOP_DRY=1 codexc loop` — 只记录动作、不触碰 TUI 的安全试跑。
 - **桌面面板**：两个 runner 每次状态变化即发布 `status.json`；菜单栏应用（`desktop/CodingKeeperBar.swift`，install 自动编译）一屏显示所有项目的任务与挂起状态。**burn 模式（默认开启）**：队列烧干后，循环自动投喂持续改进指令——先按 worker 自己说的下一步做，否则做一轮专业收尾审查（正确性、安全、性能、可靠、鲁棒/边界、可维护、测试完整性、依赖健康、可观测、文档一致性），发现问题小步提交修复。worker 连续两轮报告无事可做，锅炉自动熄火并通知你。`CODEXC_LOOP_IDLE=0` 关闭；其他值替换内置指令；`CODEXC_IDLE_PARK` 调整空转上限。
-- 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查始终用 codex，保证评分者与实现者不是同一个模型。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`zcodec` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
+- 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查始终用 codex，保证评分者与实现者不是同一个模型。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`ck zcode run` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
 
 ## 自动 Yes
 
@@ -138,7 +138,7 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 ## 工作原理
 
 - `codexc` 创建/接入 tmux，注入 codex 参数与自愈重试配置，并启动后台看门狗轮询 Codex SQLite 错误日志；同时检查 pane，避免在回合运行时输入。
-- `codexc-daily` 解析 `$CODEX_HOME/sessions/` 下的 JSONL rollout 文件定位最近会话；调度委托给 launchd（`com.codingkeeper.daily`）。
+- `codexc-daily` 解析 `$CODEX_HOME/sessions/` 下的 JSONL rollout 文件定位最近会话；调度委托给 launchd（`com.codexc.daily`）。
 - 随附 `tmux.conf` 通过 `sync-prefix2.sh` 把 `prefix` 键表镜像到 tmux 默认为空的 `prefix2` 表，两个前缀行为完全一致。
 
 - [处理逻辑手册](docs/OPERATIONS.md) · [架构与不变量](docs/ARCHITECTURE.md) · [工具矩阵与凭证](docs/TOOLS.md) · [商业化路线](docs/COMMERCIALIZATION.md) · [Changelog](CHANGELOG.md)
@@ -148,7 +148,7 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 ```bash
 codexc-daily uninstall          # 移除 launchd 任务（如已安装）
 rm ~/.codex/bin/codexc ~/.codex/bin/claudec ~/.codex/bin/opencodec ~/.codex/bin/pic ~/.codex/bin/codexc-headless ~/.codex/bin/codexc-zcode-worker ~/.codex/bin/codexc-dsh-worker ~/.codex/bin/zcodec ~/.codex/bin/dshc ~/.codex/bin/codexc-daily ~/.codex/bin/codexc-loop ~/.codex/bin/sync-prefix2.sh
-rm -f ~/Library/LaunchAgents/com.codingkeeper.daily.plist
+rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 ```
 
 `install.sh` 覆盖任何文件前都会备份（同名 `*.bak.<时间戳>`）。
