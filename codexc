@@ -665,7 +665,7 @@ PYEOF4
     turn_start="$(printf '%s' "$infer" | cut -f1)"
     last_prompt="$(printf '%s' "$infer" | cut -f2)"
     case "$turn_start" in ''|0) turn_start="" ;; esac
-    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
+    [ -n "$turn_start" ] && write_status "▶️ $last_prompt" 1 "$turn_start"
 
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
@@ -748,15 +748,15 @@ PYEOF6
             case "$api_code" in
                 start)
                     turn_start="$(date +%s)"
-                    write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
+                    write_status "▶️ $last_prompt" 1 "$turn_start"
                     continue ;;
                 prompt)
                     [ -n "$api_text" ] && last_prompt="$api_text"
-                    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
+                    [ -n "$turn_start" ] && write_status "▶️ $last_prompt" 1 "$turn_start"
                     continue ;;
                 done)
                     turn_start_prev="$turn_start"; turn_start=""
-                    write_status "✅ 完成: ${api_text:0:80}" 0 "${turn_start_prev:-0}"
+                    write_status "✅ 完成: $api_text" 0 "${turn_start_prev:-0}"
                     [ "$CODEXC_NOTIFY" = "1" ] && [ -n "$turn_start_prev" ] || continue
                     now="$(date +%s)"; dur=$((now - turn_start_prev))
                     [ "$dur" -ge "$CODEXC_NOTIFY_SECS" ] || continue
@@ -780,7 +780,7 @@ PYEOF6
                 unrescuable=1
             fi
             if [ "$unrescuable" = "1" ]; then
-                write_status "⛔ codex 停了: ${api_text:0:60}" 0 "${turn_start:-0}"
+                write_status "⛔ codex 停了: $api_text" 0 "${turn_start:-0}"
                 if [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
                     notify "⛔ codex 停了: ${api_text:0:60}"
                     echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
@@ -826,6 +826,11 @@ write_status() {  # $1=任务文本 $2=active(1/0) $3=started_at epoch(0=未知)
     python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" "${3:-0}" <<'PYEOF3'
 import json, os, sys, time
 pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
+# 口喷长文只留标识头: 32 字符 + … (bash 3.2 的 ${v:0:N} 按字节切会碎多字节,
+# 截断必须在 python 按字符做)
+task = " ".join(str(task).split())
+if len(task) > 32:
+    task = task[:30].rstrip() + "…"
 tool, active, started_at = sys.argv[3], sys.argv[4] == "1", int(sys.argv[5] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 snap = {"project": project, "task": task, "phase": task, "parked": parked,

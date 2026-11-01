@@ -227,6 +227,9 @@ status_write() {  # $1=状态文本 $2=工具名 $3=active(1/0) $4=started_at ep
     python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" <<'PYEOF'
 import json, os, sys
 pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
+task = " ".join(str(task).split())
+if len(task) > 32:
+    task = task[:30].rstrip() + "…"
 tool, active, started_at = sys.argv[4], sys.argv[5] == "1", int(sys.argv[6] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
