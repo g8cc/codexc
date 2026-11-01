@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var notifyBody: NSTextField!
     var notifyTimer: Timer?
     var lastNotifyKey = ""
+    var spinnerIdx = 0
+    var spinnerTimer: Timer?
+    var lastCountsModel: [(tool: String, run: Int, pend: Int)] = []
+    var spinnerFrames: [NSImage] = []
+    var pauseIcon: NSImage?
 
     let hIdle: CGFloat = 3        // 空闲: 细线
     let hSmall: CGFloat = 22      // 小横幅: 状态计数
@@ -255,6 +260,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return f.string(from: Date(timeIntervalSince1970: ts))
     }
 
+    // 转圈图标: 8 帧弧线 (缺口旋转), 每帧惰性渲染一次
+    func spinnerFrame(_ i: Int) -> NSImage {
+        let size = NSSize(width: 12, height: 12)
+        return NSImage(size: size, flipped: false) { _ in
+            let a = CGFloat(i) / 8 * 360
+            let p = NSBezierPath()
+            p.appendArc(withCenter: NSPoint(x: 6, y: 6), radius: 4.5,
+                        startAngle: a, endAngle: a + 300)
+            p.lineWidth = 2
+            NSColor.systemGreen.setStroke()
+            p.stroke()
+            return true
+        }
+    }
+    func spinnerAttach() -> NSAttributedString {
+        if spinnerFrames.isEmpty {
+            spinnerFrames = (0..<8).map { spinnerFrame($0) }
+        }
+        let att = NSTextAttachment()
+        att.image = spinnerFrames[spinnerIdx % spinnerFrames.count]
+        att.bounds = NSRect(x: 0, y: -1, width: 12, height: 12)
+        return NSAttributedString(attachment: att)
+    }
+    func pauseAttach() -> NSAttributedString {
+        if pauseIcon == nil {
+            let size = NSSize(width: 12, height: 12)
+            pauseIcon = NSImage(size: size, flipped: false) { _ in
+                let p = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 3, yRadius: 3)
+                NSColor.systemOrange.setFill()
+                p.fill()
+                NSColor.white.setFill()
+                NSRect(x: 3.5, y: 3, width: 1.8, height: 6).fill()
+                NSRect(x: 6.7, y: 3, width: 1.8, height: 6).fill()
+                return true
+            }
+        }
+        let att = NSTextAttachment()
+        att.image = pauseIcon
+        att.bounds = NSRect(x: 0, y: -1, width: 12, height: 12)
+        return NSAttributedString(attachment: att)
+    }
+
+    // 计数横幅重建: [logo]tool [⟳N] [⏸N] — 转圈在数字前面
+    func rebuildCountsBanner() {
+        var m = NSMutableAttributedString()
+        for (i, c) in lastCountsModel.enumerated() {
+            if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
+            m.append(toolChip(c.tool))
+            m.append(NSAttributedString(string: " \(c.tool)", attributes: [.foregroundColor: NSColor.white]))
+            if c.run > 0 {
+                m.append(spinnerAttach())
+                m.append(NSAttributedString(string: " \(c.run)", attributes: [.foregroundColor: NSColor.white]))
+            }
+            if c.pend > 0 {
+                m.append(pauseAttach())
+                m.append(NSAttributedString(string: " \(c.pend)", attributes: [.foregroundColor: NSColor.white]))
+            }
+        }
+        bannerText.attributedStringValue = m
+    }
+    func spinnerTick() {
+        guard !bannerText.isHidden && !lastCountsModel.isEmpty else { return }
+        spinnerIdx = (spinnerIdx + 1) % 8
+        rebuildCountsBanner()
+    }
+
     // 工具 logo: 优先 ~/.codingkeeper/assets/<tool>.png (真品牌图放这里即生效),
     // 缺省绘制品牌色圆角章 + 白色首字母
     func toolChip(_ tool: String) -> NSAttributedString {
@@ -338,25 +409,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDoneKeys = nowDoneKeys
         didBaseline = true
 
-        // 小横幅: 按客户端分段 — logo 章 + 名称 + 运行数 + 待处理数 (富文本)
+        // 小横幅: 按客户端分段 — logo 章 + 名称 + 转圈运行数 + 暂停待处理数
         var counts: [String: (run: Int, pend: Int)] = [:]
         for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
         for a in attention { counts[a.tool, default: (0, 0)].pend += 1 }
-        let countAttr: NSAttributedString = {
-            let m = NSMutableAttributedString()
-            let segs = counts.sorted { $0.key < $1.key }
-            for (i, (key, v)) in segs.enumerated() {
-                if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
-                m.append(toolChip(key))
-                m.append(NSAttributedString(string: " \(key) \(v.run)",
-                                            attributes: [.foregroundColor: NSColor.white]))
-                if v.pend > 0 {
-                    m.append(NSAttributedString(string: " ⚠️\(v.pend)",
-                                                attributes: [.foregroundColor: NSColor.white]))
-                }
-            }
-            return m
-        }()
+        lastCountsModel = counts.sorted { $0.key < $1.key }
+            .map { (tool: $0.key, run: $0.value.run, pend: $0.value.pend) }
         let lastDone = doneItems.max { $0.ts < $1.ts }
 
         // 展开面板: 任务卡片 (状态色点 + 加粗工具名 + 灰色项目/时长 + 任务文本)
@@ -426,7 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             switch state {
             case "counts":
-                self.bannerText.attributedStringValue = countAttr
+                self.rebuildCountsBanner()
             case "idle":
                 var idle = "⚙︎ 空闲"
                 if let last = lastDone { idle += " · 上次完成 \(self.completionTime(last.ts))" }
@@ -491,6 +549,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else if now >= self.flashUntil && self.collapseTimer != nil {
                 self.collapseTimer?.invalidate()
                 self.collapseTimer = nil
+            }
+
+            // 转圈动画: 计数态且有运行任务时以 0.15s 步进旋转 (待处理只有静态暂停章)
+            let runTotal = self.lastCountsModel.reduce(0) { $0 + $1.run }
+            if state == "counts" && runTotal > 0 {
+                if self.spinnerTimer == nil || self.spinnerTimer?.isValid != true {
+                    self.spinnerTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { _ in
+                        self.spinnerTick()
+                    }
+                }
+            } else if self.spinnerTimer != nil {
+                self.spinnerTimer?.invalidate()
+                self.spinnerTimer = nil
             }
         }
 
