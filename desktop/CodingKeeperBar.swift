@@ -292,6 +292,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return t.count > 32 ? String(t.prefix(30)) + "…" : t
     }
 
+    func fileMtime(_ p: String) -> TimeInterval {
+        guard let attr = try? FileManager.default.attributesOfItem(atPath: p),
+              let m = attr[.modificationDate] as? Date else { return 0 }
+        return m.timeIntervalSince1970
+    }
+
     func queryRows(_ dbPath: String, _ sql: String) -> [[String]] {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
@@ -330,21 +336,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("✅ 完成: \(r[1])"), state: "done", startedAt: startedAt, ts: ts))
             }
         }
-        // zcode: 5 分钟内活跃的会话; 回合是否在跑看 rollout mtime (模型调用中)
-        let rollFresh = { let m = self.newestMtime(NSHomeDirectory() + "/.zcode/cli/rollout", suffix: ".jsonl"); return m > 0 && now - m < 20 }()
+        // zcode: 逐会话判活 — 会话 id 对应 rollout 文件 (model-io-<id>.jsonl),
+        // 该文件 20 秒内被写入 = 回合真正在跑; 全局最新 mtime 会把闲置会话
+        // 一起误标成运行中
         for r in queryRows(NSHomeDirectory() + "/.zcode/cli/db/db.sqlite",
-            "SELECT directory, title, time_created, time_updated FROM session "
-          + "WHERE time_updated > \(Int((now - 300) * 1000)) ORDER BY time_updated DESC LIMIT 3") where r.count >= 4 {
+            "SELECT id, directory, title, time_updated FROM session "
+          + "WHERE time_updated > \(Int((now - 3600) * 1000)) ORDER BY time_updated DESC LIMIT 5") where r.count >= 4 {
+            let rollM = fileMtime(NSHomeDirectory() + "/.zcode/cli/rollout/model-io-\(r[0]).jsonl")
+            guard rollM > 0 && now - rollM < 20 else { continue }   // 回合未在跑 → 不显示
             var tu = Double(r[3]) ?? 0
             if tu > 1e12 { tu /= 1000 }
-            var tc = Double(r[2]) ?? 0
-            if tc > 1e12 { tc /= 1000 }
-            let name = (r[0] as NSString).lastPathComponent
-            if rollFresh {
-                out.append(AppTask(tool: "zcode", name: name, task: trunc32("▶️ \(r[1])"), state: "run", startedAt: tc, ts: tu))
-            } else if now - tu < 120 {
-                out.append(AppTask(tool: "zcode", name: name, task: trunc32("✅ 完成: \(r[1])"), state: "done", startedAt: tc, ts: tu))
-            }
+            let name = (r[1] as NSString).lastPathComponent
+            out.append(AppTask(tool: "zcode", name: name, task: trunc32("▶️ \(r[2])"),
+                               state: "run", startedAt: tu, ts: tu))
         }
         return out
     }
