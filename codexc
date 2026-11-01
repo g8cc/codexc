@@ -58,6 +58,9 @@
 #   CODEXC_MAX_CONTINUES   max auto-continues (0-10000, default: 30, then notification)
 #   CODEXC_POLL            watcher poll interval seconds (1-60, default: 2)
 #   CODEXC_NOTIFY          completion/stop notifications (0/1, default: 1)
+#   CODEXC_NOTIFY_GAP      global min seconds between ANY popups across all
+#                          lanes (shared ~/.codingkeeper/.notify-last; default
+#                          3, 0 = off) — 多工具并行防弹窗风暴的总闸
 #   CODEXC_NOTIFY_SECS     notify on clean turns this long (0-86400, default:
 #                          120 — shorter turns stay silent; 0 = every turn)
 #   CODEXC_AT              scheduled-fire spec (same as -t, e.g. "10:00")
@@ -116,6 +119,23 @@ case "$CODEXC_LOOP" in
     1|on|yes|true) CODEXC_LOOP=1 ;;
     *) echo "codexc: invalid CODEXC_LOOP '$CODEXC_LOOP'; running a bare session (codexc loop to arm)" >&2; CODEXC_LOOP=0 ;;
 esac
+
+notify() {  # $1=text — macOS 通知, 带跨进程全局弹窗间隔闸 (CODEXC_NOTIFY_GAP, 默认3s, 0=关)
+    local text="$1" gap="${CODEXC_NOTIFY_GAP:-3}" last now esc
+    case "$gap" in ''|*[!0-9]*) gap=3 ;; esac
+    if [ "$gap" -gt 0 ]; then
+        last="$(cat "$HOME/.codingkeeper/.notify-last" 2>/dev/null || echo 0)"
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        now="$(date +%s)"
+        [ $((now - last)) -lt "$gap" ] && return 0
+        mkdir -p "$HOME/.codingkeeper" 2>/dev/null
+        printf '%s\n' "$now" > "$HOME/.codingkeeper/.notify-last" 2>/dev/null
+    fi
+    esc="${text//\\/\\\\}"; esc="${esc//\"/\\\"}"
+    command -v osascript >/dev/null && \
+        osascript -e "display notification \"$esc\" with title \"codexc\"" 2>/dev/null
+    return 0
+}
 
 normalize_uint() {
     local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number leading_zeroes
@@ -467,8 +487,7 @@ run_scheduler() {
         break
     done
     echo "$(date '+%F %T') scheduler: firing scheduled prompt: $prompt" >> "$WATCHLOG"
-    command -v osascript >/dev/null && \
-        osascript -e 'display notification "Scheduled prompt fired" with title "codexc"' 2>/dev/null
+    notify "Scheduled prompt fired"
     tmux send-keys -t "$pane" -l "$prompt" || {
         echo "$(date '+%F %T') scheduler: failed to send prompt text" >> "$WATCHLOG"
         return 1
@@ -624,9 +643,7 @@ for line in sys.stdin:
                     now="$(date +%s)"; dur=$((now - turn_start_prev))
                     [ "$dur" -ge "$CODEXC_NOTIFY_SECS" ] || continue
                     human="$((dur / 60))m$((dur % 60))s"
-                    esc="${api_text//\\/\\\\}"; esc="${esc//\"/\\\"}"
-                    command -v osascript >/dev/null && \
-                        osascript -e "display notification \"✅ 任务完成 (${human}): ${esc:0:60}\" with title \"codexc\"" 2>/dev/null
+                    notify "✅ 任务完成 (${human}): ${api_text:0:60}"
                     echo "$(date '+%F %T') notified: task completed (${human}): ${api_text:0:80}" >> "$WATCHLOG"
                     mkdir -p ".codingkeeper" 2>/dev/null
                     python3 - "$PWD" "✅ 完成: ${api_text:0:80}" <<'PYEOF2'
@@ -655,9 +672,7 @@ PYEOF2
                 unrescuable=1
             fi
             if [ "$unrescuable" = "1" ] && [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
-                esc="${api_text//\\/\\\\}"; esc="${esc//\"/\\\"}"
-                command -v osascript >/dev/null && \
-                    osascript -e "display notification \"⛔ codex 停了: ${esc:0:60}\" with title \"codexc\"" 2>/dev/null
+                notify "⛔ codex 停了: ${api_text:0:60}"
                 echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
                 last_err_notify=$now
             fi
@@ -669,8 +684,7 @@ PYEOF2
                 now=$(date +%s)
             done
             if [ "$count" -ge "$CODEXC_MAX_CONTINUES" ]; then
-                command -v osascript >/dev/null && \
-                    osascript -e "display notification \"Auto-continued $count times, pausing auto-retry\" with title \"codexc\"" 2>/dev/null
+                notify "Auto-continued $count times, pausing auto-retry"
                 echo "$(date '+%F %T') reached max continues ($count), stopping" >> "$WATCHLOG"
                 return 0
             fi

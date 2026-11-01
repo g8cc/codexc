@@ -41,6 +41,21 @@ log() {
 
 notify() {
     [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
+    # global popup gap: 多车道并行时防弹窗风暴 — 共享时间戳, 距上一条不足
+    # CODEXC_NOTIFY_GAP 秒(默认3, 0=关)的本条直接丢弃 (通知是糖, 不是投递保证)
+    local gap="${CODEXC_NOTIFY_GAP:-3}" last now
+    case "$gap" in ''|*[!0-9]*) gap=3 ;; esac
+    if [ "$gap" -gt 0 ]; then
+        last="$(cat "$HOME/.codingkeeper/.notify-last" 2>/dev/null || echo 0)"
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        now="$(date +%s)"
+        if [ $((now - last)) -lt "$gap" ]; then
+            echo "$(date '+%F %T') $CK_TAG: notification suppressed (global gap ${gap}s): ${1:0:60}" >> "$WATCHLOG"
+            return 0
+        fi
+        mkdir -p "$HOME/.codingkeeper" 2>/dev/null
+        printf '%s\n' "$now" > "$HOME/.codingkeeper/.notify-last" 2>/dev/null
+    fi
     # task/bug text is LLM-authored: escape it or quotes break (and inject
     # into) the AppleScript
     local esc="${1//\\/\\\\}"; esc="${esc//\"/\\\"}"
