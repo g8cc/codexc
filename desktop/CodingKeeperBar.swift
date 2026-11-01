@@ -1,4 +1,5 @@
 import AppKit
+import SQLite3
 
 // 可聚焦面板
 final class KeyablePanel: NSPanel {
@@ -15,10 +16,13 @@ final class KeeperContentView: NSVisualEffectView {
 }
 
 // CodingKeeperBar — 任务面板 (双屏模式):
-//   小横幅(常驻) → 状态计数: ⚙︎ 空闲 · 上次完成 HH:mm / 🔥 N 跑 · ⚠️ N 待处理
-//   闪现横幅     → 收到新任务蓝闪 4s / 任务完成绿闪 4s, 自动收回小横幅
-//   点击展开     → 任务表格 (状态+工具·项目+时长+任务文本), 高度随行数封顶半屏,
-//                  超出滚动; 点别处 resignKey 收起
+//   空闲   → 3px 绿色细线贴在菜单栏行 (无文字)
+//   悬停   → 光标进入细线条带, 弹出状态计数 (logo+客户端+运行数+待处理数)
+//   闪现   → 新任务蓝闪 4s / 完成绿闪 4s (10s 去重), 自动收回
+//   待处理 → ⛔ 停止 / ⏸ 自动循环暂停: 琥珀计数常驻
+//   点击   → 任务卡片表格, 高度随行数封顶半屏, 超出滚动; 点别处 resignKey 收起
+// 渲染为单一状态机: expanded > flash > (hover∨attention)=counts > idle,
+// 每轮刷新只走一个分支, 子视图 frame 按状态显式设置, 动画仅在高度变化时发生。
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: KeyablePanel!
@@ -28,22 +32,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var flashBody: NSTextField!
     var detailScroll: NSScrollView!
     var detailText: NSTextView!
+    var timer: Timer?
     var collapseTimer: Timer?
     var userExpanded = false
     var flashUntil = Date.distantPast
     var flashIsDone = false
+    var lastFlashAt: [String: TimeInterval] = [:]
     var lastRunningKeys = Set<String>()
     var lastDoneKeys = Set<String>()
     var didBaseline = false
+    var hoverActive = false
+    var hoverMonitor: Any?
     var notifyPanel: NSPanel!
     var notifyTitle: NSTextField!
     var notifyBody: NSTextField!
     var notifyTimer: Timer?
     var lastNotifyKey = ""
-    var hoverActive = false
-    var hoverMonitor: Any?
 
-    let hIdle: CGFloat = 3        // 空闲: 细线 (无文字)
+    let hIdle: CGFloat = 3        // 空闲: 细线
     let hSmall: CGFloat = 20      // 小横幅: 状态计数
     let hFlash: CGFloat = 44      // 闪现横幅
     let barW: CGFloat = 480
@@ -55,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bx = (screen.frame.width - barW) / 2
 
         panel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hIdle,
-                                                 width: barW, height: hSmall),
+                                                 width: barW, height: hIdle),
                              styleMask: [.borderless, .nonactivatingPanel],
                              backing: .buffered, defer: false)
         panel.isOpaque = false
@@ -64,29 +70,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hasShadow = false
 
-        contentView = KeeperContentView(frame: NSRect(x: 0, y: 0, width: barW, height: hSmall))
+        contentView = KeeperContentView(frame: NSRect(x: 0, y: 0, width: barW, height: hIdle))
         contentView.material = .hudWindow
         contentView.state = .active
         contentView.wantsLayer = true
         contentView.layer?.cornerRadius = 0
-        contentView.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.25).cgColor
-        contentView.autoresizingMask = [.width]
+        contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
 
         bannerText = NSTextField(labelWithString: "⚙︎")
         bannerText.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         bannerText.textColor = .secondaryLabelColor
         bannerText.lineBreakMode = .byTruncatingTail
-        bannerText.frame = NSRect(x: 10, y: 3, width: barW - 20, height: hSmall - 6)
-        bannerText.autoresizingMask = [.width]
+        bannerText.frame = NSRect(x: 10, y: 3, width: barW - 20, height: 15)
+        bannerText.isHidden = true
         contentView.addSubview(bannerText)
 
-        // 闪现: 标题行 + 任务文本行
         flashTitle = NSTextField(labelWithString: "")
         flashTitle.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         flashTitle.textColor = NSColor.white
         flashTitle.lineBreakMode = .byTruncatingTail
         flashTitle.frame = NSRect(x: 10, y: hFlash - 20, width: barW - 20, height: 16)
-        flashTitle.autoresizingMask = [.width]
         flashTitle.isHidden = true
         contentView.addSubview(flashTitle)
 
@@ -95,15 +98,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         flashBody.textColor = .secondaryLabelColor
         flashBody.lineBreakMode = .byTruncatingTail
         flashBody.frame = NSRect(x: 10, y: 4, width: barW - 20, height: 15)
-        flashBody.autoresizingMask = [.width]
         flashBody.isHidden = true
         contentView.addSubview(flashBody)
 
-        // 明细: 滚动视图包裹的任务表格
         detailScroll = NSScrollView(frame: NSRect(x: 10, y: 6, width: barW - 20, height: 60))
         detailScroll.hasVerticalScroller = true
         detailScroll.drawsBackground = false
-        detailScroll.autoresizingMask = [.width]
         detailText = NSTextView(frame: NSRect(x: 0, y: 0, width: barW - 20, height: 1))
         detailText.font = NSFont.systemFont(ofSize: 11)
         detailText.textColor = NSColor.white
@@ -116,14 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailScroll.isHidden = true
         contentView.addSubview(detailScroll)
 
-        // 点击内容区域切换展开
         let click = NSClickGestureRecognizer(target: self, action: #selector(toggleExpand))
         contentView.addGestureRecognizer(click)
         contentView.contentRect = NSRect(x: 0, y: 0, width: barW, height: hFlash)
 
         panel.contentView = contentView
 
-        // 失焦收起
         NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification,
                                                object: panel, queue: .main) { [weak self] _ in
             guard let self = self, self.userExpanded else { return }
@@ -131,7 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.refresh()
         }
 
-        // 通知卡片
         let nW: CGFloat = 380, nH: CGFloat = 64
         notifyPanel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hSmall - nH - 4,
                                                        width: nW, height: nH),
@@ -169,8 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in self.refresh() }
 
-        // 悬停检测: 全局监听鼠标移动 (只读坐标, 不拦截事件 — 菜单栏照常可点)。
-        // 光标进入横幅所在的菜单栏条带 → 弹出; 离开 → 收回细线
+        // 悬停检测: 全局监听鼠标移动 (只读坐标, 不拦截事件 — 菜单栏照常可点)
         hoverMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
             guard let self = self, let s0 = NSScreen.screens.first else { return }
             let p = NSEvent.mouseLocation
@@ -205,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var tool = ""
         var active = false
         var parked = false
-        var running = false   // active 且存活 (loop.pid 活着 或 心跳新鲜)
+        var running = false
         var startedAt: TimeInterval = 0
         var ts: TimeInterval = 0
     }
@@ -235,8 +231,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return kill(pid, 0) == 0
     }
 
+    // 任务文本剥掉状态前缀 — 状态由卡片色点表达, 不重复
+    func cleanTask(_ s: String) -> String {
+        for p in ["▶️ ", "✅ 完成: ", "⛔ codex 停了: ", "⛔ 停了: ", "📋 ", "✅ ", "⛔ "] {
+            if s.hasPrefix(p) { return String(s.dropFirst(p.count)) }
+        }
+        return s
+    }
+
+    func duration(_ startedAt: TimeInterval) -> String {
+        guard startedAt > 0 else { return "—" }
+        let d = max(0, Int(Date().timeIntervalSince1970 - startedAt))
+        if d < 60 { return "\(d)s" }
+        if d < 3600 { return "\(d / 60)m" }
+        return "\(d / 3600)h\(String(format: "%02d", d % 3600 / 60))m"
+    }
+
+    func completionTime(_ ts: TimeInterval) -> String {
+        guard ts > 0 else { return "—" }
+        let d = Date().timeIntervalSince1970 - ts
+        if d < 60 { return "刚刚" }
+        let f = DateFormatter()
+        f.dateFormat = d < 86400 ? "HH:mm" : "MM-dd HH:mm"
+        return f.string(from: Date(timeIntervalSince1970: ts))
+    }
+
+    // 应用级任务发现: 不经 CodingKeeper 车道的应用, 直读其会话数据源
+    // workbuddy = ~/.workbuddy/workbuddy.db (sessions 表: cwd/title/status)
+    // zcode     = ~/.zcode/cli/db/db.sqlite (session 表: directory/title) +
+    //             rollout mtime 判活 (模型调用进行中 = 回合未结束)
+    struct AppTask {
+        var tool: String; var name: String; var task: String
+        var state: String            // run / done / stop
+        var startedAt: TimeInterval; var ts: TimeInterval
+    }
+
+    func trunc32(_ s: String) -> String {
+        let t = s.replacingOccurrences(of: "\n", with: " ")
+        return t.count > 32 ? String(t.prefix(30)) + "…" : t
+    }
+
+    func queryRows(_ dbPath: String, _ sql: String) -> [[String]] {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [[String]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            var row: [String] = []
+            for i in 0..<sqlite3_column_count(stmt) {
+                if let c = sqlite3_column_text(stmt, i) { row.append(String(cString: c)) }
+                else { row.append("") }
+            }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    func fileMtime(_ p: String) -> TimeInterval {
+        guard let attr = try? FileManager.default.attributesOfItem(atPath: p),
+              let m = attr[.modificationDate] as? Date else { return 0 }
+        return m.timeIntervalSince1970
+    }
+
+    func appTasks() -> [AppTask] {
+        var out: [AppTask] = []
+        let now = Date().timeIntervalSince1970
+        // workbuddy: pending=执行中, terminated=终止(需处理), completed 1h 内=已完成
+        for r in queryRows(NSHomeDirectory() + "/.workbuddy/workbuddy.db",
+            "SELECT cwd, COALESCE(custom_title,title,''), status, created_at, updated_at FROM sessions "
+          + "WHERE deleted_at IS NULL AND updated_at > \(Int((now - 86400) * 1000)) "
+          + "ORDER BY updated_at DESC LIMIT 8") where r.count >= 5 {
+            let name = (r[0] as NSString).lastPathComponent
+            let startedAt = (Double(r[3]) ?? 0) / 1000
+            let ts = (Double(r[4]) ?? 0) / 1000
+            if r[2] == "pending" {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("▶️ \(r[1])"), state: "run", startedAt: startedAt, ts: ts))
+            } else if r[2] == "terminated" {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("⛔ 停了: \(r[1])"), state: "stop", startedAt: startedAt, ts: ts))
+            } else if r[2] == "completed" && now - ts < 3600 {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("✅ 完成: \(r[1])"), state: "done", startedAt: startedAt, ts: ts))
+            }
+        }
+        // zcode: 逐会话判活 — 会话 id 对应 rollout 文件 (model-io-<id>.jsonl),
+        // 该文件 20 秒内被写入 = 回合真正在跑; 全局最新 mtime 会误标闲置会话
+        for r in queryRows(NSHomeDirectory() + "/.zcode/cli/db/db.sqlite",
+            "SELECT id, directory, title, time_updated FROM session "
+          + "WHERE time_updated > \(Int((now - 3600) * 1000)) ORDER BY time_updated DESC LIMIT 5") where r.count >= 4 {
+            let rollM = fileMtime(NSHomeDirectory() + "/.zcode/cli/rollout/model-io-\(r[0]).jsonl")
+            guard rollM > 0 && now - rollM < 20 else { continue }
+            var tu = Double(r[3]) ?? 0
+            if tu > 1e12 { tu /= 1000 }
+            let name = (r[1] as NSString).lastPathComponent
+            out.append(AppTask(tool: "zcode", name: name, task: trunc32("▶️ \(r[2])"),
+                               state: "run", startedAt: tu, ts: tu))
+        }
+        return out
+    }
+
     // 工具 logo: 优先 ~/.codingkeeper/assets/<tool>.png (真品牌图放这里即生效),
-    // 缺省绘制品牌色圆角章 + 白色首字母 (codex 绿=C, claude 橙=A, pi 蓝=π …)
+    // 缺省绘制品牌色圆角章 + 白色首字母
     func toolChip(_ tool: String) -> NSAttributedString {
         let size = NSSize(width: 14, height: 14)
         var image: NSImage?
@@ -275,37 +371,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSAttributedString(attachment: att)
     }
 
-    // 任务文本剥掉状态前缀 (▶️/✅/⛔/📋) — 状态由卡片色点表达, 不重复
-    func cleanTask(_ s: String) -> String {
-        for p in ["▶️ ", "✅ 完成: ", "⛔ codex 停了: ", "⛔ 停了: ", "📋 ", "✅ ", "⛔ "] {
-            if s.hasPrefix(p) { return String(s.dropFirst(p.count)) }
-        }
-        return s
-    }
-
-    // 回合时长: started_at 未知显示 "—"
-    func duration(_ startedAt: TimeInterval) -> String {
-        guard startedAt > 0 else { return "—" }
-        let d = max(0, Int(Date().timeIntervalSince1970 - startedAt))
-        if d < 60 { return "\(d)s" }
-        if d < 3600 { return "\(d / 60)m" }
-        return "\(d / 3600)h\(String(format: "%02d", d % 3600 / 60))m"
-    }
-
-    // 完成时刻: 1 分钟内 "刚刚", 当天 HH:mm, 更早 MM-dd HH:mm
-    func completionTime(_ ts: TimeInterval) -> String {
-        guard ts > 0 else { return "—" }
-        let d = Date().timeIntervalSince1970 - ts
-        if d < 60 { return "刚刚" }
-        let f = DateFormatter()
-        f.dateFormat = d < 86400 ? "HH:mm" : "MM-dd HH:mm"
-        return f.string(from: Date(timeIntervalSince1970: ts))
-    }
-
     func refresh() {
         let projects = registry()
         var running: [ProjStatus] = []
-        var attention: [(name: String, tool: String, reason: String)] = []   // 需要人类协助/决策 (常驻)
+        var attention: [(name: String, tool: String, reason: String)] = []
         var doneItems: [(name: String, tool: String, task: String, ts: TimeInterval)] = []
         var events: [(String, String)] = []
         var flashCandidate: (kind: String, title: String, body: String)?
@@ -315,12 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for proj in projects {
             let st = readStatus(proj)
             if st.parked {
-                // parked 是监督器状态 (自动循环停机待复燃), 不是任务状态
                 events.append(("⏸ \(st.name) 自动循环已暂停", "加任务到 queue.md 或 rm loop.halt 复燃"))
                 attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
                                   reason: "自动循环已暂停 (rm loop.halt 复燃)"))
             } else if st.task.hasPrefix("⛔") {
-                // ⛔ 是心跳撑着的活状态: 会话退出后 status 过期, 警示随之消失
                 let fresh = Date().timeIntervalSince1970 - st.ts < freshWindow
                 if fresh {
                     attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
@@ -347,6 +414,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDoneKeys = nowDoneKeys
         didBaseline = true
 
+        // 应用级任务 (workbuddy/zcode): 与车道任务同权并入面板
+        for a in appTasks() {
+            if a.state == "run" {
+                running.append(ProjStatus(name: a.name, task: a.task, tool: a.tool,
+                                          active: true, parked: false, running: true,
+                                          startedAt: a.startedAt, ts: a.ts))
+            } else if a.state == "stop" {
+                attention.append((name: a.name, tool: a.tool,
+                                  reason: String(a.task.dropFirst("⛔ ".count))))
+            } else {
+                doneItems.append((name: a.name, tool: a.tool, task: a.task, ts: a.ts))
+            }
+        }
+
         // 小横幅: 按客户端分段 — logo 章 + 名称 + 运行数 + 待处理数 (富文本)
         var counts: [String: (run: Int, pend: Int)] = [:]
         for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
@@ -368,8 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }()
         let lastDone = doneItems.max { $0.ts < $1.ts }
 
-        // 展开面板: 任务卡片 — 状态色点 + 加粗工具名 + 灰色项目/时长 头行,
-        // 缩进任务文本行; 任务文本剥掉状态前缀 (状态由色点表达, 不重复)
+        // 展开面板: 任务卡片 (状态色点 + 加粗工具名 + 灰色项目/时长 + 任务文本)
         let detailAttr = NSMutableAttributedString()
         var cardCount = 0
         let cardPara = NSMutableParagraphStyle()
@@ -414,95 +494,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let screen = NSScreen.screens.first else { return }
             let bx = (screen.frame.width - self.barW) / 2
             let now = Date()
-            let flashing = now < self.flashUntil
 
-            var h: CGFloat
-            if self.userExpanded {
-                h = min(detailHeight + 16, screen.frame.height / 2)
-            } else if flashing {
-                h = self.hFlash
-            } else if self.hoverActive || !attention.isEmpty {
-                h = self.hSmall                      // 悬停 / 有待处理: 弹出计数
-            } else {
-                h = self.hIdle                       // 默认: 3px 细线贴在菜单栏行
+            // ── 单一状态机: expanded > flash > (hover∨attention)=counts > idle ──
+            let state: String
+            if self.userExpanded { state = "expanded" }
+            else if now < self.flashUntil { state = self.flashIsDone ? "flashDone" : "flashStart" }
+            else if self.hoverActive || !attention.isEmpty { state = "counts" }
+            else { state = "idle" }
+
+            let h: CGFloat
+            switch state {
+            case "expanded": h = min(detailHeight + 16, screen.frame.height / 2)
+            case "flashStart", "flashDone": h = self.hFlash
+            case "counts": h = self.hSmall
+            default: h = self.hIdle
             }
 
-            if self.userExpanded {
-                // 展开态 = 只显示明细表, 小横幅文字与闪现全部让位 (否则重叠)
-                self.flashTitle.isHidden = true
-                self.flashBody.isHidden = true
-                self.bannerText.isHidden = true
-            } else if flashing {
+            // ── 每状态的子视图显式布局 (不依赖固定 frame 叠放) ──
+            self.bannerText.frame = NSRect(x: 10, y: (self.hSmall - 15) / 2, width: self.barW - 20, height: 15)
+            self.flashTitle.frame = NSRect(x: 10, y: self.hFlash - 20, width: self.barW - 20, height: 16)
+            self.flashBody.frame = NSRect(x: 10, y: 4, width: self.barW - 20, height: 15)
+            self.detailScroll.frame = NSRect(x: 10, y: 6, width: self.barW - 20, height: max(h - 12, 1))
+            self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
+
+            self.bannerText.isHidden = state != "counts"
+            self.flashTitle.isHidden = !(state == "flashStart" || state == "flashDone")
+            self.flashBody.isHidden = self.flashTitle.isHidden
+            self.detailScroll.isHidden = state != "expanded"
+
+            switch state {
+            case "counts":
+                self.bannerText.attributedStringValue = countAttr
+            case "idle":
+                var idle = "⚙︎ 空闲"
+                if let last = lastDone { idle += " · 上次完成 \(self.completionTime(last.ts))" }
+                self.bannerText.attributedStringValue = NSAttributedString(
+                    string: idle, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+            case "flashStart", "flashDone":
                 self.flashTitle.stringValue = self.flashCandidateTitle ?? ""
                 self.flashBody.stringValue = self.flashCandidateBody ?? ""
-                self.flashTitle.isHidden = false
-                self.flashBody.isHidden = false
-                self.bannerText.isHidden = true
-            } else {
-                self.flashTitle.isHidden = true
-                self.flashBody.isHidden = true
-                self.bannerText.isHidden = false
-                if counts.isEmpty {
-                    if let last = lastDone {
-                        self.bannerText.attributedStringValue = NSAttributedString(
-                            string: "⚙︎ 空闲 · 上次完成 \(self.completionTime(last.ts))",
-                            attributes: [.foregroundColor: NSColor.secondaryLabelColor])
-                    } else {
-                        self.bannerText.attributedStringValue = NSAttributedString(
-                            string: "⚙︎ 空闲",
-                            attributes: [.foregroundColor: NSColor.secondaryLabelColor])
-                    }
-                } else {
-                    self.bannerText.attributedStringValue = countAttr
-                }
-                if h == self.hIdle { self.bannerText.isHidden = true }   // 空闲细线无文字
+            case "expanded":
+                break
+            default: break
             }
 
-            // 任务表格内容与高度
-            self.detailText.textStorage?.setAttributedString(detailAttr)
+            // 明细内容只在变化时写入 (避免每轮重置滚动位置)
+            let plain = detailAttr.string
+            if self.detailText.string != plain {
+                self.detailText.textStorage?.setAttributedString(detailAttr)
+            }
             self.detailText.layoutManager?.ensureLayout(for: self.detailText.textContainer!)
             let used = self.detailText.layoutManager!.usedRect(for: self.detailText.textContainer!).size
             self.detailText.frame.size.height = max(used.height + 8, 1)
-            self.detailScroll.isHidden = !self.userExpanded
-            self.detailScroll.frame.size.height = h - 12
 
-            // 背景色: 蓝闪(新任务) / 绿闪(完成) / 琥珀(待处理) / 绿(运行) / 灰(空闲)
-            if flashing {
-                let c = self.flashIsDone ? NSColor.systemGreen : NSColor.systemBlue
-                self.contentView.layer?.backgroundColor = c.withAlphaComponent(0.35).cgColor
-            } else if self.userExpanded {
-                self.contentView.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.22).cgColor
-            } else if !attention.isEmpty {
-                self.contentView.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.32).cgColor
-            } else if !running.isEmpty {
-                self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.18).cgColor
-            } else {
-                self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
+            // ── 背景色 (与状态一致) ──
+            let bg: NSColor
+            switch state {
+            case "flashStart": bg = NSColor.systemBlue.withAlphaComponent(0.35)
+            case "flashDone":  bg = NSColor.systemGreen.withAlphaComponent(0.35)
+            case "counts":     bg = attention.isEmpty ? NSColor.systemGreen.withAlphaComponent(0.18) : NSColor.systemOrange.withAlphaComponent(0.32)
+            case "expanded":   bg = NSColor.systemGray.withAlphaComponent(0.22)
+            default:           bg = NSColor.systemGreen.withAlphaComponent(0.3)
             }
+            self.contentView.layer?.backgroundColor = bg.cgColor
 
-            // 位置: 菜单栏行 (顶边), 空闲时只剩 3px 细线
+            // ── 位置: 菜单栏行顶边; 高度没变就不重发动画 ──
             let y = screen.frame.maxY - h
-            self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
-            self.panel.setFrame(NSRect(x: bx, y: y, width: self.barW, height: h),
-                                display: true, animate: true)
+            let target = NSRect(x: bx, y: y, width: self.barW, height: h)
+            if self.panel.frame != target {
+                self.panel.setFrame(target, display: true, animate: self.panel.frame.size.height != h)
+            }
             self.panel.orderFrontRegardless()
 
-            // 闪现到期 → 收回小横幅
+            // 闪现到期 → 收回; 已到期则清掉计时器
             if now < self.flashUntil && self.collapseTimer == nil {
                 let remain = self.flashUntil.timeIntervalSince(now) + 0.1
                 self.collapseTimer = Timer.scheduledTimer(withTimeInterval: remain, repeats: false) { _ in
                     self.collapseTimer = nil
                     self.refresh()
                 }
+            } else if now >= self.flashUntil && self.collapseTimer != nil {
+                self.collapseTimer?.invalidate()
+                self.collapseTimer = nil
             }
         }
 
-        // 触发闪现 (有新任务/新完成时); 首轮刷新只建立基线
+        // 触发闪现; 同一事件 10s 内不重复 (防状态高频变化导致大横幅常驻)
         if let c = flashCandidate {
-            flashCandidateTitle = c.title
-            flashCandidateBody = c.body
-            flashIsDone = c.kind == "done"
-            flashUntil = Date().addingTimeInterval(4.0)
+            let now = Date().timeIntervalSince1970
+            let fkey = c.kind + "|" + c.title
+            if now - (lastFlashAt[fkey] ?? 0) >= 10 {
+                lastFlashAt[fkey] = now
+                flashCandidateTitle = c.title
+                flashCandidateBody = c.body
+                flashIsDone = c.kind == "done"
+                flashUntil = Date().addingTimeInterval(4.0)
+            }
         }
 
         // 停靠通知
