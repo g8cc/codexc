@@ -109,6 +109,7 @@ CODEXC_LOOP_STALL="$(normalize_uint CODEXC_LOOP_STALL "${CODEXC_LOOP_STALL:-300}
 # plan plus a professional hardening checklist. "0/off" restores silent
 # waiting; any other value replaces the built-in prompt text.
 
+IDLE_PROMPT_DEFAULT='[codexc-loop] 持续改进: 审查当前代码的正确性/安全/性能/可靠/鲁棒/可维护/测试/依赖/可观测/文档, 发现问题修复并 commit, 无事可做以 TASK_RESULT: DONE (idle) 结尾'
 _idle_raw="${CODEXC_LOOP_IDLE-}"
 case "$_idle_raw" in
     0|off|no|false) IDLE_PROMPT=""; BURN_ENABLED=0 ;;
@@ -1314,7 +1315,7 @@ TASK_RESULT: DONE" "$(cat "$d/msg1")"
             *) IDLE_PROMPT="$(printf '%s' "$1" | tr '\n' ' ')" ;;
         esac
     }
-    parse_idle ""; assert_eq "unset -> default ON" "[x] default" "$IDLE_PROMPT"
+    parse_idle ""; assert_eq "unset -> default ON" "$IDLE_PROMPT_DEFAULT" "$IDLE_PROMPT"
     parse_idle "0"; assert_eq "off -> disabled" "" "$IDLE_PROMPT"
     parse_idle $'自定义\n提示'; assert_eq "custom flattened" "自定义 提示" "$IDLE_PROMPT"
 
@@ -1776,8 +1777,16 @@ EOF
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
     it_wait "standing prompt fed" "$root/fed.log" '持续改进' 20
-    bs="$(tmux show-options -pv -t "$sess" pane-border-status 2>/dev/null)"
-    bf="$(tmux show-options -pv -t "$sess" pane-border-format 2>/dev/null)"
+    # banner_set 在投喂之后才执行, 而 worker 写 fed.log 是异步的 — 轮询等
+    # 横幅落地再断言, 避免读在设之前的一次性竞态
+    bs=""; bf=""
+    n=0
+    while [ "$n" -lt 10 ]; do
+        bs="$(tmux show-options -pv -t "$sess" pane-border-status 2>/dev/null)"
+        bf="$(tmux show-options -pv -t "$sess" pane-border-format 2>/dev/null)"
+        [ "$bs" = "top" ] && break
+        sleep 1; n=$((n+1))
+    done
     [ "$bs" = "top" ] && echo "  ok: 顶部横幅已启用" || { echo "  FAIL: 顶部横幅未启用 ($bs)"; IT_FAILURES=$((IT_FAILURES+1)); }
     case "$bf" in *空闲燃烧*) echo "  ok: 横幅内容正确" ;; *) echo "  FAIL: 横幅内容 ($bf)"; IT_FAILURES=$((IT_FAILURES+1)); ;; esac
     sleep 2
