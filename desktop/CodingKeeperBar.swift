@@ -276,33 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSAttributedString(attachment: att)
     }
 
-    // 应用级活跃发现: 不经 CodingKeeper 车道的桌面/CLI 应用, 以其活动文件的
-    // mtime 判定"正在被使用" (5 分钟内动过)。zcode = cli rollout/log,
-    // workbuddy = 主数据库; 新应用在此追加
-    func newestMtime(_ dir: String, suffix: String) -> TimeInterval {
-        var latest: TimeInterval = 0
-        guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return 0 }
-        for it in items where it.hasSuffix(suffix) {
-            let p = dir + "/" + it
-            if let attr = try? FileManager.default.attributesOfItem(atPath: p),
-               let m = attr[.modificationDate] as? Date, m.timeIntervalSince1970 > latest {
-                latest = m.timeIntervalSince1970
-            }
-        }
-        return latest
-    }
-
-    func appActivity() -> [(tool: String, lastActive: TimeInterval)] {
-        let home = NSHomeDirectory()
-        var out: [(String, TimeInterval)] = []
-        let wb = newestMtime(home + "/.workbuddy", suffix: ".db")
-        if wb > 0 { out.append(("workbuddy", wb)) }
-        let z = max(newestMtime(home + "/.zcode/cli/rollout", suffix: ".jsonl"),
-                    newestMtime(home + "/.zcode/cli/log", suffix: ".jsonl"))
-        if z > 0 { out.append(("zcode", z)) }
-        return out
-    }
-
     // 回合时长: started_at 未知显示 "—"
     func duration(_ startedAt: TimeInterval) -> String {
         guard startedAt > 0 else { return "—" }
@@ -367,14 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDoneKeys = nowDoneKeys
         didBaseline = true
 
-        // 应用级活跃 (5 分钟内活动): 独立"活跃"段, 不计入任务数
-        let appFresh: TimeInterval = 300
-        let appsActive = appActivity()
-            .filter { Date().timeIntervalSince1970 - $0.lastActive < appFresh }
-            .sorted { $0.tool < $1.tool }
-
         // 小横幅: 按客户端分段 — logo 章 + 名称 + 运行数 + 待处理数 (富文本)
-        // 应用级活跃 (zcode/workbuddy) 以"活跃"段追加, 不计入任务数
         var counts: [String: (run: Int, pend: Int)] = [:]
         for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
         for a in attention { counts[a.tool, default: (0, 0)].pend += 1 }
@@ -390,12 +356,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     m.append(NSAttributedString(string: " ⚠️\(v.pend)",
                                                 attributes: [.foregroundColor: NSColor.white]))
                 }
-            }
-            for (i, a) in appsActive.enumerated() {
-                if i > 0 || !segs.isEmpty { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
-                m.append(toolChip(a.tool))
-                m.append(NSAttributedString(string: " \(a.tool) 活跃",
-                                            attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
             }
             return m
         }()
@@ -414,9 +374,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for d in doneItems.sorted(by: { $0.ts > $1.ts }) {
             rows.append("✅ \(d.tool.isEmpty ? "codex" : d.tool) · \(d.name) · \(completionTime(d.ts))")
             rows.append("   \(d.task)")
-        }
-        for a in appsActive {
-            rows.append("● \(a.tool) · 活跃 (最近活动 \(completionTime(a.lastActive)))")
         }
         let detailHeight: CGFloat = rows.isEmpty ? 24 : CGFloat(rows.count) * 15 + 16
 
