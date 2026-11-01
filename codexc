@@ -582,7 +582,7 @@ rediscover_thread() {
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
-    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt=""
+    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt="" last_hb=0
     local sess_file="" line_wm=0 total new_lines status rollout
 
     match_re="$TRANSIENT_RE"
@@ -759,8 +759,13 @@ for line in sys.stdin:
         done <<EOF
 $status
 EOF
-        # 心跳: 回合进行中每轮刷新 status.json, 悬浮条据此判定存活
-        [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
+        # 心跳: 回合进行中每 30s 刷新 status.json (悬浮条新鲜窗口 120s,
+        # 30s 心跳足够; 收到任务/完成/停止等事件写入不受此限)
+        now="$(date +%s)"
+        if [ -n "$turn_start" ] && [ $((now - last_hb)) -ge 30 ]; then
+            write_status "▶️ ${last_prompt:0:80}" 1
+            last_hb=$now
+        fi
     done
     echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
 }

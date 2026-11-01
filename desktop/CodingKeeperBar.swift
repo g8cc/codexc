@@ -209,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func refresh() {
         let projects = registry()
         var running: [ProjStatus] = []
+        var attention: [(String, String)] = []   // 需要人类协助/决策的项目 (常驻)
         var events: [(String, String)] = []
         var detail: [String] = []
         var flashCandidate: (String, String)?
@@ -219,6 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let st = readStatus(proj)
             if st.parked {
                 events.append(("⏸ \(st.name) 已挂起", "加任务到 queue.md 或 rm loop.halt 复燃"))
+                attention.append((st.name, "已挂起"))
+            } else if st.task.hasPrefix("⛔") {
+                // 不可自动续跑的停止: 常驻警示到人处理为止
+                attention.append((st.name, String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
             }
             if st.running {
                 running.append(st)
@@ -274,11 +279,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.flashTitle.isHidden = true
                 self.flashBody.isHidden = true
                 self.bannerText.isHidden = false
-                if running.isEmpty {
+                var parts: [String] = []
+                if !running.isEmpty { parts.append("🔥 " + countText) }
+                for (name, reason) in attention {
+                    parts.append("⚠️ \(name): \(reason)")
+                }
+                if parts.isEmpty {
                     self.bannerText.stringValue = "⚙︎"
                     self.bannerText.textColor = .secondaryLabelColor
                 } else {
-                    self.bannerText.stringValue = "🔥 " + countText
+                    self.bannerText.stringValue = parts.joined(separator: "  ·  ")
                     self.bannerText.textColor = .white
                 }
             }
@@ -291,6 +301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.contentView.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.22).cgColor
             } else if flashing {
                 self.contentView.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.35).cgColor
+            } else if !attention.isEmpty {
+                self.contentView.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.32).cgColor
             } else if !running.isEmpty {
                 self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.18).cgColor
             } else {
