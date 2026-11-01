@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var notifyTimer: Timer?
     var lastNotifyKey = ""
 
+    let hIdle: CGFloat = 3        // 空闲: 细线 (无文字)
     let hSmall: CGFloat = 20      // 小横幅: 状态计数
     let hFlash: CGFloat = 44      // 闪现横幅
     let barW: CGFloat = 480
@@ -49,10 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        let screen = NSScreen.screens[0].frame
-        let bx = (screen.width - barW) / 2
+        let screen = NSScreen.screens[0]
+        let bx = (screen.frame.width - barW) / 2
+        // 锚定菜单栏下方: visibleFrame.maxY = 可用区域顶边, 不遮挡菜单栏图标
+        let top = screen.visibleFrame.maxY
 
-        panel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.maxY - hSmall,
+        panel = KeyablePanel(contentRect: NSRect(x: bx, y: top - hIdle,
                                                  width: barW, height: hSmall),
                              styleMask: [.borderless, .nonactivatingPanel],
                              backing: .buffered, defer: false)
@@ -131,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 通知卡片
         let nW: CGFloat = 380, nH: CGFloat = 64
-        notifyPanel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.maxY - hFlash - nH - 4,
+        notifyPanel = KeyablePanel(contentRect: NSRect(x: bx, y: top - hSmall - nH - 4,
                                                        width: nW, height: nH),
                                    styleMask: [.borderless, .nonactivatingPanel],
                                    backing: .buffered, defer: false)
@@ -361,18 +364,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let detailHeight: CGFloat = rows.isEmpty ? 24 : CGFloat(rows.count) * 15 + 16
 
         DispatchQueue.main.async {
-            let screen = NSScreen.screens[0].frame
-            let bx = (screen.width - self.barW) / 2
+            let screen = NSScreen.screens[0]
+            let bx = (screen.frame.width - self.barW) / 2
             let now = Date()
             let flashing = now < self.flashUntil
 
             var h: CGFloat
             if self.userExpanded {
-                h = min(detailHeight + 16, screen.height / 2)
+                h = min(detailHeight + 16, screen.visibleFrame.height / 2)
             } else if flashing {
                 h = self.hFlash
-            } else {
+            } else if !counts.isEmpty {
                 h = self.hSmall
+            } else {
+                h = self.hIdle                       // 空闲: 收成细线, 无文字
             }
 
             if self.userExpanded {
@@ -403,6 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     self.bannerText.attributedStringValue = countAttr
                 }
+                if h == self.hIdle { self.bannerText.isHidden = true }   // 空闲细线无文字
             }
 
             // 任务表格内容与高度
@@ -424,11 +430,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else if !running.isEmpty {
                 self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.18).cgColor
             } else {
-                self.contentView.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.25).cgColor
+                self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
             }
 
-            // 位置: 贴在屏幕最顶端
-            let y = screen.maxY - h
+            // 位置: 贴在菜单栏下方
+            let y = screen.visibleFrame.maxY - h
             self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
             self.panel.setFrame(NSRect(x: bx, y: y, width: self.barW, height: h),
                                 display: true, animate: true)

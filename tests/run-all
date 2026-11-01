@@ -30,7 +30,11 @@ stage_syntax() {
     for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker ck-common.sh install.sh; do
         bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
     done
-    [ "$bad" = "0" ] && { echo "  ok: 9 files"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
+    # Swift 侧语法检查 (今天两个坏提交都是 swift 编译错误漏过 bash -n 门禁)
+    if [ -f desktop/CodingKeeperBar.swift ]; then
+        swiftc -parse desktop/CodingKeeperBar.swift >/dev/null 2>&1 || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
+    fi
+    [ "$bad" = "0" ] && { echo "  ok: 9 files + swift"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
     echo
 }
 
