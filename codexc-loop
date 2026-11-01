@@ -531,7 +531,9 @@ banner_set() {  # $1=横幅文本
     local txt="${1//#/##}"
     tmux set-option -p -t "$pane" pane-border-status top 2>/dev/null
     tmux set-option -p -t "$pane" pane-border-format " 🔥 $txt" 2>/dev/null
-    status_write "$1"
+    local active=0
+    case "$1" in 📋*|🔧*|🔍*|🔥*) active=1 ;; esac
+    status_write "$1" "${CODEXC_TOOL:-codex}" "$active"
     return 0
 }
 

@@ -107,12 +107,17 @@ headless_turn() {  # $1=task text $2=outfile
 # 顶部任务横幅（同 codexc-loop）: 仅当 runner 自身在 tmux 内时渲染。
 banner_set() {  # $1=横幅文本
     [ "${CODEXC_BANNER:-1}" = "1" ] || return 0
-    local txt="${1//#/##}"
+    local txt="${1//#/##}" tool=headless active=0
+    case "${CODEXC_HEADLESS_CMD:-}" in
+        *zcode-worker*) tool=zcode ;;
+        *dsh-worker*)   tool=dsh ;;
+    esac
+    case "$1" in 📋*|🔧*|🔍*|🔥*) active=1 ;; esac
     if [ -n "${TMUX_PANE:-}" ]; then
         tmux set-option -p -t "$TMUX_PANE" pane-border-status top 2>/dev/null
         tmux set-option -p -t "$TMUX_PANE" pane-border-format " ⚙️ $txt" 2>/dev/null
     fi
-    status_write "$1"
+    status_write "$1" "$tool" "$active"
     return 0
 }
 

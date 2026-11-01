@@ -514,7 +514,11 @@ find_active_rollout() {
         files="$(lsof -Fn -p "$p" 2>/dev/null | sed -n 's/^n//p')"
         while IFS= read -r f; do
             case "$f" in
-                "$CODEX_HOME_DIR"/sessions/*.jsonl) ;;
+                "$CODEX_HOME_DIR"/sessions/*) ;;
+                *) continue ;;
+            esac
+            case "$f" in
+                *.jsonl) ;;
                 *) continue ;;
             esac
             m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
@@ -578,7 +582,7 @@ rediscover_thread() {
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
-    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc
+    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt=""
     local sess_file="" line_wm=0 total new_lines status rollout
 
     match_re="$TRANSIENT_RE"
@@ -622,6 +626,18 @@ for line in sys.stdin:
     if ptype == "task_started":
         print("start\t")
         continue
+    if ptype == "item_completed":
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("type") == "UserMessage":
+            text = ""
+            content = item.get("content")
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        text = c.get("text") or ""
+                        break
+            print("prompt\t" + " ".join(str(text).split())[:120])
+        continue
     if ptype != "task_complete": continue
     err = payload.get("error")
     if err:
@@ -636,25 +652,21 @@ for line in sys.stdin:
             case "$api_code" in
                 start)
                     turn_start="$(date +%s)"
+                    write_status "▶️ ${last_prompt:0:80}" 1
+                    continue ;;
+                prompt)
+                    [ -n "$api_text" ] && last_prompt="$api_text"
+                    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
                     continue ;;
                 done)
                     turn_start_prev="$turn_start"; turn_start=""
+                    write_status "✅ 完成: ${api_text:0:80}" 0
                     [ "$CODEXC_NOTIFY" = "1" ] && [ -n "$turn_start_prev" ] || continue
                     now="$(date +%s)"; dur=$((now - turn_start_prev))
                     [ "$dur" -ge "$CODEXC_NOTIFY_SECS" ] || continue
                     human="$((dur / 60))m$((dur % 60))s"
                     notify "✅ 任务完成 (${human}): ${api_text:0:60}"
                     echo "$(date '+%F %T') notified: task completed (${human}): ${api_text:0:80}" >> "$WATCHLOG"
-                    mkdir -p ".codingkeeper" 2>/dev/null
-                    python3 - "$PWD" "✅ 完成: ${api_text:0:80}" <<'PYEOF2'
-import json, os, sys, time
-pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
-snap = {"project": project, "task": task, "phase": task, "parked": os.path.exists(os.path.join(pdir, "loop.halt")),
-        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
-        "ts": int(time.time())}
-with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
-    json.dump(snap, fh, ensure_ascii=False)
-PYEOF2
                     continue ;;
                 err) ;;
                 *) continue ;;
@@ -671,10 +683,13 @@ PYEOF2
             else
                 unrescuable=1
             fi
-            if [ "$unrescuable" = "1" ] && [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
-                notify "⛔ codex 停了: ${api_text:0:60}"
-                echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
-                last_err_notify=$now
+            if [ "$unrescuable" = "1" ]; then
+                write_status "⛔ codex 停了: ${api_text:0:60}" 0
+                if [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
+                    notify "⛔ codex 停了: ${api_text:0:60}"
+                    echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
+                    last_err_notify=$now
+                fi
             fi
             [ "$unrescuable" = "1" ] && continue
             now=$(date +%s)
@@ -704,8 +719,27 @@ PYEOF2
         done <<EOF
 $status
 EOF
+        # 心跳: 回合进行中每轮刷新 status.json, 悬浮条据此判定存活
+        [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
     done
     echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
+}
+
+write_status() {  # $1=任务文本 $2=active(1/0) — status.json 快照 (悬浮条/ck status 数据源)
+    mkdir -p ".codingkeeper" 2>/dev/null
+    python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" <<'PYEOF3'
+import json, os, sys, time
+pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
+tool, active = sys.argv[3], sys.argv[4] == "1"
+parked = os.path.exists(os.path.join(pdir, "loop.halt"))
+snap = {"project": project, "task": task, "phase": task, "parked": parked,
+        "tool": tool, "active": active,
+        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ts": int(time.time())}
+with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+    json.dump(snap, fh, ensure_ascii=False)
+PYEOF3
+    return 0
 }
 
 # the watcher's rollout discovery: newest sessions/*.jsonl held open inside
@@ -728,8 +762,14 @@ watcher_find_rollout() {  # $1=pane -> prints path or nothing
     while IFS= read -r f; do
         # macOS /tmp -> /private/tmp etc.: the fd path is physical while
         # CODEX_HOME may be logical — accept both forms
+        # codex 新版把 rollout 放进日期子目录 (sessions/YYYY/MM/DD/) — 按前缀
+        # + .jsonl 后缀匹配任意深度, 扁平 glob 会静默失明
         case "$f" in
-            "$home_log"/sessions/*.jsonl|"$home_phys"/sessions/*.jsonl) ;;
+            "$home_log"/sessions/*|"$home_phys"/sessions/*) ;;
+            *) continue ;;
+        esac
+        case "$f" in
+            *.jsonl) ;;
             *) continue ;;
         esac
         m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
