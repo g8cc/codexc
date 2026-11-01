@@ -582,7 +582,7 @@ rediscover_thread() {
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
-    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt="" last_hb=0
+    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt="" last_hb=0 rediscover_at=0
     local sess_file="" line_wm=0 total new_lines status rollout
 
     match_re="$TRANSIENT_RE"
