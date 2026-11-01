@@ -41,15 +41,18 @@ fi
 # (MCP servers etc.) that inherit stdout and would hold a pipe open forever,
 # blocking command substitution after the turn itself has finished
 turn_out="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-out.XXXXXX")"
-node "$ZCODE_CJS" "${args[@]}" > "$turn_out" 2>/dev/null &
+turn_err="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-err.XXXXXX")"
+node "$ZCODE_CJS" "${args[@]}" > "$turn_out" 2> "$turn_err" &
 node_pid=$!
 wait "$node_pid"; rc=$?
 raw="$(cat "$turn_out" 2>/dev/null)"
-rm -f "$turn_out"
+err="$(cat "$turn_err" 2>/dev/null)"
+rm -f "$turn_out" "$turn_err"
 # 失败时把实际输出尾带回给 runner (stdout 落到 runner 的 outfile, 重试耗尽
-# park 时作为 tail 展示; stderr 会被 headless_turn 丢弃)
+# park 时作为 tail 展示; stderr 会被 headless_turn 丢弃 — 所以失败信息里
+# 同时带 stderr 尾, 真实死因不再不可见)
 if [ "$rc" != "0" ]; then
-    echo "zcode turn failed (rc=$rc): $(printf '%s' "$raw" | tail -c 200 | tr '\n' ' ')"
+    echo "zcode turn failed (rc=$rc): $(printf '%s' "$raw" | tail -c 120 | tr '\n' ' ') [stderr: $(printf '%s' "$err" | tail -c 160 | tr '\n' ' ')]"
     exit 1
 fi
 
