@@ -201,7 +201,14 @@ print("complete" if state == "task_complete" else "died")
 PYEOF
 }
 
-sanitize_name() { printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-'; }
+sanitize_name() {
+    local name
+    name="$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-')"
+    case "$(printf '%s' "$name" | tr -d '-')" in
+        '') name="-$(printf '%s' "$1" | md5 -q | cut -c1-8)" ;;
+    esac
+    printf '%s' "$name"
+}
 
 # Same session-name collision walk as codexc: prepend parent dir names while the name is taken.
 # Ownership is compared on PHYSICAL paths so symlinked routes to the same

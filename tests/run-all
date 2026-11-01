@@ -1,0 +1,65 @@
+#!/bin/bash
+# run-all — CodingKeeper 统一测试入口（CI 门禁）。
+# 用法: tests/run-all [stage...]   无参 = 全部阶段；可传阶段名子集。
+set -u
+self_dir="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$self_dir"
+PATH="$self_dir:$PATH"
+FAILED=0
+declare -a RESULTS
+
+stage() {  # $1=名称 $2=命令...
+    local name="$1"; shift
+    echo "════ [$name] ════"
+    local out rc
+    out=$("$@" 2>&1); rc=$?
+    echo "$out" | tail -3 | sed 's/^/  /'
+    if [ "$rc" = "0" ]; then
+        RESULTS+=("PASS  $name")
+    else
+        RESULTS+=("FAIL  $name (exit $rc)")
+        FAILED=1
+        echo "$out" | grep -E 'FAIL' | head -6 | sed 's/^/  ! /'
+    fi
+    echo
+}
+
+stage_syntax() {
+    echo "════ [syntax] ════"
+    local bad=0
+    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker install.sh; do
+        bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
+    done
+    [ "$bad" = "0" ] && { echo "  ok: 12 files"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
+    echo
+}
+
+stage_unit() { stage "unit (loop)" ./codexc-loop selftest; stage "unit (headless)" ./codexc-headless selftest; }
+stage_integration() {
+    stage "integration codex"   ./codexc-loop selftest-integration codex
+    stage "integration claude"  ./codexc-loop selftest-integration claude
+    stage "integration pi"      ./codexc-loop selftest-integration pi
+    stage "integration opencode" ./codexc-loop selftest-integration opencode
+    stage "integration headless" ./codexc-headless selftest-integration
+}
+stage_faultinjection() { stage "faultinjection" ./codexc-loop selftest-faultinjection; }
+stage_conformance() { stage "conformance" ./tests/conformance.sh; }
+stage_keys() { stage "keys (报告性)" ./tests/keys.sh; }
+
+STAGES="${*:-syntax unit integration faultinjection conformance keys}"
+for s in $STAGES; do
+    case "$s" in
+        syntax) stage_syntax ;;
+        unit) stage_unit ;;
+        integration) stage_integration ;;
+        faultinjection) stage_faultinjection ;;
+        conformance) stage_conformance ;;
+        keys) stage_keys ;;
+        *) echo "unknown stage: $s"; FAILED=1 ;;
+    esac
+done
+
+echo "════════════════════════"
+printf '%s\n' "${RESULTS[@]}"
+if [ "$FAILED" = "0" ]; then echo "ALL STAGES PASS"; exit 0; fi
+echo "FAILURES PRESENT"; exit 1

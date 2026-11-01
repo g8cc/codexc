@@ -1,0 +1,1989 @@
+#!/bin/bash
+# codexc-loop — unattended delivery loop on top of a codexc session.
+#
+# Turns a codexc session into a supervised delivery pipeline. You put tasks
+# in a queue file; the loop feeds them into the running codex TUI one at a
+# time, and a finished task is only accepted after
+#
+#   1. the project's gate script (real tests, run by the shell — an LLM
+#      claiming "tests pass" is never trusted) and
+#   2. CODEXC_REVIEW_PASS consecutive independent reviews reporting zero bugs
+#      (fresh `codex exec review` context, so the author never grades itself)
+#
+# have both passed. Anything else (gate failures, found bugs, blocked tasks,
+# exhausted retries) is fed back into the worker or parks the loop and
+# notifies you. Self-generated follow-up tasks land in a "review-needed"
+# section of the queue and are never executed until you promote them.
+#
+# Files (per project, all git-diffable):
+#   .codingkeeper/queue.md    task queue: ## ready / ## review-needed / ## done
+#   .codingkeeper/gate.sh     acceptance gate: exit 0 = pass (optional)
+#   .codingkeeper/journal     one line per accepted task
+#   .codingkeeper/loop.halt   touch to pause the loop, rm to resume (also set
+#                       automatically when the loop parks itself)
+#
+# Worker contract: every feed asks codex to end its final message with
+#   TASK_RESULT: DONE            (or)
+#   TASK_RESULT: BLOCKED: <why>
+# The marker is read from the rollout's task_complete event.
+#
+# Known limitations:
+#   - don't run /resume inside a loop session mid-task: a resumed rollout can
+#     replay an older TASK_RESULT marker and short-circuit the gate/review of
+#     the task in flight (finish or park the task first);
+#   - the worker must commit per task for reviews to scope to one task's diff;
+#   - a reviewer that never prints "BUGS: <n>" parks the loop (safe direction).
+#
+# Usage:
+#   codexc-loop init            scaffold queue.md + gate.sh + AGENTS.md note
+#                               (CLAUDE.md when CODEXC_TOOL=claude)
+#   codexc-loop run <pane-id>   internal: drive the pane codexc spawned
+#   codexc-loop selftest        unit tests (no tmux/codex needed)
+#   codexc-loop selftest-integration  end-to-end against scratch worlds
+#   codexc-loop selftest-faultinjection  damage the world on purpose, verify
+#                                     the system stays safe
+#
+# Env:
+#   CODEXC_LOOP_POLL      driver poll seconds          (default 5, 1-60)
+#   CODEXC_GATE_TIMEOUT   gate.sh hard timeout seconds (default 900)
+#   CODEXC_GATE_RETRIES   max gate-failure fix rounds  (default 3)
+#   CODEXC_LOOP_STALL     park when the fed task shows no rollout progress
+#                         for this many seconds (default 300; catches stuck
+#                         modals like the trust/login gates)
+#   CODEXC_REVIEW_ROUNDS  max total review runs/task   (default 6)
+#   CODEXC_REVIEW_PASS    consecutive zero-bug reviews (default 2)
+#   CODEXC_LOOP_DRY       1 = log the first task it would feed, then exit
+#                         (never sends keys; default 0)
+#   CODEXC_REVIEW_TIMEOUT review hard timeout seconds   (default 1800)
+#   CODEXC_LOOP_IDLE      burn mode (default ON): when the queue runs dry,
+#                         feed a standing improve/harden prompt; "0" disables;
+#                         any other text replaces the built-in prompt
+#   CODEXC_IDLE_PARK      consecutive no-op idle turns before the boiler parks
+#                         itself and notifies (default 2)
+#   CODEXC_REVIEW_CMD     override reviewer command (reads instructions on
+#                         stdin; must print BUGS: <n>; default uses a
+#                         read-only `codex exec --ephemeral` reviewer that
+#                         inspects the uncommitted diff itself)
+#   CODEXC_LOOP_ROLLOUT   debug/test: force the worker rollout file path
+#                         instead of discovering it via lsof
+
+set -u
+
+# absolute self path: the integration harness cds into scratch dirs before
+# re-invoking this script, so a relative $0 would break there
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+CODEXC_TOOL="${CODEXC_TOOL:-codex}"
+case "$CODEXC_TOOL" in
+    codex|claude|pi|opencode) ;;
+    *) echo "codexc-loop: unsupported CODEXC_TOOL '$CODEXC_TOOL' (use codex|claude|pi|opencode)" >&2; exit 1 ;;
+esac
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+PI_DIR="${PI_DIR:-$HOME/.pi/agent}"
+OPENCODE_DIR="${OPENCODE_DATA_DIR:-$HOME/.local/share/opencode}"
+
+normalize_uint() {
+    local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number
+    case "$value" in
+        ''|*[!0-9]*) echo "codexc-loop: invalid $name '$value'; using $fallback" >&2; printf '%s' "$fallback"; return ;;
+    esac
+    number=$((10#$value))
+    if [ "$number" -lt "$minimum" ] || [ "$number" -gt "$maximum" ]; then
+        echo "codexc-loop: $name must be between $minimum and $maximum; using $fallback" >&2
+        number=$fallback
+    fi
+    printf '%s' "$number"
+}
+
+CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1 60)"
+CODEXC_GATE_TIMEOUT="$(normalize_uint CODEXC_GATE_TIMEOUT "${CODEXC_GATE_TIMEOUT:-900}" 900 5 86400)"
+CODEXC_GATE_RETRIES="$(normalize_uint CODEXC_GATE_RETRIES "${CODEXC_GATE_RETRIES:-3}" 3 0 50)"
+CODEXC_REVIEW_ROUNDS="$(normalize_uint CODEXC_REVIEW_ROUNDS "${CODEXC_REVIEW_ROUNDS:-6}" 6 1 100)"
+CODEXC_REVIEW_PASS="$(normalize_uint CODEXC_REVIEW_PASS "${CODEXC_REVIEW_PASS:-2}" 2 1 10)"
+CODEXC_REVIEW_TIMEOUT="$(normalize_uint CODEXC_REVIEW_TIMEOUT "${CODEXC_REVIEW_TIMEOUT:-1800}" 1800 5 86400)"
+CODEXC_LOOP_STALL="$(normalize_uint CODEXC_LOOP_STALL "${CODEXC_LOOP_STALL:-300}" 300 5 86400)"
+# burn mode (default ON): when the queue runs dry, feed a standing
+# "keep improving" prompt so the boiler keeps burning on the worker's own
+# plan plus a professional hardening checklist. "0/off" restores silent
+# waiting; any other value replaces the built-in prompt text.
+
+_idle_raw="${CODEXC_LOOP_IDLE-}"
+case "$_idle_raw" in
+    0|off|no|false) IDLE_PROMPT=""; BURN_ENABLED=0 ;;
+    ""|1|on|yes|true) IDLE_PROMPT="$IDLE_PROMPT_DEFAULT" ;;
+    *) IDLE_PROMPT="$(printf '%s' "$_idle_raw" | tr '\n' ' ')" ;;
+esac
+CODEXC_IDLE_PARK="$(normalize_uint CODEXC_IDLE_PARK "${CODEXC_IDLE_PARK:-2}" 2 1 10)"
+CODEXC_LOOP_DRY="$(normalize_uint CODEXC_LOOP_DRY "${CODEXC_LOOP_DRY:-0}" 0 0 1)"
+TAB="$(printf '\t')"
+
+notify() {
+    [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
+    # task/bug text is LLM-authored: escape it or quotes break (and inject
+    # into) the AppleScript
+    local esc="${1//\\/\\\\}"; esc="${esc//\"/\\\"}"
+    command -v osascript >/dev/null && \
+        osascript -e "display notification \"$esc\" with title \"codexc-loop\"" 2>/dev/null
+    return 0
+}
+
+log() {
+    (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
+    echo "$(date '+%F %T') loop: $*" >> "$WATCHLOG"
+}
+
+# EXIT-trap cleanup must live on GLOBALS: a trap set inside a function that
+# references its locals evaluates them after the function returned (out of
+# scope), and set -u makes the whole rm fail silently
+LOOP_TMP_FILES=""
+loop_cleanup() {
+    # shellcheck disable=SC2086 — word splitting is the point; the names have
+    # no spaces
+    rm -f $LOOP_TMP_FILES ".codingkeeper/loop.pid" 2>/dev/null
+    return 0
+}
+
+# ---- pane helpers -----------------------------------------------------------
+
+# tmux 3.6a quirk: display-message exits 0 with empty output even for targets
+# that do not exist, so liveness must be judged by the output, not the code
+pane_alive() { [ -n "$(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null)" ]; }
+
+# Busy markers verified live: codex "esc to interrupt", claude "ctrl+c to
+# interrupt", pi "...to interrupt" (all share the substring); opencode's
+# footer shows "tok/s" only while a turn streams
+pane_busy() {
+    case "$CODEXC_TOOL" in
+        # opencode's "tok/s" footer persists in the visible transcript after a
+        # turn ends; the reliable signal is that the "ctrl+p commands" status
+        # hint disappears while a turn streams
+        opencode) ! tmux capture-pane -p -t "$1" 2>/dev/null | grep -q "ctrl+p commands" ;;
+        *)        tmux capture-pane -p -t "$1" 2>/dev/null | grep -q "to interrupt" ;;
+    esac
+}
+pane_idle() { ! pane_busy "$1"; }
+
+# two-stage send (text, then Enter) — a single burst makes the TUI drop the keypress
+feed_msg() {  # $1=pane $2=one-line message
+    if [ "$CODEXC_LOOP_DRY" = "1" ]; then
+        log "dry: would feed -> $2"
+        return 0
+    fi
+    tmux send-keys -t "$1" -l "$2" || return 1
+    sleep 0.4
+    tmux send-keys -t "$1" Enter || return 1
+}
+
+# ---- worker rollout discovery + turn status ---------------------------------
+
+# The worker's active rollout, identified by its session cwd: codex 0.162+
+# holds rollouts in the app-server daemon (outside the pane's process tree),
+# so a tree lsof cannot see them. Walk the newest candidates under
+# CODEX_HOME/sessions (sessions/YYYY/MM/DD/rollout-*.jsonl) and match
+# session_meta.cwd against the pane's working directory — same realpath
+# comparison the queue trust uses, so symlinked project paths still match.
+# CODEXC_LOOP_ROLLOUT overrides the discovery entirely (tests).
+# claude profile: sessions live in $CLAUDE_DIR/projects/<munged>/<uuid>.jsonl
+# where the munge maps BOTH "/" and "." to "-" (underscores survive). Same
+# scoping rule as codex: only the pane's own project dir, never a global
+# newest-file fallback.
+claude_project_dir() {
+    local p form
+    for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
+        [ -n "$p" ] || continue
+        form="$(printf '%s' "$p" | sed 's/[\/.]/-/g')"
+        [ -d "$CLAUDE_DIR/projects/$form" ] && { printf '%s' "$form"; return 0; }
+    done
+    printf '%s' "$(printf '%s' "$1" | sed 's/[\/.]/-/g')"
+}
+
+pi_project_dir() {
+    local p form
+    for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
+        [ -n "$p" ] || continue
+        form="-$(printf '%s' "$p" | sed 's/\//-/g')-"
+        [ -d "$PI_DIR/sessions/$form" ] && { printf '%s' "$form"; return 0; }
+    done
+    printf '%s' "-$(printf '%s' "${1%/}/" | sed 's/\//-/g')-"
+}
+
+find_rollout_pi() {  # $1=pane -> newest pi session jsonl for this cwd
+    local pane="$1" proj munged newest=""
+    proj="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$proj" ] || return 0
+    munged="$(pi_project_dir "$proj")"
+    [ -n "$munged" ] || return 0
+    newest="$(ls -t "$PI_DIR/sessions/$munged"/*.jsonl 2>/dev/null | head -1)"
+    [ -n "$newest" ] && printf '%s' "$newest"
+}
+
+opencode_active_session() {  # $1=cwd -> newest session id (session_v2)
+    python3 - "$1" "$OPENCODE_DIR/opencode.db" <<'PYEOF'
+import json, os, sqlite3, sys
+cwd, db = sys.argv[1], sys.argv[2]
+target = os.path.realpath(cwd)
+try:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = conn.execute("SELECT id, directory, time_updated FROM session_v2").fetchall()
+except (sqlite3.Error, OSError):
+    raise SystemExit(0)
+best, best_t = "", -1
+for sid, directory, t in rows:
+    # realpath on BOTH sides: /tmp vs /private/tmp and symlinked projects
+    if directory and os.path.realpath(directory) == target and t > best_t:
+        best, best_t = sid, t
+sys.stdout.write(best)
+PYEOF
+}
+
+find_rollout_opencode() {  # $1=pane -> active session id (used as rollout key)
+    local pane="$1" proj sid
+    proj="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$proj" ] || return 0
+    sid="$(opencode_active_session "$proj")"
+    [ -n "$sid" ] && printf '%s' "$sid"
+}
+
+# terminal-event count = the freshness baseline for file-based tools (same
+# counter the parsers emit as tokens); opencode uses its message count
+terminal_count() {  # $1=rollout
+    case "$CODEXC_TOOL" in
+        codex)  grep -acE '"type": ?"task_complete"' "$1" 2>/dev/null || echo 0 ;;
+        claude) grep -acE '"type": ?"assistant"' "$1" 2>/dev/null || echo 0 ;;
+        pi)     grep -acE '"stopReason": ?"stop"' "$1" 2>/dev/null || echo 0 ;;
+        *)      rollout_size "$1" ;;
+    esac
+}
+
+# rollout "size" feeds the driver's activity/watermark logic; opencode keeps
+# everything in sqlite, so its size is the session's message count
+rollout_size() {  # $1=rollout path-or-sid
+    case "$CODEXC_TOOL" in
+        opencode) local esc="${1//\'/''}"
+                  sqlite3 -readonly "$OPENCODE_DIR/opencode.db" "SELECT count(*) FROM session_message WHERE session_id='$esc'" 2>/dev/null || echo 0 ;;
+        *)        stat -f '%z' "$1" 2>/dev/null || echo 0 ;;
+    esac
+}
+
+find_rollout_claude() {  # $1=pane -> prints path or nothing
+    local pane="$1" proj munged newest=""
+    proj="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$proj" ] || return 0
+    munged="$(claude_project_dir "$proj")"
+    [ -n "$munged" ] || return 0
+    newest="$(ls -t "$CLAUDE_DIR/projects/$munged"/*.jsonl 2>/dev/null | head -1)"
+    [ -n "$newest" ] && printf '%s' "$newest"
+}
+
+find_rollout() {  # $1=pane -> prints path or nothing
+    local pane="$1" proj
+    if [ -n "${CODEXC_LOOP_ROLLOUT:-}" ]; then
+        printf '%s' "$CODEXC_LOOP_ROLLOUT"
+        return 0
+    fi
+    case "$CODEXC_TOOL" in
+        claude)   find_rollout_claude "$pane"; return 0 ;;
+        pi)       find_rollout_pi "$pane"; return 0 ;;
+        opencode) find_rollout_opencode "$pane"; return 0 ;;
+    esac
+    proj="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$proj" ] || return 0
+    python3 - "$CODEX_HOME_DIR/sessions" "$proj" <<'PYEOF'
+import json, os, sys
+root, proj = sys.argv[1], os.path.realpath(sys.argv[2])
+if not os.path.isdir(root):
+    raise SystemExit(0)
+cands = []
+for current, dirs, files in os.walk(root):
+    for name in files:
+        if name.endswith(".jsonl"):
+            path = os.path.join(current, name)
+            try:
+                cands.append((os.stat(path).st_mtime, path))
+            except OSError:
+                continue
+cands.sort(reverse=True)
+for _mtime, path in cands[:8]:
+    try:
+        with open(path, "rb") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                payload = d.get("payload") if isinstance(d, dict) else None
+                cwd = payload.get("cwd") if isinstance(payload, dict) else None
+                if isinstance(cwd, str) and cwd and os.path.realpath(cwd) == proj:
+                    sys.stdout.write(path)
+                    raise SystemExit(0)
+    except OSError:
+        continue
+PYEOF
+}
+
+# Status of the worker's last turn from the rollout tail. Prints "none",
+# "error" or "clean" and writes the task_complete event's last_agent_message
+# (decoded) to $2 when present. A turn that ended in a provider error carries
+# error=1 and last_agent_message=null (the watcher decides about retrying it).
+# claude profile: the LAST non-sidechain assistant line governs. An
+# isApiErrorMessage:true line means claude's own 10-retry cycle was exhausted
+# (turn failed); anything else with text is a clean turn end.
+turn_status_claude() {  # $1=rollout $2=msg_out_file
+    python3 - "$1" "$2" <<'PYEOF'
+import json, os, sys
+rollout, msg_out = sys.argv[1], sys.argv[2]
+status = "none"
+try:
+    with open(rollout, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        position = fh.tell()
+        chunks = []
+        lines_needed = 400
+        while position > 0 and lines_needed > 0:
+            size = min(65536, position)
+            position -= size
+            fh.seek(position)
+            chunk = fh.read(size)
+            lines_needed -= chunk.count(b"\n")
+            chunks.append(chunk)
+        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
+        fh.seek(0)
+        import re as _re
+        pat = _re.compile(rb'"type":\s*"assistant"')
+        total = sum(1 for line in fh if pat.search(line))
+    last_text = ""
+    for line in reversed(tail):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue   # tolerate partial/corrupt lines mid-stream
+        if not isinstance(d, dict) or d.get("type") != "assistant" or d.get("isSidechain"):
+            continue
+        m = d.get("message") or {}
+        content = m.get("content") or []
+        text = ""
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text += block.get("text", "")
+        if d.get("isApiErrorMessage"):
+            status = "error"
+            break
+        if not text:
+            continue   # tool-use-only assistant line; keep walking back
+        status = "clean"
+        last_text = text
+        with open(msg_out + ".tok", "w") as tok:
+            tok.write(str(total))
+        break
+    if status == "clean":
+        with open(msg_out, "wb") as out:
+            out.write(last_text.encode("utf-8", "replace"))
+except OSError:
+    status = "none"
+print(status)
+PYEOF
+}
+
+# pi profile: last assistant message governs — stopReason "stop" ends a turn
+# cleanly; "error" is a failed turn; "toolUse" is mid-turn (wait)
+turn_status_pi() {  # $1=rollout $2=msg_out_file
+    python3 - "$1" "$2" <<'PYEOF'
+import json, os, sys
+rollout, msg_out = sys.argv[1], sys.argv[2]
+status = "none"
+try:
+    with open(rollout, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        position = fh.tell()
+        chunks = []
+        lines_needed = 400
+        while position > 0 and lines_needed > 0:
+            size = min(65536, position)
+            position -= size
+            fh.seek(position)
+            chunk = fh.read(size)
+            lines_needed -= chunk.count(b"\n")
+            chunks.append(chunk)
+        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
+        fh.seek(0)
+        import re as _re
+        pat = _re.compile(rb'"stopReason":\s*"stop"')
+        total = sum(1 for line in fh if pat.search(line))
+    for line in reversed(tail):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict) or d.get("type") != "message":
+            continue
+        m = d.get("message") or {}
+        if m.get("role") != "assistant":
+            continue
+        sr = m.get("stopReason")
+        # pi enum (dist-verified): stop | toolUse | error | aborted | length.
+        # Only "stop" is a clean completion; error/aborted/length are terminal
+        # failures (truncated or interrupted output must not be accepted);
+        # toolUse is mid-turn — keep walking back for the turn's final line.
+        if sr in ("error", "aborted", "length"):
+            status = "error"
+            break
+        if sr != "stop":
+            continue
+        text = "".join(b.get("text", "") for b in (m.get("content") or [])
+                       if isinstance(b, dict) and b.get("type") == "text")
+        status = "clean"
+        with open(msg_out, "wb") as out:
+            out.write(text.encode("utf-8", "replace"))
+        with open(msg_out + ".tok", "w") as tok:
+            tok.write(str(total))
+        break
+except OSError:
+    status = "none"
+print(status)
+PYEOF
+}
+
+# opencode profile: rollout is the session's message DIR; the newest assistant
+# msg json decides — error{...} means failed turn, time.finish means done;
+# the final text lives in storage/part/<sid>/<mid>/*.json text parts
+turn_status_opencode() {  # $1=session id $2=msg_out_file
+    python3 - "$1" "$OPENCODE_DIR/opencode.db" "$2" <<'PYEOF'
+import json, sqlite3, sys
+sid, db, msg_out = sys.argv[1], sys.argv[2], sys.argv[3]
+status = "none"
+try:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    row = conn.execute(
+        "SELECT data FROM session_message WHERE session_id=? AND type='assistant' "
+        "ORDER BY seq DESC LIMIT 1", (sid,)).fetchone()
+    if row:
+        d = json.loads(row[0])
+        if d.get("error") or d.get("finish") == "error":
+            status = "error"
+        elif d.get("finish") == "stop":
+            text = "".join(b.get("text", "") for b in (d.get("content") or [])
+                           if isinstance(b, dict) and b.get("type") == "text")
+            status = "clean"
+            with open(msg_out, "wb") as out:
+                out.write(text.encode("utf-8", "replace"))
+            seq_row = conn.execute(
+                "SELECT seq FROM session_message WHERE session_id=? AND type='assistant' "
+                "ORDER BY seq DESC LIMIT 1", (sid,)).fetchone()
+            if seq_row:
+                with open(msg_out + ".tok", "w") as tok:
+                    tok.write(str(seq_row[0]))
+        # finish=None -> still streaming -> none
+except (sqlite3.Error, OSError, json.JSONDecodeError):
+    status = "none"
+print(status)
+PYEOF
+}
+
+turn_status() {  # $1=rollout $2=msg_out_file
+    case "$CODEXC_TOOL" in
+        claude)   turn_status_claude "$@"; return ;;
+        pi)       turn_status_pi "$@"; return ;;
+        opencode) turn_status_opencode "$@"; return ;;
+    esac
+    python3 - "$1" "$2" <<'PYEOF'
+import base64, json, os, sys
+rollout, msg_out = sys.argv[1], sys.argv[2]
+status = "none"
+try:
+    with open(rollout, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        position = fh.tell()
+        chunks = []
+        lines_needed = 400
+        while position > 0 and lines_needed > 0:
+            size = min(65536, position)
+            position -= size
+            fh.seek(position)
+            chunk = fh.read(size)
+            lines_needed -= chunk.count(b"\n")
+            chunks.append(chunk)
+        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
+        # freshness counter: total terminal events in the whole file —
+        # monotonic across turns; a stale completion can never exceed the
+        # count taken at feed time
+        fh.seek(0)
+        import re as _re
+        pat = _re.compile(rb'"type":\s*"task_complete"')
+        total = sum(1 for line in fh if pat.search(line))
+    for line in reversed(tail):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        payload = d.get("payload") if isinstance(d, dict) else None
+        if not isinstance(payload, dict) or payload.get("type") != "task_complete":
+            continue
+        if payload.get("error"):
+            status = "error"
+            break
+        status = "clean"
+        msg = payload.get("last_agent_message")
+        msg = msg if isinstance(msg, str) else ""
+        with open(msg_out, "wb") as out:
+            out.write(msg.encode("utf-8", "replace"))
+        with open(msg_out + ".tok", "w") as tok:
+            tok.write(str(total))
+        break
+except OSError:
+    status = "none"
+print(status)
+PYEOF
+}
+
+result_marker() {  # $1=file with final message -> echoes DONE / BLOCKED / none
+    [ -s "$1" ] || { printf 'none'; return; }
+    line="$(grep -ioE 'TASK_RESULT:[[:space:]]*(DONE|BLOCKED)' "$1" | tail -1 | tr '[:upper:]' '[:lower:]')"
+    case "$line" in
+        *done*)    printf 'DONE' ;;
+        *blocked*) printf 'BLOCKED' ;;
+        *)         printf 'none' ;;
+    esac
+}
+
+# ---- queue ------------------------------------------------------------------
+# Sections: ## ready (auto-fed, top first) / ## review-needed (LLM-generated
+# candidates waiting for a human) / ## done. Only "- [ ] <task>" lines count.
+
+queue_next() {  # $1=queue file -> prints "lineno<TAB>b64(task)" or nothing
+    python3 - "$1" <<'PYEOF'
+import base64, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    raise SystemExit(0)
+section = ""
+for i, line in enumerate(lines, 1):
+    stripped = line.strip()
+    if stripped.startswith("##"):
+        section = stripped.lstrip("#").strip().lower()
+        continue
+    if section != "ready" or not stripped.startswith("- [ ]"):
+        continue
+    task = stripped[len("- [ ]"):].strip()
+    if not task:
+        continue
+    b64 = base64.b64encode(task.encode("utf-8")).decode("ascii")
+    print(f"{i}\t{b64}")
+    break
+PYEOF
+}
+
+queue_mark_done() {  # $1=queue file $2=b64(task) — first exact ready match -> [x]
+    python3 - "$1" "$2" <<'PYEOF'
+import base64, sys
+queue, b64 = sys.argv[1], sys.argv[2]
+task = base64.b64decode(b64).decode("utf-8", "replace")
+try:
+    lines = open(queue, encoding="utf-8").read().splitlines()
+except OSError:
+    raise SystemExit(0)
+section = ""
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped.startswith("##"):
+        section = stripped.lstrip("#").strip().lower()
+        continue
+    if section == "ready" and stripped == f"- [ ] {task}":
+        lines[i] = line.replace("- [ ]", "- [x]", 1)
+        print("marked")
+        break
+open(queue, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PYEOF
+}
+
+journal_append() {  # $1=task $2=summary
+    printf '%s | %s | %s\n' "$(date '+%F %T')" "$1" "$2" >> ".codingkeeper/journal"
+}
+
+# ---- process helpers --------------------------------------------------------
+
+kill_tree() {  # $1=pid — kill a timed-out gate/review and its whole child
+               # tree (a plain kill would orphan npm/pytest grandchildren)
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
+    kill -9 "$1" 2>/dev/null
+    return 0
+}
+
+# ---- gate -------------------------------------------------------------------
+
+gate_run() {  # runs .codingkeeper/gate.sh with a hard timeout; 0=pass; writes
+              # output tail to $1
+    local outfile="$1" gpid waited=0 rc
+    : > "$outfile"
+    if [ ! -x ".codingkeeper/gate.sh" ]; then
+        printf 'no gate.sh — gate skipped\n' > "$outfile"
+        return 0
+    fi
+    bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
+    gpid=$!
+    while kill -0 "$gpid" 2>/dev/null; do
+        if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
+            kill_tree "$gpid"
+            wait "$gpid" 2>/dev/null
+            printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$gpid" 2>/dev/null
+    rc=$?
+    return "$rc"
+}
+
+gate_tail() {  # last 500 chars of gate output, newlines flattened for feeding
+    tr '\n' ' ' < "$1" | tail -c 500
+}
+
+# ---- review -----------------------------------------------------------------
+
+parse_bugs() {  # $1=review output file -> prints bug count or "parse-fail".
+                # LAST "BUGS:" line wins: findings quoted mid-text can never
+                # outrank the reviewer's final verdict line
+    [ -f "$1" ] || { printf 'parse-fail'; return; }
+    local last
+    last="$(grep -an 'BUGS:' "$1" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    case "$last" in
+        ''|*[!0-9]*) printf 'parse-fail' ;;
+        *) printf '%s' "$last" ;;
+    esac
+}
+
+review_run() {  # $1=task text $2=outfile; prints bug count, "parse-fail" or
+                # "timeout" — a hung reviewer must not block the driver forever
+    local out="$2" instrfile="$2.instr" rpid waited=0 bugs
+    : > "$out"
+    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
+    printf '%s' "$instr" > "$instrfile"
+    if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
+        ( eval "$CODEXC_REVIEW_CMD" ) < "$instrfile" > "$out" 2>&1 &
+    else
+        ( codex exec --ephemeral -s read-only - ) < "$instrfile" > "$out" 2>&1 &
+    fi
+    rpid=$!
+    while kill -0 "$rpid" 2>/dev/null; do
+        if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
+            kill_tree "$rpid"
+            wait "$rpid" 2>/dev/null
+            printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
+            rm -f "$instrfile"
+            printf 'timeout'
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$rpid" 2>/dev/null
+    rm -f "$instrfile"
+    # codex exec mixes NUL bytes into stdout (app-server stream): without -a
+    # BSD grep classifies the file as binary and silently matches nothing
+    LC_ALL=C tr -d '\000' < "$out" > "$out.n" && mv "$out.n" "$out"
+    parse_bugs "$out"
+}
+
+review_tail() {  # findings tail for feeding back (NUL-free, one line)
+    LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600
+}
+
+# ---- driver -----------------------------------------------------------------
+# States: idle -> task(work -> gate -> review) -> idle | halt.
+# .codingkeeper/loop.halt pauses feeding (auto-created when the loop parks itself).
+
+# one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
+# anything creates the new dir; if a fresh scaffold already exists, the old
+# authoritative files (journal/queue/halt/sessions) override it.
+migrate_state_dir() {
+    [ -d .codexc ] || return 0
+    if [ ! -d .codingkeeper ]; then
+        mv .codexc .codingkeeper 2>/dev/null
+        log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
+        return 0
+    fi
+    ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
+    rmdir .codexc 2>/dev/null
+    log "state dir merged: .codexc contents -> .codingkeeper"
+}
+
+# 顶部任务横幅（类 Claude Code 任务面板）: pane-border-status top 常驻一行，
+# 随状态机每次变化刷新; # 转义为 ## 防 tmux 格式展开。CODEXC_BANNER=0 关闭。
+banner_set() {  # $1=横幅文本
+    [ "${CODEXC_BANNER:-1}" = "1" ] || return 0
+    local txt="${1//#/##}"
+    tmux set-option -p -t "$pane" pane-border-status top 2>/dev/null
+    tmux set-option -p -t "$pane" pane-border-format " 🔥 $txt" 2>/dev/null
+    status_write "$1"
+    return 0
+}
+
+# 状态快照: 桌面面板(menu bar app)的数据源, 每次状态变化即覆盖写
+status_write() {  # $1=状态文本
+    local pdir=".codingkeeper"
+    python3 - "$pdir" "$PWD" "${1//#/##}" <<'PYEOF'
+import json, os, sys
+pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
+parked = os.path.exists(os.path.join(pdir, "loop.halt"))
+snap = {"project": project, "task": task, "phase": task, "parked": parked,
+        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ts": int(__import__("time").time())}
+with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+    json.dump(snap, fh, ensure_ascii=False)
+PYEOF
+    return 0
+}
+
+# 项目登记表: 桌面面板发现项目的机制
+register_project() {
+    mkdir -p "$HOME/.codingkeeper" 2>/dev/null
+    local reg="$HOME/.codingkeeper/projects"
+    grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s
+' "$PWD" >> "$reg"
+    return 0
+}
+
+run_driver() {  # $1=pane
+    local pane="$1" rollout msgfile status marker
+    local mode="idle" phase="" task="" task_b64="" gate_rounds=0 review_rounds=0
+    local zero_streak=0 errored_since=0 empty_logged=0 halted_logged=0
+    # watermark of the already-consumed task_complete event: a stale
+    # completion must never be re-processed after feeding a fix back
+    local done_path="" done_size=0
+    # activity tracking: a completion may only be processed once the rollout
+    # actually changed since the feed — otherwise a stale tail from the
+    # previous task (or a swallowed feed) would be accepted as fresh
+    local last_path="" last_size=0 activity=0 last_progress_ts=0
+    # burn mode: idle_count = consecutive "nothing to do" completions; at
+    # CODEXC_IDLE_PARK the boiler shuts down instead of burning empty turns
+    local idle_count=0 task_kind="" head_at_feed=""
+    # freshness: a completion is only acceptable if its token (event offset or
+    # message seq) is strictly newer than the rollout state at feed time —
+    # otherwise a previous task's stale completion could be accepted when a
+    # fed turn dies without emitting its own terminal event
+    local feed_size=0
+    local gate_out review_out rc bugs cur_size
+
+    migrate_state_dir
+    register_project
+    mkdir -p ".codingkeeper" 2>/dev/null
+    if [ ! -d ".codingkeeper" ]; then
+        log "cannot create .codingkeeper in $(pwd) — giving up"
+        return 1
+    fi
+    # two drivers on one pane would interleave feeds into the composer
+    if [ -f ".codingkeeper/loop.pid" ] && kill -0 "$(cat ".codingkeeper/loop.pid" 2>/dev/null)" 2>/dev/null; then
+        log "another driver (pid $(cat ".codingkeeper/loop.pid")) is already running for this project — giving up"
+        return 1
+    fi
+    printf '%s\n' "$$" > ".codingkeeper/loop.pid"
+    # sweep temp files left by kill -9'd drivers (the EXIT trap cannot run then)
+    rm -f ".codingkeeper"/.loop-msg.* ".codingkeeper"/.loop-gate.* ".codingkeeper"/.loop-review.* 2>/dev/null
+    msgfile=".codingkeeper/.loop-msg.$$"
+    gate_out=".codingkeeper/.loop-gate.$$"
+    review_out=".codingkeeper/.loop-review.$$"
+    LOOP_TMP_FILES="$msgfile $msgfile.tok $gate_out $review_out $review_out.instr"
+    trap loop_cleanup EXIT
+
+    log "loop driver armed on pane $pane (poll=${CODEXC_LOOP_POLL}s gate_retries=$CODEXC_GATE_RETRIES review_pass=$CODEXC_REVIEW_PASS dry=$CODEXC_LOOP_DRY)"
+    notify "无人值守循环已启动 (队列: .codingkeeper/queue.md)"
+
+
+    while pane_alive "$pane"; do
+        sleep "$CODEXC_LOOP_POLL"
+
+        if [ -e ".codingkeeper/loop.halt" ]; then
+            if [ "$halted_logged" = "0" ]; then
+                banner_set "⛔ 已挂起: rm .codingkeeper/loop.halt 复燃"
+                log "halted: .codingkeeper/loop.halt present (rm it to resume)"
+                halted_logged=1
+            fi
+            continue
+        fi
+        halted_logged=0
+
+        if [ "$mode" = "halt" ]; then
+            if [ ! -e ".codingkeeper/loop.halt" ]; then
+                banner_set "🔥 复燃: 继续燃烧"
+                log "resuming from halt"
+                mode="idle"; phase=""
+            fi
+            continue
+        fi
+
+        if ! pane_idle "$pane"; then
+            continue
+        fi
+
+        if [ "$mode" = "idle" ]; then
+            line="$(queue_next ".codingkeeper/queue.md")"
+            if [ -z "$line" ]; then
+                if [ -z "$IDLE_PROMPT" ]; then
+                    if [ "$empty_logged" = "0" ]; then
+                        log "queue empty (no ready task) — waiting for .codingkeeper/queue.md to grow"
+                        empty_logged=1
+                    fi
+                    continue
+                fi
+                # burn mode: feed the standing prompt instead of idling
+                task_kind="idle"; task="(idle 持续改进)"
+                if ! feed_msg "$pane" "$IDLE_PROMPT"; then
+                    log "failed to feed idle prompt, retrying next poll"
+                    continue
+                fi
+                mode="task"; phase="work"
+                gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
+                done_path=""; done_size=0
+                last_progress_ts=$(date +%s)
+                rollout="$(find_rollout "$pane")"
+                if [ -n "$rollout" ]; then
+                    last_path="$rollout"
+                    last_size=$(rollout_size "$rollout")
+                else
+                    last_path=""; last_size=0
+                fi
+                feed_size=$(terminal_count "$rollout")
+                head_at_feed=$(git rev-parse HEAD 2>/dev/null || echo none)
+                banner_set "🔥 空闲燃烧: 持续改进与收尾审查 (队列空)"
+            log "idle prompt fed (burn): 持续改进/收尾审查"
+                continue
+            fi
+            empty_logged=0
+            task_b64="${line#*$TAB}"
+            task="$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode("utf-8","replace"))' "$task_b64")"
+            task_kind="queue"
+            if [ "$CODEXC_LOOP_DRY" = "1" ]; then
+                log "dry: would feed task: $task — dry run ends here"
+                notify "dry 试跑完成, 未发送任何内容"
+                return 0
+            fi
+            if ! feed_msg "$pane" "[codexc-loop] 队列任务: $task —— 完成后若有代码改动请 git commit, 最后一条消息以 TASK_RESULT: DONE 结尾 (受阻则 TASK_RESULT: BLOCKED: 原因)"; then
+                log "failed to feed task, retrying next poll"
+                continue
+            fi
+            mode="task"; phase="work"
+            gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
+            done_path=""; done_size=0
+            last_progress_ts=$(date +%s)
+            # seed with the rollout as it exists NOW (including the previous
+            # task's tail), so only post-feed growth counts as activity
+            rollout="$(find_rollout "$pane")"
+            if [ -n "$rollout" ]; then
+                last_path="$rollout"
+                last_size=$(rollout_size "$rollout")
+            else
+                last_path=""; last_size=0
+            fi
+            feed_size=$(terminal_count "$rollout")
+            ready_n=$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || echo 0)
+            banner_set "📋 $task ｜ 队列剩余 ${ready_n} │ 执行中"
+            log "task fed: $task"
+            continue
+        fi
+
+        # mode == task, pane idle -> the turn ended; read its outcome.
+        # stall check FIRST (before find_rollout): a fed task with zero rollout
+        # progress for STALL seconds means the pane is stuck on a modal
+        # (trust/login gates) which may not even have a rollout yet
+        if [ $(( $(date +%s) - last_progress_ts )) -ge "$CODEXC_LOOP_STALL" ]; then
+            notify "循环挂起: 投喂后 ${CODEXC_LOOP_STALL}s 无进展 — 请查看 TUI 是否停在信任门/登录等界面 ($task)"
+            log "parked: no rollout progress for ${CODEXC_LOOP_STALL}s after feed (modal blocking?)"
+            mode="halt"; phase=""
+            touch ".codingkeeper/loop.halt"
+            continue
+        fi
+        rollout="$(find_rollout "$pane")"
+        if [ -z "$rollout" ]; then
+            log "no rollout found for pane $pane; waiting"
+            continue
+        fi
+        cur_size=$(rollout_size "$rollout")
+        if [ "$rollout" != "$last_path" ] || [ "$cur_size" != "$last_size" ]; then
+            activity=1
+            last_progress_ts=$(date +%s)
+        else
+            activity=0
+        fi
+        last_path="$rollout"; last_size="$cur_size"
+        : > "$msgfile"
+        status="$(turn_status "$rollout" "$msgfile")"
+        case "$status" in
+            none)
+                log "turn outcome not visible yet; waiting"
+                continue
+                ;;
+            error)
+                # transient errors are the watcher's job; give it the cooldown
+                # window before parking the task. Any rollout growth since the
+                # last error means a rescued turn actually RAN (watcher
+                # continue -> minutes of work) — restart the grace from this
+                # failure instead of parking a functioning rescue cycle.
+                if [ "$activity" = "1" ] && [ "$errored_since" != "0" ]; then
+                    errored_since=0
+                fi
+                if [ "$errored_since" = "0" ]; then
+                    errored_since=$(date +%s)
+                    log "turn ended in error; 60s grace for the watcher before parking"
+                elif [ $(( $(date +%s) - errored_since )) -ge 60 ]; then
+                    notify "循环挂起: 任务连续报错需要人工处理 ($task)"
+                    log "parked: turn keeps ending in error"
+                    mode="halt"; phase=""
+                    touch ".codingkeeper/loop.halt"
+                fi
+                continue
+                ;;
+        esac
+
+        # a clean completion is only processed when the rollout changed since
+        # the feed (activity) and was not consumed before (watermark). Review
+        # re-runs for the streak need no new events and skip both checks.
+        if [ "$status" = "clean" ] && [ "$phase" = "work" ]; then
+            if [ "$activity" != "1" ]; then
+                continue   # nothing new since the feed; waiting for the turn
+            fi
+            if [ "$rollout" = "$done_path" ] && [ "$cur_size" -le "$done_size" ]; then
+                continue   # completion already consumed; waiting for the next turn
+            fi
+            done_path="$rollout"; done_size=$cur_size
+        fi
+
+        marker="$(result_marker "$msgfile")"
+        case "$marker" in
+            DONE)
+                if [ "$task_kind" = "idle" ]; then
+                    head_now="$(git rev-parse HEAD 2>/dev/null || echo none)"
+                    # exclude the loop's own runtime dir: loop.pid etc. would
+                    # otherwise make the tree permanently "dirty" and the idle
+                    # corroboration would never pass in git projects
+                    dirty="$(git status --porcelain -- . ':(exclude).codingkeeper' 2>/dev/null | head -1)"
+                    if grep -q '(idle)' "$msgfile" 2>/dev/null && [ "$head_now" = "$head_at_feed" ] && [ -z "$dirty" ]; then
+                        # genuinely nothing to do: corroborated by the worker's
+                        # idle claim AND a clean tree at the same commit
+                        idle_count=$((idle_count + 1))
+                        if [ "$idle_count" -ge "$CODEXC_IDLE_PARK" ]; then
+                            notify "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃"
+                            log "parked: $idle_count consecutive idle turns — nothing left to burn"
+                            mode="halt"; phase=""
+                            touch ".codingkeeper/loop.halt"
+                            continue
+                        fi
+                        log "idle turn $idle_count/$CODEXC_IDLE_PARK: nothing to do — burning the standing prompt again"
+                        mode="idle"; phase=""
+                        continue
+                    fi
+                    idle_count=0   # real work happened despite/because of the prompt
+                    log "idle turn produced real work — gate and review apply"
+                fi
+                ;;
+            BLOCKED)
+                notify "循环挂起: codex 报告 BLOCKED — $task"
+                log "parked: worker reported BLOCKED for: $task"
+                mode="halt"; phase=""
+                touch ".codingkeeper/loop.halt"
+                continue
+                ;;
+            *)
+                notify "循环挂起: 回合结束但缺少 TASK_RESULT 标记 — $task"
+                log "parked: turn ended without TASK_RESULT marker (last message: $(tail -c 120 "$msgfile" | tr '\n' ' '))"
+                mode="halt"; phase=""
+                touch ".codingkeeper/loop.halt"
+                continue
+                ;;
+        esac
+
+        if [ "$phase" = "work" ]; then
+            phase="gate"
+            gate_run "$gate_out"
+            rc=$?
+            last_progress_ts=$(date +%s)
+            if [ "$rc" -ne 0 ]; then
+                gate_rounds=$((gate_rounds + 1))
+                if [ "$gate_rounds" -gt "$CODEXC_GATE_RETRIES" ]; then
+                    notify "循环挂起: gate 连续 $gate_rounds 次未通过 — $task"
+                    log "parked: gate failed $gate_rounds times (tail: $(gate_tail "$gate_out"))"
+                    mode="halt"; phase=""
+                    touch ".codingkeeper/loop.halt"
+                    continue
+                fi
+                banner_set "🔧 gate 修复中 (第 $gate_rounds/$CODEXC_GATE_RETRIES 轮) — $task"
+                log "gate failed (round $gate_rounds/$CODEXC_GATE_RETRIES) rc=$rc"
+                if feed_msg "$pane" "[codexc-loop] gate 未通过(第 $gate_rounds 次): $(gate_tail "$gate_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
+                    last_progress_ts=$(date +%s)
+                else
+                    log "gate feedback deferred (pane busy?) — will retry when the rollout grows"
+                fi
+                phase="work"
+                continue
+            fi
+            banner_set "🔍 独立审查中 (streak $zero_streak/$CODEXC_REVIEW_PASS) — $task"
+            log "gate passed; starting review (streak $zero_streak/$CODEXC_REVIEW_PASS)"
+            phase="review"
+        fi
+
+        if [ "$phase" = "review" ]; then
+            review_rounds=$((review_rounds + 1))
+            if [ "$review_rounds" -gt "$CODEXC_REVIEW_ROUNDS" ]; then
+                notify "循环挂起: 审查轮次超过 $CODEXC_REVIEW_ROUNDS 上限 — $task"
+                log "parked: review rounds exhausted"
+                mode="halt"; phase=""
+                touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            bugs="$(review_run "$task" "$review_out")"
+            last_progress_ts=$(date +%s)
+            if [ "$bugs" = "timeout" ]; then
+                notify "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task"
+                log "parked: review timed out (tail: $(review_tail "$review_out"))"
+                mode="halt"; phase=""
+                touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            if [ "$bugs" = "parse-fail" ]; then
+                notify "循环挂起: 审查输出无法解析 (无 BUGS: 行) — $task"
+                log "parked: review output unparseable (tail: $(review_tail "$review_out"))"
+                mode="halt"; phase=""
+                touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            if [ "$bugs" -gt 0 ]; then
+                zero_streak=0
+                log "review round $review_rounds found $bugs bug(s)"
+                if feed_msg "$pane" "[codexc-loop] 独立审查发现 $bugs 个 bug: $(review_tail "$review_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
+                    last_progress_ts=$(date +%s)
+                else
+                    log "review feedback deferred (pane busy?) — will retry when the rollout grows"
+                fi
+                phase="work"
+                continue
+            fi
+            zero_streak=$((zero_streak + 1))
+            log "review round $review_rounds: 0 bugs (streak $zero_streak/$CODEXC_REVIEW_PASS)"
+            if [ "$zero_streak" -ge "$CODEXC_REVIEW_PASS" ]; then
+                token="$(cat "$msgfile.tok" 2>/dev/null || echo 0)"
+                case "$token" in ''|*[!0-9]*) token=0 ;; esac
+                if [ "$token" -le "$feed_size" ]; then
+                    log "stale completion ignored (token $token <= feed baseline $feed_size) — waiting for the fed turn's own event"
+                    zero_streak=0
+                    phase="work"   # re-run the gate when the real completion lands
+                    continue
+                fi
+                if [ "$task_kind" = "idle" ]; then
+                    marked="marked"   # no queue line to check off
+                else
+                    marked="$(queue_mark_done ".codingkeeper/queue.md" "$task_b64")"
+                fi
+                journal_append "$task" "accepted after $review_rounds review round(s), gate retries $gate_rounds"
+                notify "任务通过验收: $task"
+                banner_set "✅ 已验收: $task ｜ 燃烧继续"
+            log "task accepted: $task (queue line: ${marked:-not-found})"
+                if [ "$marked" != "marked" ]; then
+                    notify "循环挂起: 队列里找不到已验收的任务行（可能被改写）— 请人工核对 queue.md"
+                    log "parked: accepted task line not found in queue.md"
+                    mode="halt"; phase=""
+                    touch ".codingkeeper/loop.halt"
+                    continue
+                fi
+                mode="idle"; phase=""
+            fi
+            # streak < PASS -> loop runs the next review on the following poll
+        fi
+    done
+    log "pane $pane gone, loop driver exiting"
+}
+
+# ---- init -------------------------------------------------------------------
+
+# Probe the project for its test toolchain and echo one runnable command per
+# detected stack (conservative: lockfiles/config files decide, not guesses).
+detect_test_cmds() {
+    # python
+    if [ -f uv.lock ]; then
+        echo "uv run pytest -q"
+    elif [ -f pyproject.toml ] && grep -q 'pytest' pyproject.toml 2>/dev/null; then
+        echo "python3 -m pytest -q"
+    elif [ -f pytest.ini ] || [ -f setup.cfg ]; then
+        echo "python3 -m pytest -q"
+    elif [ -f requirements.txt ] && grep -qi 'pytest' requirements.txt 2>/dev/null; then
+        echo "python3 -m pytest -q"
+    fi
+    # node (runner picked from the lockfile)
+    if [ -f package.json ] && grep -q '"test"' package.json 2>/dev/null; then
+        if [ -f bun.lockb ] || [ -f bun.lock ]; then echo "bun run test"
+        elif [ -f pnpm-lock.yaml ]; then echo "pnpm test"
+        elif [ -f yarn.lock ]; then echo "yarn test"
+        else echo "npm test"
+        fi
+    fi
+    [ -f go.mod ] && echo "go test ./..."
+    [ -f Cargo.toml ] && echo "cargo test --quiet"
+    [ -f pubspec.yaml ] && echo "flutter test"
+    if [ -f Makefile ] && grep -qE '^test[[:space:]]*:' Makefile 2>/dev/null; then
+        echo "make test"
+    fi
+    return 0
+}
+
+cmd_init() {
+    mkdir -p ".codingkeeper"
+    local agents_file="AGENTS.md"
+    [ "$CODEXC_TOOL" = "claude" ] && agents_file="CLAUDE.md"
+    if [ ! -f ".codingkeeper/.gitignore" ]; then
+        printf '.loop-*\nloop.pid\n' > ".codingkeeper/.gitignore"
+        echo "  created .codingkeeper/.gitignore (transient driver files stay out of git)"
+    fi
+    if [ ! -f ".codingkeeper/queue.md" ]; then
+        cat > ".codingkeeper/queue.md" <<'EOF'
+# codexc 任务队列 — codexc-loop 从 ## ready 顶部开始投喂
+# codex 每完成一个任务, 把自评后的后续任务写进 ## review-needed;
+# 你确认后把它挪到 ## ready (改成 - [ ] 即可), 循环才会执行它。
+
+## ready
+- [ ] 通读本仓库, 理解项目结构与现有测试; 然后在 ## review-needed 分区列出 3 个最有价值的改进任务; 最后输出 TASK_RESULT: DONE
+
+## review-needed
+(空)
+
+## done
+(空)
+EOF
+        echo "  created .codingkeeper/queue.md (内置引导任务: 让 codex 通读仓库并自评列出后续任务)"
+    fi
+    if [ ! -f ".codingkeeper/gate.sh" ]; then
+        cmds="$(detect_test_cmds)"
+        if [ -n "$cmds" ]; then
+            {
+                echo '#!/bin/bash'
+                echo '# 验收门禁: 由 codexc-loop init 自动探测生成 — 请核对是否符合本项目'
+                echo '# 外环只认本脚本的真实退出码; 命令写错会在第一次任务时暴露'
+                echo 'set -e'
+                while IFS= read -r c; do
+                    [ -n "$c" ] || continue
+                    echo "echo \"[gate] $c\""
+                    echo "$c"
+                done <<< "$cmds"
+            } > ".codingkeeper/gate.sh"
+            chmod +x ".codingkeeper/gate.sh"
+            echo "  created .codingkeeper/gate.sh (探测到测试命令:)"
+            while IFS= read -r c; do [ -n "$c" ] && echo "    $c"; done <<< "$cmds"
+        else
+            cat > ".codingkeeper/gate.sh" <<'EOF'
+#!/bin/bash
+# 未探测到测试命令 — 把本项目的真实测试放进来; 外环只认退出码。
+# 示例: set -e; pytest -q --cov-fail-under=80
+echo "(gate placeholder: 未探测到测试命令 — 请编辑本文件)"
+exit 0
+EOF
+            chmod +x ".codingkeeper/gate.sh"
+            echo "  created .codingkeeper/gate.sh (未探测到测试命令 — 请手动填写)"
+        fi
+    fi
+    if [ -f "$agents_file" ] && ! grep -q "codexc-loop" "$agents_file"; then
+        cat >> "$agents_file" <<'EOF'
+
+## codexc-loop 约定
+- 每个 .codingkeeper/queue.md 里 ## ready 的任务由外部循环自动投喂; 完成实现并自测后 git commit(不要 push), 最后一条消息以 TASK_RESULT: DONE 结尾; 受阻用 TASK_RESULT: BLOCKED: 原因。
+- 独立审查发现 bug 时会回灌给你修复, 修复后同样以 TASK_RESULT: DONE 结尾。
+- 自评产生的后续任务写入 ## review-needed 分区(不要直接写 ## ready), 人工确认后才会执行。
+- burn 模式(默认开启): 队列空闲时循环会投喂持续改进指令; 确实无事可做时以 TASK_RESULT: DONE (idle) 结尾, 连续空转两次锅炉自动熄火。
+EOF
+        echo "  appended conventions to $agents_file"
+    fi
+    echo "init done — codexc loop 启动会话即可 (队列与门禁已就绪)"
+}
+
+# ---- selftest ---------------------------------------------------------------
+
+ASSERT_FAILURES=0
+assert_eq() {  # desc expected actual
+    if [ "$2" = "$3" ]; then
+        echo "  ok: $1"
+    else
+        echo "  FAIL: $1 (expected [$2] got [$3])"
+        ASSERT_FAILURES=$((ASSERT_FAILURES + 1))
+    fi
+}
+
+tmpd() { mktemp -d "${TMPDIR:-/tmp}/codexc-loop-test.XXXXXX"; }
+
+cmd_selftest() {
+    local d rc bugs
+    echo "== queue parsing =="
+    d="$(tmpd)"
+    cat > "$d/queue.md" <<'EOF'
+intro line
+## ready
+- [ ] first task
+- [ ] second task
+## review-needed
+- [ ] self generated idea
+## done
+- [x] old task
+EOF
+    line="$(queue_next "$d/queue.md")"
+    assert_eq "first ready task lineno" "3" "${line%%$TAB*}"
+    task="$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' "${line#*$TAB}")"
+    assert_eq "first ready task text" "first task" "$task"
+
+    queue_mark_done "$d/queue.md" "${line#*$TAB}"
+    grep -qx -- "- \[x\] first task" "$d/queue.md" && rc=0 || rc=1
+    assert_eq "mark done rewrites the line" "0" "$rc"
+    line="$(queue_next "$d/queue.md")"
+    task="$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' "${line#*$TAB}")"
+    assert_eq "next after marking" "second task" "$task"
+
+    printf '## ready\n(no tasks)\n' > "$d/q2.md"
+    assert_eq "empty ready -> nothing" "" "$(queue_next "$d/q2.md")"
+    assert_eq "missing file -> nothing" "" "$(queue_next "$d/absent.md")"
+
+    echo "== result marker =="
+    d="$(tmpd)"
+    printf 'blah blah\nTASK_RESULT: DONE\n' > "$d/m1"
+    assert_eq "DONE marker" "DONE" "$(result_marker "$d/m1")"
+    printf 'TASK_RESULT:  blocked: 磁盘满\n' > "$d/m2"
+    assert_eq "BLOCKED marker (case/space)" "BLOCKED" "$(result_marker "$d/m2")"
+    printf 'no marker here\n' > "$d/m3"
+    assert_eq "missing marker" "none" "$(result_marker "$d/m3")"
+    : > "$d/m4"
+    assert_eq "empty file marker" "none" "$(result_marker "$d/m4")"
+
+    echo "== BUGS line parsing =="
+    d="$(tmpd)"
+    printf 'found:\n- src/x.py:10 off-by-one\nBUGS: 2\n' > "$d/r1"
+    bugs="$(grep -oE 'BUGS:[[:space:]]*[0-9]+' "$d/r1" | tail -1 | grep -oE '[0-9]+')"
+    assert_eq "two bugs parsed" "2" "$bugs"
+    printf '无问题\nBUGS: 0\n' > "$d/r2"
+    bugs="$(grep -oE 'BUGS:[[:space:]]*[0-9]+' "$d/r2" | tail -1 | grep -oE '[0-9]+')"
+    assert_eq "zero bugs parsed" "0" "$bugs"
+    printf 'review text without marker\n' > "$d/r3"
+    bugs="$(grep -an 'BUGS:' "$d/r3" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    case "$bugs" in ''|*[!0-9]*) bugs="parse-fail" ;; esac
+    assert_eq "unparseable -> parse-fail" "parse-fail" "$bugs"
+
+    printf 'codex\n无问题\n\nBUGS: 0\nTASK_RESULT: DONE\ntokens used\n64,877\n' > "$d/r4"
+    printf '\000' >> "$d/r4"   # codex exec mixes NUL bytes into stdout
+    bugs="$(grep -an 'BUGS:' "$d/r4" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    assert_eq "NUL-laden output parses 0" "0" "$bugs"
+
+    printf '发现:\n- x.py:1 崩溃\nBUGS: 3\n' > "$d/r5"
+    bugs="$(grep -an 'BUGS:' "$d/r5" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    assert_eq "nonzero count parses" "3" "$bugs"
+
+    echo "== rollout turn_status =="
+    d="$(tmpd)"
+    printf '%s\n%s\n%s\n' \
+        '{"payload":{"type":"task_started"}}' \
+        '{"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..." }]}}' \
+        '{"payload":{"type":"task_complete","last_agent_message":"完成\nTASK_RESULT: DONE","error":null}}' \
+        > "$d/rollout.jsonl"
+    status="$(turn_status "$d/rollout.jsonl" "$d/msg1")"
+    assert_eq "clean turn status" "clean" "$status"
+    tok="$(cat "$d/msg1.tok" 2>/dev/null || echo 0)"
+    case "$tok" in ''|*[!0-9]*) tok=0 ;; esac
+    [ "$tok" -gt 0 ] && rc=0 || rc=1
+    assert_eq "freshness token emitted (codex)" "0" "$rc"
+    assert_eq "last_agent_message decoded" "完成
+TASK_RESULT: DONE" "$(cat "$d/msg1")"
+    assert_eq "marker from rollout msg" "DONE" "$(result_marker "$d/msg1")"
+
+    printf '%s\n%s\n' \
+        '{"payload":{"type":"task_started"}}' \
+        '{"payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"429"}}}' \
+        > "$d/rollout2.jsonl"
+    status="$(turn_status "$d/rollout2.jsonl" "$d/msg2")"
+    : > "$d/msg2"   # errored turns write no message file
+    assert_eq "errored turn status" "error" "$status"
+    assert_eq "errored msg empty" "" "$(cat "$d/msg2")"
+
+    printf '%s\n' '{"payload":{"type":"task_started"}}' > "$d/rollout3.jsonl"
+    assert_eq "no task_complete yet" "none" "$(turn_status "$d/rollout3.jsonl" "$d/msg3")"
+
+    echo "== burn env parsing =="
+        parse_idle() {
+        case "$1" in
+            0|off|no|false) IDLE_PROMPT="" ;;
+            ""|1|on|yes|true) IDLE_PROMPT="$IDLE_PROMPT_DEFAULT" ;;
+            *) IDLE_PROMPT="$(printf '%s' "$1" | tr '\n' ' ')" ;;
+        esac
+    }
+    parse_idle ""; assert_eq "unset -> default ON" "[x] default" "$IDLE_PROMPT"
+    parse_idle "0"; assert_eq "off -> disabled" "" "$IDLE_PROMPT"
+    parse_idle $'自定义\n提示'; assert_eq "custom flattened" "自定义 提示" "$IDLE_PROMPT"
+
+    echo "== gate command detection =="
+    d="$(tmpd)"
+    mkdir -p "$d/py-uv"; printf '[project]\nname="x"\n' > "$d/py-uv/pyproject.toml"; touch "$d/py-uv/uv.lock"
+    cmds="$( cd "$d/py-uv" && detect_test_cmds )"
+    assert_eq "uv project" "uv run pytest -q" "$cmds"
+
+    mkdir -p "$d/node-pnpm"; printf '{"scripts":{"test":"vitest"}}\n' > "$d/node-pnpm/package.json"; touch "$d/node-pnpm/pnpm-lock.yaml"
+    cmds="$( cd "$d/node-pnpm" && detect_test_cmds )"
+    assert_eq "pnpm project" "pnpm test" "$cmds"
+
+    mkdir -p "$d/go"; printf 'module x\n' > "$d/go/go.mod"
+    cmds="$( cd "$d/go" && detect_test_cmds )"
+    assert_eq "go project" "go test ./..." "$cmds"
+
+    mkdir -p "$d/none"
+    cmds="$( cd "$d/none" && detect_test_cmds )"
+    assert_eq "no markers -> nothing" "" "$cmds"
+
+    mkdir -p "$d/mono"; printf '[project]\nname="m"\ndependencies=["pytest"]\n' > "$d/mono/pyproject.toml"; printf 'module m\n' > "$d/mono/go.mod"
+    cmds="$( cd "$d/mono" && detect_test_cmds )"
+    assert_eq "multi-stack -> both" "python3 -m pytest -q
+go test ./..." "$cmds"
+
+    echo "== claude turn_status parsing =="
+    d="$(tmpd)"
+    mk_claude_rollout() {  # $1=file, rest appended as json lines via python
+        python3 - "$@" <<'PYGEN'
+import json, sys
+path = sys.argv[1]
+events = sys.argv[2:]
+with open(path, "a", encoding="utf-8") as fh:
+    for e in events:
+        fh.write(json.dumps(json.loads(e), ensure_ascii=False) + "\n")
+PYGEN
+    }
+    : > "$d/c1.jsonl"
+    mk_claude_rollout "$d/c1.jsonl" \
+        '{"type":"user","message":{"content":"hi"}}' \
+        '{"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn","content":[{"type":"text","text":"TASK_RESULT: DONE"}]}}' \
+        '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"tool_use","name":"Bash"}]}}' \
+        '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"完成\nTASK_RESULT: DONE"}]}}'
+    status="$(CODEXC_TOOL=claude turn_status_claude "$d/c1.jsonl" "$d/c1msg")"
+    assert_eq "claude clean status" "clean" "$status"
+    tok="$(cat "$d/c1msg.tok" 2>/dev/null || echo 0)"
+    case "$tok" in ''|*[!0-9]*) tok=0 ;; esac
+    [ "$tok" -gt 0 ] && rc=0 || rc=1
+    assert_eq "freshness token emitted (claude)" "0" "$rc"
+    assert_eq "claude marker extracted (sidechain skipped)" "DONE" "$(result_marker "$d/c1msg")"
+
+    : > "$d/c2.jsonl"
+    mk_claude_rollout "$d/c2.jsonl" \
+        '{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"message":{"content":[{"type":"text","text":"API Error: 429"}]}}'
+    status="$(CODEXC_TOOL=claude turn_status_claude "$d/c2.jsonl" "$d/c2msg")"
+    assert_eq "claude api-error status" "error" "$status"
+
+    : > "$d/c3.jsonl"
+    mk_claude_rollout "$d/c3.jsonl" '{"type":"user","message":{"content":"x"}}'
+    printf '%s' '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"partial li' >> "$d/c3.jsonl"   # no newline, invalid json
+    status="$(CODEXC_TOOL=claude turn_status_claude "$d/c3.jsonl" "$d/c3msg")"
+    assert_eq "partial trailing line tolerated" "none" "$status"
+
+    : > "$d/c4.jsonl"
+    mk_claude_rollout "$d/c4.jsonl" \
+        '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok done"}]}}'
+    status="$(CODEXC_TOOL=claude turn_status_claude "$d/c4.jsonl" "$d/c4msg")"
+    assert_eq "clean without marker still clean" "clean" "$status"
+    assert_eq "final message captured" "ok done" "$(cat "$d/c4msg")"
+
+    echo "== claude project dir munging =="
+    d="$(tmpd)"
+    mkdir -p "$d/proj.test"
+    want="$(printf '%s' "$d/proj.test" | sed 's/[\/.]/-/g')"
+    mkdir -p "$d/cfg/projects/$want"
+    CLAUDE_DIR="$d/cfg" form="$(claude_project_dir "$d/proj.test")"
+    assert_eq "dots+slashes munge to dash (existing dir wins)" "$want" "$form"
+    form="$(CLAUDE_DIR="$d/cfg" claude_project_dir "/no/such/dir.v2")"
+    assert_eq "non-existing falls back to munged logical path" "-no-such-dir-v2" "$form"
+
+    if [ "$ASSERT_FAILURES" -eq 0 ]; then
+        echo "SELFTEST PASS"
+        return 0
+    fi
+    echo "SELFTEST FAILED ($ASSERT_FAILURES)"
+    return 1
+}
+
+# ---- integration selftest ---------------------------------------------------
+# Drives the real state machine against scratch worlds: a real tmux pane
+# (`cat > fed.log` acts as the worker), a synthetic rollout under a scratch
+# CODEX_HOME, a fake gate and a fake reviewer. No API calls.
+
+IT_FAILURES=0
+it_assert() {  # desc expected actual
+    if [ "$2" = "$3" ]; then
+        echo "  ok: $1"
+    else
+        echo "  FAIL: $1 (expected [$2] got [$3])"
+        IT_FAILURES=$((IT_FAILURES + 1))
+    fi
+}
+
+it_wait() {  # desc file pattern timeout_seconds
+    local desc="$1" file="$2" pattern="$3" limit="$4" n=0
+    while [ "$n" -lt "$limit" ]; do
+        grep -qE -- "$pattern" "$file" 2>/dev/null && { echo "  ok: $desc"; return 0; }
+        sleep 1; n=$((n + 1))
+    done
+    echo "  FAIL: $desc (timeout waiting for [$pattern] in $file)"
+    echo "    ---- tail ----"; tail -5 "$file" 2>/dev/null | sed 's/^/    /'
+    IT_FAILURES=$((IT_FAILURES + 1))
+    return 1
+}
+
+it_wait_count() {  # desc file pattern min_occurrences timeout_seconds
+    local desc="$1" file="$2" pattern="$3" need="$4" limit="$5" n=0 c=0
+    while [ "$n" -lt "$limit" ]; do
+        c="$(grep -c -- "$pattern" "$file" 2>/dev/null)"
+        [ -z "$c" ] && c=0
+        [ "$c" -ge "$need" ] && { echo "  ok: $desc"; return 0; }
+        sleep 1; n=$((n + 1))
+    done
+    echo "  FAIL: $desc (timeout: wanted $need x [$pattern], got $c in $file)"
+    IT_FAILURES=$((IT_FAILURES + 1))
+    return 1
+}
+
+it_wait_file() {  # desc path timeout_seconds — waits for a file to exist (may be empty)
+    local desc="$1" path="$2" n=0
+    while [ "$n" -lt "$3" ]; do
+        [ -e "$path" ] && { echo "  ok: $desc"; return 0; }
+        sleep 1; n=$((n + 1))
+    done
+    echo "  FAIL: $desc (timeout waiting for file $path)"
+    IT_FAILURES=$((IT_FAILURES + 1))
+    return 1
+}
+
+it_world() {  # creates $1/{home,proj}; echoes scratch root
+    local root="$1"
+    rm -rf "$root"; mkdir -p "$root/home/sessions" "$root/proj/.codingkeeper"
+    if [ "${IT_TOOL:-codex}" = "opencode" ]; then
+        mkdir -p "$root/home/oc"
+        sqlite3 "$root/home/oc/opencode.db" \
+          "CREATE TABLE session_v2 (id text PRIMARY KEY, directory text NOT NULL, time_updated integer NOT NULL);
+           CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, seq integer NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+           INSERT INTO session_v2 VALUES ('ses_scratch', '$root/proj', 1);" >/dev/null
+    fi
+    printf '%s' "$root"
+}
+
+it_fake_review() {  # $1=script path $2..=sequence of bug counts
+    local script="$1"; shift
+    {
+        echo '#!/bin/bash'
+        echo 'cat > /dev/null   # consume instructions from stdin'
+        echo 'counts=$(cat "'"$script"'.counts" 2>/dev/null || echo '"$*"' )'
+        echo 'n=$(echo "$counts" | cut -d" " -f1)'
+        echo 'rest=$(echo "$counts" | cut -s -d" " -f2-)'
+        echo 'printf "%s" "$rest" > "'"$script"'.counts"'
+        echo 'echo "review findings..."; echo "BUGS: $n"'
+    } > "$script"
+    chmod +x "$script"
+    printf '%s\n' "$*" > "$script.counts"
+}
+
+it_append_complete() {  # $1=rollout(path or message-dir) $2=marker-message text
+    if [ "${IT_TOOL:-codex}" = "opencode" ]; then
+        python3 - "$2" "${OPENCODE_DATA_DIR:?opencode harness needs OPENCODE_DATA_DIR}" <<'PYEOF'
+import json, sqlite3, sys
+text, oc = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(oc + "/opencode.db")
+n = conn.execute("SELECT count(*) FROM session_message").fetchone()[0]
+mid = "msg_scratch_%d" % (n + 1)
+conn.execute("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)",
+             (mid, "ses_scratch", "assistant", n + 1, n + 1, n + 1,
+              json.dumps({"finish": "stop",
+                          "content": [{"type": "text", "text": text}]})))
+conn.commit()
+PYEOF
+    elif [ "${IT_TOOL:-codex}" = "pi" ]; then
+        python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+event = {"type": "message", "message": {"role": "assistant", "stopReason": "stop",
+         "content": [{"type": "text", "text": sys.argv[2]}]}}
+with open(sys.argv[1], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+PYEOF
+    elif [ "${IT_TOOL:-codex}" = "claude" ]; then
+        python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+events = [
+    {"type": "user", "message": {"content": "go"}},
+    {"type": "assistant", "message": {"stop_reason": "end_turn",
+     "content": [{"type": "text", "text": sys.argv[2]}]}},
+]
+with open(sys.argv[1], "a", encoding="utf-8") as fh:
+    for e in events:
+        fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+PYEOF
+    else
+        python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+event = {"payload": {"type": "task_complete", "last_agent_message": sys.argv[2], "error": None}}
+with open(sys.argv[1], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event) + "\n")
+PYEOF
+    fi
+}
+
+cmd_selftest_integration() {
+    IT_TOOL="${1:-codex}"
+    case "$IT_TOOL" in codex|claude|pi|opencode) ;; *) echo "unknown tool '$IT_TOOL'"; return 1 ;; esac
+    export CODEXC_TOOL="$IT_TOOL"
+    echo "(tool under test: $IT_TOOL)"
+    command -v tmux >/dev/null || { echo "integration selftest needs tmux"; return 1; }
+    local base="/tmp/codexc-loop-it.$$" root sess driver_pid
+    echo "== scenario 1: happy path (feed -> gate -> 2x zero reviews -> done) =="
+    root="$(it_world "$base-s1")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s1-$$"
+    printf '# q\n## ready\n- [ ] 实现加法函数\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho "gate ok"\nexit 0\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" CODEXC_GATE_TIMEOUT=20 \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed into pane" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2   # let the driver enter task mode
+    it_append_complete "$rolloc" "完成\nTASK_RESULT: DONE"
+    it_wait "queue marked done" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 实现加法函数' 40
+    it_wait "journal written" "$root/proj/.codingkeeper/journal" 'accepted after 2 review' 10
+    kill "$driver_pid" 2>/dev/null   # the driver idles by design; stop it explicitly
+    wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 2: gate fails once, then passes =="
+    root="$(it_world "$base-s2")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s2-$$"
+    printf '# q\n## ready\n- [ ] 任务B\n' > "$root/proj/.codingkeeper/queue.md"
+    { echo '#!/bin/bash'
+      echo 'c=$(cat '"$root"'/gate.counts 2>/dev/null || echo 1)'
+      echo 'echo "$((c-1))" > '"$root"'/gate.counts'
+      echo 'if [ "$c" -ge 1 ]; then echo "unit test boom"; exit 1; fi'
+      echo 'echo "gate ok"; exit 0'
+    } > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "gate failure fed back" "$root/fed.log" 'gate 未通过' 30
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "second attempt passes gate and completes" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务B' 60
+    kill "$driver_pid" 2>/dev/null   # the driver idles by design; stop it explicitly
+    wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 3: review finds bugs, fix, then two zero reviews =="
+    root="$(it_world "$base-s3")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s3-$$"
+    printf '# q\n## ready\n- [ ] 任务C\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 3 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "bugs fed back" "$root/fed.log" '独立审查发现 3 个 bug' 30
+    sleep 2
+    it_append_complete "$rolloc" "修复完毕 TASK_RESULT: DONE"
+    it_wait "task done after fix + double zero" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务C' 60
+    kill "$driver_pid" 2>/dev/null   # the driver idles by design; stop it explicitly
+    wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 4: review rounds exhausted -> park + halt file =="
+    root="$(it_world "$base-s4")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s4-$$"
+    printf '# q\n## ready\n- [ ] 任务D\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 1 1 1 1 1 1 1
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_ROUNDS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    # each completion triggers a review that finds a bug and feeds a fix back;
+    # after CODEXC_REVIEW_ROUNDS=2 reviews a third cycle must park the loop
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "first bugs fed back" "$root/fed.log" '独立审查发现 1 个 bug' 30
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait_count "second bugs fed back" "$root/fed.log" '独立审查发现 1 个 bug' 2 30
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait_file "halt file created" "$root/proj/.codingkeeper/loop.halt" 40
+    kill "$driver_pid" 2>/dev/null   # the driver idles by design; stop it explicitly
+    wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 5: BLOCKED marker -> park =="
+    root="$(it_world "$base-s5")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s5-$$"
+    printf '# q\n## ready\n- [ ] 任务E\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "缺依赖装不上 TASK_RESULT: BLOCKED: 没有 libfoo"
+    it_wait_file "halt file (BLOCKED park)" "$root/proj/.codingkeeper/loop.halt" 30
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 6: completion without TASK_RESULT marker -> park =="
+    root="$(it_world "$base-s6")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s6-$$"
+    printf '# q\n## ready\n- [ ] 任务F\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "我完成了但是忘了写标记"
+    it_wait_file "halt file (missing marker park)" "$root/proj/.codingkeeper/loop.halt" 30
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 7: no rollout progress after feed -> stall park =="
+    root="$(it_world "$base-s7")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s7-$$"
+    printf '# q\n## ready\n- [ ] 任务G\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_LOOP_STALL=8 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    it_wait_file "halt file (stall park)" "$root/proj/.codingkeeper/loop.halt" 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 8: hanging gate -> timeout + tree kill =="
+    root="$(it_world "$base-s8")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s8-$$"
+    printf '# q\n## ready\n- [ ] 任务H\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\nsleep 120 #fi-gate-marker\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_GATE_TIMEOUT=5 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "gate timeout fed back" "$root/fed.log" 'gate timed out after 5s' 40
+    sleep 1
+    pgrep -f 'gate.sh' >/dev/null 2>&1 && { echo "  FAIL: gate child survived kill_tree"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: gate child tree reaped"
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 9: hanging reviewer -> review timeout park =="
+    root="$(it_world "$base-s9")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s9-$$"
+    printf '# q\n## ready\n- [ ] 任务I\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    { echo '#!/bin/bash'; echo 'cat > /dev/null'; echo 'sleep 120 #fi-review-marker'; echo 'echo "BUGS: 0"'; } > "$root/review.sh"
+    chmod +x "$root/review.sh"; printf '1\n' > "$root/review.sh.counts"
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_TIMEOUT=5 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait_file "halt file (review timeout park)" "$root/proj/.codingkeeper/loop.halt" 40
+    pgrep -f 'review.sh' >/dev/null 2>&1 && { echo "  FAIL: reviewer child survived kill_tree"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: reviewer child tree reaped"
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 10: two-task queue with halt/resume between =="
+    root="$(it_world "$base-s10")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s10-$$"
+    printf '# q\n## ready\n- [ ] 任务甲\n- [ ] 任务乙\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task 甲 fed" "$root/fed.log" '队列任务: 任务甲' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "任务甲 accepted" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务甲' 40
+    touch "$root/proj/.codingkeeper/loop.halt"
+    sleep 3
+    rm -f "$root/proj/.codingkeeper/loop.halt"
+    it_wait "任务乙 fed after resume" "$root/fed.log" '队列任务: 任务乙' 30
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "任务乙 accepted" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务乙' 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 11: special-character task text round-trips =="
+    root="$(it_world "$base-s11")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s11-$$"
+    cat > "$root/proj/.codingkeeper/queue.md" <<'EOF'
+# q
+## ready
+- [ ] 处理 "-引号"与\反斜杠和%变量" 文本
+EOF
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "special-char task fed intact" "$root/fed.log" '处理 "-引号' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "special-char task accepted" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 处理' 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 12: burn mode — idle prompt produces real work =="
+    sess="loopit-s12-$$"
+    root="$(it_world "$base-s12")"; if [ "$IT_TOOL" = opencode ]; then
+            # burn scenarios pin the session id instead of DB discovery —
+            # they exercise burn logic (already covered for discovery by
+            # scenarios 1-11); the worker pane carries opencode's idle hint
+            rolloc="ses_scratch"; export OPENCODE_DATA_DIR="$root/home/oc"
+            worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"
+        else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi
+    printf '# q\n## ready\n(空 — burn 模式应投喂持续改进指令)\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "standing prompt fed" "$root/fed.log" '持续改进' 20
+    bs="$(tmux show-options -pv -t "$sess" pane-border-status 2>/dev/null)"
+    bf="$(tmux show-options -pv -t "$sess" pane-border-format 2>/dev/null)"
+    [ "$bs" = "top" ] && echo "  ok: 顶部横幅已启用" || { echo "  FAIL: 顶部横幅未启用 ($bs)"; IT_FAILURES=$((IT_FAILURES+1)); }
+    case "$bf" in *空闲燃烧*) echo "  ok: 横幅内容正确" ;; *) echo "  FAIL: 横幅内容 ($bf)"; IT_FAILURES=$((IT_FAILURES+1)); ;; esac
+    sleep 2
+    it_append_complete "$rolloc" "修好了一个边界问题 TASK_RESULT: DONE"
+    it_wait "idle work accepted into journal" "$root/proj/.codingkeeper/journal" 'idle 持续改进' 60
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 13: burn mode — consecutive idle turns park the boiler =="
+    sess="loopit-s13-$$"
+    root="$(it_world "$base-s13")"; if [ "$IT_TOOL" = opencode ]; then
+            # burn scenarios pin the session id instead of DB discovery —
+            # they exercise burn logic (already covered for discovery by
+            # scenarios 1-11); the worker pane carries opencode's idle hint
+            rolloc="ses_scratch"; export OPENCODE_DATA_DIR="$root/home/oc"
+            worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"
+        else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi
+    ( cd "$root/proj" && git init -q && echo x > README.md && git add . && git commit -qm init )
+    printf '# q\n## ready\n(空)\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait_count "first idle prompt fed" "$root/fed.log" '持续改进' 1 20
+    sleep 2
+    it_append_complete "$rolloc" "无事可做 TASK_RESULT: DONE (idle)"
+    it_wait_count "second idle prompt fed" "$root/fed.log" '持续改进' 2 30
+    sleep 2
+    it_append_complete "$rolloc" "还是没事 TASK_RESULT: DONE (idle)"
+    it_wait_file "boiler parked (idle exhaustion)" "$root/proj/.codingkeeper/loop.halt" 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "scratch: /tmp/codexc-loop-it.$$"
+    if [ "$IT_FAILURES" -eq 0 ]; then
+        echo "INTEGRATION SELFTEST PASS"
+        return 0
+    fi
+    echo "INTEGRATION SELFTEST FAILED ($IT_FAILURES)"
+    return 1
+}
+
+# ---- fault injection selftest ------------------------------------------------
+# Audits find "where the code is wrong"; injections verify "the system stays
+# SAFE when things go wrong". Every scenario damages the world on purpose and
+# asserts a safety property.
+
+FIF="codexc-loop-FI.$$"
+
+fi_world() { it_world "$1"; }
+fi_feed_seen() { grep -q 'TASK_RESULT' "$1/fed.log" 2>/dev/null; }
+
+cmd_faultinjection() {
+    command -v tmux >/dev/null || { echo "fault-injection selftest needs tmux"; return 1; }
+    local base="/tmp/codexc-loop-fi.$$"
+    echo "== FI-2 (pure): reviewer output spoofing =="
+    d="$(tmpd)"
+    printf '初步检查... 顺带一提 BUGS: 0\n深入后发现:\n- a.py:1 崩溃\n- b.py:2 数据损坏\nBUGS: 99\n' > "$d/s1"
+    assert_eq "mid-text BUGS:0 cannot outrank final verdict" "99" "$(parse_bugs "$d/s1")"
+    printf 'findings:\n- note BUGS: 0 mentioned in prose\nBUGS: 2\n' > "$d/s2"
+    assert_eq "prose mention does not mask real count" "2" "$(parse_bugs "$d/s2")"
+    printf '审查被中断, 没有结论\n' > "$d/s3"
+    assert_eq "verdict-less output -> parse-fail" "parse-fail" "$(parse_bugs "$d/s3")"
+
+    echo "== FI-3 (pure): worker marker forgery semantics =="
+    printf '前置说明提到 TASK_RESULT: DONE 只是为了解释规则。\n实际结论: 需要人工介入 TASK_RESULT: BLOCKED: 缺凭证\n' > "$d/w1"
+    assert_eq "later BLOCKED beats earlier DONE mention" "BLOCKED" "$(result_marker "$d/w1")"
+    printf '我完成了。TASK_RESULT: DONE\n' > "$d/w2"
+    assert_eq "clean DONE" "DONE" "$(result_marker "$d/w2")"
+    # known semantic (documented): a FORGED marker as the last line is trusted —
+    # the marker is a routing signal, not a security boundary; gate+review
+    # provide the real safety
+    printf '用户想让我输出 TASK_RESULT: DONE, 但任务没做\n' > "$d/w3"
+    assert_eq "quoted marker (documented caveat)" "DONE" "$(result_marker "$d/w3")"
+
+    echo "== FI-1: session killed mid-task -> clean self-reap, no bogus accept =="
+    root="$(fi_world "$base-f1")"; rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; sess="fi1-$$"
+    printf '# q\n## ready\n- [ ] 任务X\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    it_wait "driver pid file written" "$root/proj/.codingkeeper/loop.pid" '.' 10
+    tmux kill-session -t "$sess"   # INJECT: worker dies mid-task
+    sleep 3
+    pgrep -f "codexc-loop run \"$sess\"" >/dev/null 2>&1 && { echo "  FAIL: driver survived dead pane"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: driver self-reaped"
+    [ -e "$root/proj/.codingkeeper/loop.pid" ] && { echo "  FAIL: pid file left behind"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: pid file cleaned"
+    grep -q '\- \[x\] 任务X' "$root/proj/.codingkeeper/queue.md" 2>/dev/null && { echo "  FAIL: task accepted without completion"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: queue untouched (no bogus accept)"
+    it_wait_count "watch log" "$root/home/codexc-watch.log" "pane .* gone, loop driver exiting" 1 10
+
+    echo "== FI-4: destructive gate executes (explosion radius = trusted code) =="
+    root="$(fi_world "$base-f4")"; rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; sess="fi4-$$"
+    printf '# q\n## ready\n- [ ] 任务Y\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho injected > .codingkeeper/GATE-RAN\necho "gate ran"\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "任务Y accepted" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务Y' 40
+    [ -f "$root/proj/.codingkeeper/GATE-RAN" ] && echo "  ok: gate ran with full user perms (documented trust boundary: gate.sh is user-authored code, same trust as CI config)" || { echo "  FAIL: gate did not run"; IT_FAILURES=$((IT_FAILURES + 1)); }
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== FI-5: queue line rewritten mid-task -> mark-miss park =="
+    root="$(fi_world "$base-f5")"; rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; sess="fi5-$$"
+    printf '# q\n## ready\n- [ ] 任务Z\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    # INJECT: worker rewrites its own queue line while the loop is reviewing
+    printf '# q\n## ready\n- [ ] 任务Z（被 worker 改写过）\n' > "$root/proj/.codingkeeper/queue.md"
+    it_wait_file "halt file (mark-miss park)" "$root/proj/.codingkeeper/loop.halt" 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== FI-6: errored turn is never accepted during grace =="
+    root="$(fi_world "$base-f6")"; rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; sess="fi6-$$"
+    printf '# q\n## ready\n- [ ] 任务W\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    # INJECT: turn ends in a provider error (last_agent_message=null)
+    python3 - "$rolloc" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], "a") as fh:
+    fh.write(json.dumps({"payload": {"type": "task_complete", "last_agent_message": None, "error": {"message": "usage limit reached"}}}) + "\n")
+PYEOF
+    sleep 15
+    grep -q '任务W' "$root/proj/.codingkeeper/journal" 2>/dev/null && { echo "  FAIL: errored turn got accepted"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: errored turn not accepted during grace"
+    it_wait_count "error grace logged" "$root/home/codexc-watch.log" "turn ended in error" 1 10
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== FI-7: driver kill -9 -> next driver sweeps and takes over =="
+    root="$(fi_world "$base-f7")"; rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; sess="fi7-$$"
+    printf '# q\n## ready\n- [ ] 任务V\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_fake_review "$root/review.sh" 0 0
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    it_wait "driver pid file written" "$root/proj/.codingkeeper/loop.pid" '.' 10
+    kill -9 "$driver_pid" 2>/dev/null   # INJECT: SIGKILL — the EXIT trap cannot run
+    sleep 1
+    [ -e "$root/proj/.codingkeeper/loop.pid" ] && echo "  ok: stale pid file present (expected after SIGKILL)" || echo "  note: pid file already gone"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver2.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "replacement driver takes over (re-feeds unchecked task)" "$root/fed.log" '队列任务: 任务V' 30
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "任务V accepted by replacement" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务V' 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    rm -rf "/tmp/codexc-loop-fi.$$" 2>/dev/null
+    if [ "$IT_FAILURES" -eq 0 ]; then
+        echo "FAULT-INJECTION SELFTEST PASS"
+        return 0
+    fi
+    echo "FAULT-INJECTION SELFTEST FAILED ($IT_FAILURES)"
+    return 1
+}
+
+# ---- dispatch ---------------------------------------------------------------
+
+usage() {
+    awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0"
+}
+
+case "${1:-}" in
+    init)    shift; cmd_init ;;
+    run)     [ $# -ge 2 ] || { echo "codexc-loop: run needs a pane id" >&2; exit 1; }
+             shift; run_driver "$1" ;;
+    selftest) shift; cmd_selftest ;;
+    selftest-integration) shift; cmd_selftest_integration "${1:-codex}" ;;
+    selftest-faultinjection) shift; cmd_faultinjection ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

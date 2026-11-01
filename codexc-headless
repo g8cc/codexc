@@ -1,0 +1,722 @@
+#!/bin/bash
+# codexc-headless — night runner for coding agents with headless interfaces.
+#
+# The headless lane of the codexc boiler: instead of feeding a TUI, each task
+# is one blocking subprocess call to the tool's non-interactive interface
+# (dsh --profile headless, codex exec, claude -p, opencode run, pi -p ...).
+# Everything downstream is identical to the TUI lane: same queue file, same
+# gate.sh exit-code gate, same cross-model two-zero review, same journal,
+# same burn mode and park semantics.
+#
+# Why a separate lane: headless tools have no terminal to feed — no busy
+# markers, no trust modals, no key emulation. A turn is simply a subprocess;
+# failures surface as empty/erroneous stdout, and a hung turn is bounded by
+# a hard timeout.
+#
+# Files (per project): .codingkeeper/queue.md, .codingkeeper/gate.sh, .codingkeeper/journal,
+# .codingkeeper/loop.halt (pause/resume, also set when the runner parks itself) —
+# identical to codexc-loop, so a project can switch lanes freely.
+#
+# Worker contract (same as codexc-loop): the fed prompt asks the worker to
+# end its final message with TASK_RESULT: DONE or TASK_RESULT: BLOCKED: why.
+#
+# Usage:
+#   codexc-headless init        scaffold queue.md + gate.sh + .gitignore
+#   codexc-headless run         night runner (requires CODEXC_HEADLESS_CMD)
+#   codexc-headless selftest    unit tests
+#   codexc-loop selftest-integration <tool>  covers the TUI lane tools
+#
+# Env:
+#   CODEXC_HEADLESS_CMD    required. Full command of the worker; the task is
+#                          written to stdin. Example (dsh):
+#                          "dsh --profile headless --session-id night -"
+#   CODEXC_HEADLESS_TIMEOUT  per-turn hard timeout seconds (default 3600)
+#   CODEXC_TURN_RETRIES    consecutive failed turns before parking (default 3)
+#   CODEXC_LOOP_IDLE       burn mode (default ON, same prompt as codexc-loop;
+#                          "0" disables; other text replaces the prompt)
+#   CODEXC_IDLE_PARK       consecutive no-op idle turns before parking (default 2)
+#   CODEXC_GATE_TIMEOUT    gate.sh hard timeout seconds (default 900)
+#   CODEXC_REVIEW_TIMEOUT  review hard timeout seconds   (default 1800)
+#   CODEXC_REVIEW_CMD      override reviewer (must print BUGS: <n>)
+#   CODEXC_LOOP_DRY        1 = log actions, never run the worker
+
+set -u
+
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+TAB="$(printf '\t')"
+LOOP_TMP_FILES=""
+
+normalize_uint() {
+    local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number
+    case "$value" in
+        ''|*[!0-9]*) echo "codexc-headless: invalid $name '$value'; using $fallback" >&2; printf '%s' "$fallback"; return ;;
+    esac
+    number=$((10#$value))
+    if [ "$number" -lt "$minimum" ] || [ "$number" -gt "$maximum" ]; then
+        echo "codexc-headless: $name must be between $minimum and $maximum; using $fallback" >&2
+        number=$fallback
+    fi
+    printf '%s' "$number"
+}
+
+CODEXC_HEADLESS_TIMEOUT="$(normalize_uint CODEXC_HEADLESS_TIMEOUT "${CODEXC_HEADLESS_TIMEOUT:-3600}" 3600 5 86400)"
+CODEXC_TURN_RETRIES="$(normalize_uint CODEXC_TURN_RETRIES "${CODEXC_TURN_RETRIES:-3}" 3 1 20)"
+CODEXC_GATE_TIMEOUT="$(normalize_uint CODEXC_GATE_TIMEOUT "${CODEXC_GATE_TIMEOUT:-900}" 900 5 86400)"
+CODEXC_REVIEW_TIMEOUT="$(normalize_uint CODEXC_REVIEW_TIMEOUT "${CODEXC_REVIEW_TIMEOUT:-1800}" 1800 30 86400)"
+CODEXC_REVIEW_PASS="$(normalize_uint CODEXC_REVIEW_PASS "${CODEXC_REVIEW_PASS:-2}" 2 1 10)"
+CODEXC_IDLE_PARK="$(normalize_uint CODEXC_IDLE_PARK "${CODEXC_IDLE_PARK:-2}" 2 1 10)"
+CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1 60)"
+CODEXC_LOOP_DRY="$(normalize_uint CODEXC_LOOP_DRY "${CODEXC_LOOP_DRY:-0}" 0 0 1)"
+
+
+IDLE_PROMPT_DEFAULT='[codexc-headless] 持续改进: 审查当前代码的正确性/安全/性能/可靠/鲁棒/可维护/测试/依赖/可观测/文档, 发现问题修复并 commit, 无事可做以 TASK_RESULT: DONE (idle) 结尾'
+_idle_raw="${CODEXC_LOOP_IDLE-}"
+case "$_idle_raw" in
+    0|off|no|false) IDLE_PROMPT="" ;;
+    ""|1|on|yes|true) IDLE_PROMPT="$IDLE_PROMPT_DEFAULT" ;;
+    *) IDLE_PROMPT="$(printf '%s' "$_idle_raw" | tr '\n' ' ')" ;;
+esac
+
+log() {
+    (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
+    echo "$(date '+%F %T') headless: $*" >> "$WATCHLOG"
+}
+
+notify() {
+    [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
+    local esc="${1//\\/\\}"; esc="${esc//\"/\\\"}"
+    command -v osascript >/dev/null && \
+        osascript -e "display notification \"$esc\" with title \"codexc-headless\"" 2>/dev/null
+    return 0
+}
+
+kill_tree() {
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
+    kill -9 "$1" 2>/dev/null
+    return 0
+}
+
+LOOP_TMP_FILES=""
+loop_cleanup() {
+    # shellcheck disable=SC2086
+    rm -f $LOOP_TMP_FILES ".codingkeeper/loop.pid" 2>/dev/null
+    return 0
+}
+
+queue_next() {  # $1=queue file -> prints "lineno<TAB>b64(task)" or nothing
+    python3 - "$1" <<'PYEOF'
+import base64, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    raise SystemExit(0)
+section = ""
+for i, line in enumerate(lines, 1):
+    stripped = line.strip()
+    if stripped.startswith("##"):
+        section = stripped.lstrip("#").strip().lower()
+        continue
+    if section != "ready" or not stripped.startswith("- [ ]"):
+        continue
+    task = stripped[len("- [ ]"):].strip()
+    if not task:
+        continue
+    b64 = base64.b64encode(task.encode("utf-8")).decode("ascii")
+    print(f"{i}\t{b64}")
+    break
+PYEOF
+}
+
+queue_mark_done() {  # $1=queue file $2=b64(task) -> prints "marked" or "not-found"
+    python3 - "$1" "$2" <<'PYEOF'
+import base64, sys
+queue, b64 = sys.argv[1], sys.argv[2]
+task = base64.b64decode(b64).decode("utf-8", "replace")
+try:
+    lines = open(queue, encoding="utf-8").read().splitlines()
+except OSError:
+    print("not-found"); raise SystemExit(0)
+section = ""
+done_it = False
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped.startswith("##"):
+        section = stripped.lstrip("#").strip().lower()
+        continue
+    if section == "ready" and stripped == f"- [ ] {task}":
+        lines[i] = line.replace("- [ ]", "- [x]", 1)
+        done_it = True
+        break
+open(queue, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+print("marked" if done_it else "not-found")
+PYEOF
+}
+
+journal_append() {
+    printf '%s | %s | %s\n' "$(date '+%F %T')" "$1" "$2" >> ".codingkeeper/journal"
+}
+
+gate_run() {  # $1=outfile; 0=pass
+    local outfile="$1" gpid waited=0 rc
+    : > "$outfile"
+    if [ ! -x ".codingkeeper/gate.sh" ]; then
+        printf 'no gate.sh — gate skipped\n' > "$outfile"
+        return 0
+    fi
+    bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
+    gpid=$!
+    while kill -0 "$gpid" 2>/dev/null; do
+        if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
+            kill_tree "$gpid"
+            wait "$gpid" 2>/dev/null
+            printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$gpid" 2>/dev/null
+    rc=$?
+    return "$rc"
+}
+
+gate_tail() { tr '\n' ' ' < "$1" | tail -c 500; }
+
+parse_bugs() {  # $1=review output file -> bug count or "parse-fail"
+    [ -f "$1" ] || { printf 'parse-fail'; return; }
+    local last
+    last="$(grep -an 'BUGS:' "$1" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    case "$last" in
+        ''|*[!0-9]*) printf 'parse-fail' ;;
+        *) printf '%s' "$last" ;;
+    esac
+}
+
+review_run() {  # $1=task text $2=outfile -> bug count / "parse-fail" / "timeout"
+    local out="$2" instrfile="$2.instr" rpid waited=0 bugs
+    : > "$out"
+    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
+    printf '%s' "$instr" > "$instrfile"
+    if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
+        ( eval "$CODEXC_REVIEW_CMD" ) < "$instrfile" > "$out" 2>&1 &
+    else
+        ( codex exec --ephemeral -s read-only - ) < "$instrfile" > "$out" 2>&1 &
+    fi
+    rpid=$!
+    while kill -0 "$rpid" 2>/dev/null; do
+        if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
+            kill_tree "$rpid"
+            wait "$rpid" 2>/dev/null
+            printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
+            rm -f "$instrfile"
+            printf 'timeout'
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$rpid" 2>/dev/null
+    rm -f "$instrfile"
+    LC_ALL=C tr -d '\000' < "$out" > "$out.n" && mv "$out.n" "$out"
+    parse_bugs "$out"
+}
+
+review_tail() { LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600; }
+
+result_marker() {  # $1=stdout file -> DONE / BLOCKED / none
+    [ -s "$1" ] || { printf 'none'; return; }
+    line="$(grep -ioE 'TASK_RESULT:[[:space:]]*(DONE|BLOCKED)' "$1" | tail -1 | tr '[:upper:]' '[:lower:]')"
+    case "$line" in
+        *done*)    printf 'DONE' ;;
+        *blocked*) printf 'BLOCKED' ;;
+        *)         printf 'none' ;;
+    esac
+}
+
+# one headless turn: blocking subprocess with hard timeout; stdout carries the
+# worker's final message. Returns 0 and fills $2 (stdout file); rc 124 = timeout
+headless_turn() {  # $1=task text $2=outfile
+    local outfile="$2" instrfile="$2.instr" rpid waited=0
+    : > "$outfile"
+    printf '%s' "$1" > "$instrfile"
+    if [ "$CODEXC_LOOP_DRY" = "1" ]; then
+        printf 'TASK_RESULT: DONE\n' > "$outfile"
+        rm -f "$instrfile"
+        return 0
+    fi
+    ( eval "$CODEXC_HEADLESS_CMD" ) < "$instrfile" > "$outfile" 2>/dev/null &
+    rpid=$!
+    while kill -0 "$rpid" 2>/dev/null; do
+        if [ "$waited" -ge "$CODEXC_HEADLESS_TIMEOUT" ]; then
+            kill_tree "$rpid"
+            wait "$rpid" 2>/dev/null
+            printf '\n[turn timed out after %ss]\n' "$CODEXC_HEADLESS_TIMEOUT" >> "$outfile"
+            rm -f "$instrfile"
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$rpid" 2>/dev/null
+    rm -f "$instrfile"
+    LC_ALL=C tr -d '\000' < "$outfile" > "$outfile.n" && mv "$outfile.n" "$outfile"
+    return 0
+}
+
+# one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
+# anything creates the new dir; if a fresh scaffold already exists, the old
+# authoritative files (journal/queue/halt/sessions) override it.
+migrate_state_dir() {
+    [ -d .codexc ] || return 0
+    if [ ! -d .codingkeeper ]; then
+        mv .codexc .codingkeeper 2>/dev/null
+        log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
+        return 0
+    fi
+    ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
+    rmdir .codexc 2>/dev/null
+    log "state dir merged: .codexc contents -> .codingkeeper"
+}
+
+# 顶部任务横幅（同 codexc-loop）: 仅当 runner 自身在 tmux 内时渲染。
+banner_set() {  # $1=横幅文本
+    [ "${CODEXC_BANNER:-1}" = "1" ] || return 0
+    local txt="${1//#/##}"
+    if [ -n "${TMUX_PANE:-}" ]; then
+        tmux set-option -p -t "$TMUX_PANE" pane-border-status top 2>/dev/null
+        tmux set-option -p -t "$TMUX_PANE" pane-border-format " ⚙️ $txt" 2>/dev/null
+    fi
+    status_write "$1"
+    return 0
+}
+
+status_write() {  # $1=状态文本 (headless 同款快照)
+    local pdir=".codingkeeper"
+    python3 - "$pdir" "$PWD" "${1//#/##}" <<'PYEOF'
+import json, os, sys
+pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
+parked = os.path.exists(os.path.join(pdir, "loop.halt"))
+snap = {"project": project, "task": task, "phase": task, "parked": parked,
+        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ts": int(__import__("time").time())}
+with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+    json.dump(snap, fh, ensure_ascii=False)
+PYEOF
+    return 0
+}
+
+register_project() {
+    mkdir -p "$HOME/.codingkeeper" 2>/dev/null
+    local reg="$HOME/.codingkeeper/projects"
+    grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s\n' "$PWD" >> "$reg"
+    return 0
+}
+
+run_runner() {
+    [ -n "${CODEXC_HEADLESS_CMD:-}" ] || { echo "codexc-headless: CODEXC_HEADLESS_CMD is required (e.g. \"dsh --profile headless --session-id night -\")" >&2; return 1; }
+    migrate_state_dir
+    register_project
+    mkdir -p ".codingkeeper" 2>/dev/null
+    if [ ! -d ".codingkeeper" ]; then
+        log "cannot create .codingkeeper in $(pwd) — giving up"
+        return 1
+    fi
+    # auto-init (与 TUI 通道一致): 队列/门禁按项目自动生成
+    if [ ! -f ".codingkeeper/queue.md" ]; then
+        cmd_init >> "$WATCHLOG" 2>&1
+        log "auto-init: 队列/门禁已生成 (gate.sh 是占位 — 请放入真实测试命令)"
+    fi
+    if [ -f ".codingkeeper/loop.pid" ] && kill -0 "$(cat ".codingkeeper/loop.pid" 2>/dev/null)" 2>/dev/null; then
+        log "another runner (pid $(cat ".codingkeeper/loop.pid")) is already running for this project — giving up"
+        return 1
+    fi
+    printf '%s\n' "$$" > ".codingkeeper/loop.pid"
+    rm -f ".codingkeeper"/.hl-out.* ".codingkeeper"/.hl-gate.* ".codingkeeper"/.hl-review.* 2>/dev/null
+    local out="$$.hl" # placeholder, real names below
+    local outfile=".codingkeeper/.hl-out.$$" gate_out=".codingkeeper/.hl-gate.$$" review_out=".codingkeeper/.hl-review.$$" instrfile=".codingkeeper/.hl-in.$$"
+    LOOP_TMP_FILES="$outfile $outfile.instr $gate_out $review_out"
+    trap loop_cleanup EXIT
+
+    log "headless runner armed (timeout=${CODEXC_HEADLESS_TIMEOUT}s retries=$CODEXC_TURN_RETRIES burn=$([ -n "$IDLE_PROMPT" ] && echo on || echo off) dry=$CODEXC_LOOP_DRY)"
+
+    local mode="idle" idle_count=0 task_kind="" task="" task_b64=""
+    local gate_rounds=0 review_rounds=0 zero_streak=0 fail_streak=0
+    local head_at_feed="" token marked rc bugs
+
+
+    while [ ! -e ".codingkeeper/loop.halt" ]; do
+        if [ "$mode" = "halt" ]; then
+            log "resumed from halt"
+            mode="idle"; idle_count=0
+        fi
+        if [ "$mode" = "idle" ]; then
+            line="$(queue_next ".codingkeeper/queue.md")"
+            if [ -z "$line" ]; then
+                if [ -z "$IDLE_PROMPT" ]; then
+                    sleep "$CODEXC_LOOP_POLL"
+                    continue
+                fi
+                task_kind="idle"; task="(idle 持续改进)"
+            if [ "$CODEXC_LOOP_DRY" = "1" ]; then
+                log "dry: would run headless turn for: $task — dry run ends here"
+                return 0
+            fi
+            banner_set "$task_kind: $task"
+            log "turn started ($task_kind): $task"
+            headless_turn "$prompt" "$outfile"
+            rc=$?
+            if [ "$rc" = "124" ]; then
+                fail_streak=$((fail_streak + 1))
+                log "turn timed out ($fail_streak/$CODEXC_TURN_RETRIES)"
+                if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
+                    notify "循环挂起: 连续 $fail_streak 个回合超时 — 请检查 worker"
+                    log "parked: consecutive turn timeouts"
+                    mode="halt"; touch ".codingkeeper/loop.halt"
+                fi
+                continue
+            fi
+            marker="$(result_marker "$outfile")"
+            if [ "$marker" = "none" ]; then
+                fail_streak=$((fail_streak + 1))
+                log "turn produced no TASK_RESULT (empty/error stdout?) $fail_streak/$CODEXC_TURN_RETRIES (tail: $(LC_ALL=C tr -d '\000' < "$outfile" | tr '\n' ' ' | tail -c 150))"
+                if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
+                    notify "循环挂起: 连续 $fail_streak 个回合无有效输出 (worker 认证/配置?)"
+                    log "parked: repeated empty turns"
+                    mode="halt"; touch ".codingkeeper/loop.halt"
+                fi
+                continue
+            fi
+            fail_streak=0
+            if [ "$marker" = "BLOCKED" ]; then
+                notify "循环挂起: worker 报告 BLOCKED — $task"
+                log "parked: worker reported BLOCKED"
+                mode="halt"; touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            if [ "$task_kind" = "idle" ]; then
+                head_now="$(git rev-parse HEAD 2>/dev/null || echo none)"
+                dirty="$(git status --porcelain -- . ':(exclude).codingkeeper' 2>/dev/null | head -1)"
+                if grep -q '(idle)' "$outfile" 2>/dev/null && [ "$head_now" = "$head_at_feed" ] && [ -z "$dirty" ]; then
+                    idle_count=$((idle_count + 1))
+                    log "idle turn $idle_count/$CODEXC_IDLE_PARK: nothing to do"
+                    if [ "$idle_count" -ge "$CODEXC_IDLE_PARK" ]; then
+                        notify "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃"
+                        log "parked: idle exhaustion"
+                        mode="halt"; touch ".codingkeeper/loop.halt"
+                    fi
+                    continue
+                fi
+                idle_count=0
+                log "idle turn produced real work — gate and review apply"
+            fi
+            # shared gate/review/accept phase
+            gate_run "$gate_out"; rc=$?
+            last_progress=""
+            if [ "$rc" -ne 0 ]; then
+                gate_rounds=$((gate_rounds + 1))
+                if [ "$gate_rounds" -gt "$CODEXC_GATE_RETRIES" ]; then
+                    notify "循环挂起: gate 连续 $gate_rounds 次未通过 — $task"
+                    log "parked: gate failed $gate_rounds times (tail: $(gate_tail "$gate_out"))"
+                    mode="halt"; touch ".codingkeeper/loop.halt"
+                    continue
+                fi
+                banner_set "🔧 gate 修复中 (第 $gate_rounds/$CODEXC_GATE_RETRIES 轮) — $task"
+                log "gate failed (round $gate_rounds/$CODEXC_GATE_RETRIES) rc=$rc"
+                prompt="[codexc-headless] gate 未通过(第 $gate_rounds 次): $(gate_tail "$gate_out") —— 请修复后以 TASK_RESULT: DONE 结尾"
+                headless_turn "$prompt" "$outfile"   # fix turn (bounded by timeout)
+                marker="$(result_marker "$outfile")"
+                [ "$marker" = "DONE" ] && gate_run "$gate_out"; rc=$?
+                if [ "$rc" -ne 0 ]; then continue; fi
+            fi
+            phase=review
+            bugs="$(review_run "$task" "$review_out")"
+            if [ "$bugs" = "timeout" ]; then
+                notify "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task"
+                log "parked: review timed out"
+                mode="halt"; touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            if [ "$bugs" = "parse-fail" ]; then
+                notify "循环挂起: 审查输出无法解析 — $task"
+                log "parked: review output unparseable"
+                mode="halt"; touch ".codingkeeper/loop.halt"
+                continue
+            fi
+            if [ "$bugs" -gt 0 ]; then
+                zero_streak=0
+                log "review found $bugs bug(s) — feeding back"
+                prompt="[codexc-headless] 独立审查发现 $bugs 个 bug: $(review_tail "$review_out") —— 请修复后以 TASK_RESULT: DONE 结尾"
+                headless_turn "$prompt" "$outfile"
+                marker="$(result_marker "$outfile")"
+                [ "$marker" != "DONE" ] && { log "fix turn did not confirm DONE ($marker)"; continue; }
+                gate_run "$gate_out"; rc=$?
+                [ "$rc" -ne 0 ] && { log "post-fix gate failed rc=$rc"; continue; }
+                bugs="$(review_run "$task" "$review_out")"
+                case "$bugs" in ''|*[!0-9]*) bugs=1 ;; esac
+            fi
+            zero_streak=$((zero_streak + 1))
+            log "review: $bugs bug(s) (streak $zero_streak/$CODEXC_REVIEW_PASS)"
+            if [ "$zero_streak" -lt "$CODEXC_REVIEW_PASS" ]; then
+                bugs="$(review_run "$task" "$review_out")"
+                case "$bugs" in ''|*[!0-9]*) bugs=1 ;; esac
+                if [ "$bugs" -gt 0 ]; then
+                    zero_streak=0
+                    log "second review found $bugs bug(s) — feeding back"
+                    prompt="[codexc-headless] 独立审查发现 $bugs 个 bug: $(review_tail "$review_out") —— 请修复后以 TASK_RESULT: DONE 结尾"
+                    headless_turn "$prompt" "$outfile"
+                    continue
+                fi
+                zero_streak=$((zero_streak + 1))
+            fi
+            if [ "$task_kind" = "queue" ]; then
+                marked="$(queue_mark_done ".codingkeeper/queue.md" "$task_b64")"
+                if [ "$marked" != "marked" ]; then
+                    notify "循环挂起: 队列里找不到已验收的任务行 — 请人工核对 queue.md"
+                    log "parked: accepted task line not found in queue.md"
+                    mode="halt"; touch ".codingkeeper/loop.halt"
+                    continue
+                fi
+            fi
+            journal_append "$task" "accepted after $review_rounds review round(s), gate retries $gate_rounds"
+            notify "任务通过验收: $task"
+            banner_set "✅ 已验收: $task ｜ 燃烧继续"
+            log "task accepted: $task"
+            mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0
+            continue
+        fi
+    done
+    banner_set "⛔ 已挂起: rm .codingkeeper/loop.halt 复燃"
+    log "halt file present, headless runner exiting"
+}
+
+cmd_init() {
+    mkdir -p ".codingkeeper"
+    [ -f ".codingkeeper/.gitignore" ] || { printf '.hl-*\nloop.pid\n' > ".codingkeeper/.gitignore"; echo "  created .codingkeeper/.gitignore"; }
+    if [ ! -f ".codingkeeper/queue.md" ]; then
+        cat > ".codingkeeper/queue.md" <<'EOF'
+# codexc 任务队列 — codexc-headless 从 ## ready 顶部开始投喂
+
+## ready
+- [ ] 通读本仓库, 理解项目结构与现有测试; 然后在 ## review-needed 分区列出 3 个最有价值的改进任务
+
+## review-needed
+(空)
+
+## done
+(空)
+EOF
+        echo "  created .codingkeeper/queue.md"
+    fi
+    if [ ! -f ".codingkeeper/gate.sh" ]; then
+        printf '#!/bin/bash\nset -e\necho "(gate placeholder — 放入真实测试命令)"\nexit 0\n' > ".codingkeeper/gate.sh"
+        chmod +x ".codingkeeper/gate.sh"
+        echo "  created .codingkeeper/gate.sh (placeholder — 放入真实测试命令)"
+    fi
+    echo "init done — 设置 CODEXC_HEADLESS_CMD 后运行: codexc-headless run"
+}
+
+cmd_selftest() {
+    local d rc bugs
+    d="$(mktemp -d "${TMPDIR:-/tmp}/codexc-hl-test.XXXXXX")"
+    echo "== result marker =="
+    printf 'done TASK_RESULT: DONE\n' > "$d/m1"
+    rc="$(result_marker "$d/m1")"; [ "$rc" = "DONE" ] && rc=0 || rc=1
+    [ "$rc" = 0 ] && echo "  ok: DONE" || { echo "  FAIL: DONE"; return 1; }
+    printf 'output without marker\n' > "$d/m2"
+    [ "$(result_marker "$d/m2")" = "none" ] && echo "  ok: none" || echo "  FAIL: none"
+    echo "== BUGS parse (NUL-laden) =="
+    printf '无问题\n\nBUGS: 0\nTASK_RESULT: DONE\n' > "$d/r1"
+    printf '\000' >> "$d/r1"
+    bugs="$(parse_bugs "$d/r1")"
+    [ "$bugs" = "0" ] && echo "  ok: NUL output parses 0" || echo "  FAIL: got [$bugs]"
+    printf '发现:\n- x.py:1 崩溃\nBUGS: 3\n' > "$d/r2"
+    bugs="$(parse_bugs "$d/r2")"
+    [ "$bugs" = "3" ] && echo "  ok: nonzero parses 3" || echo "  FAIL: got [$bugs]"
+    printf 'no verdict\n' > "$d/r3"
+    bugs="$(parse_bugs "$d/r3")"
+    [ "$bugs" = "parse-fail" ] && echo "  ok: verdict-less -> parse-fail" || echo "  FAIL: got [$bugs]"
+    echo "SELFTEST PASS"
+    rm -rf "$d"
+}
+
+IT_FAILURES=0
+cmd_selftest_integration() {
+    local base="/tmp/codexc-hl-it.$$" root pass_total=0
+    echo "(headless lane integration)"
+    # fake worker: pops a scripted response per invocation
+    it_fake_review_sh() {  # $1=script $2...=bug counts per review call
+        local script="$1"; shift
+        printf '%s\n' "$*" > "$script.counts"
+        { echo '#!/bin/bash'
+          echo 'cat > /dev/null'
+          echo 'counts=$(cat "'"$script"'.counts" 2>/dev/null || echo 0)'
+          echo 'n=$(echo "$counts" | cut -d" " -f1)'
+          echo 'rest=$(echo "$counts" | cut -s -d" " -f2-)'
+          echo 'printf "%s" "$rest" > "'"$script"'.counts"'
+          echo 'echo "review findings..."; echo "BUGS: $n"'
+        } > "$script"
+        chmod +x "$script"
+    }
+    fake_worker() {  # $1=script $2...=response markers ("DONE"|"EMPTY"|"SLEEP")
+        local script="$1"; shift
+        printf '%s\n' "$@" > "$script.script"
+        { echo '#!/bin/bash'
+          echo 'cat > /dev/null'
+          echo 'c=$(cat "'"$script"'.counts" 2>/dev/null || echo 0)'
+          echo 'resp=$(cat "'"$script"'.script" | sed -n "$((c+1))p")'
+          echo 'echo "$((c+1))" > "'"$script"'.counts"'
+          echo 'case "$resp" in'
+          echo '  EMPTY) exit 0 ;;'
+          echo '  SLEEP) sleep 120 ;;'
+          echo '  "IDLE-DONE") echo "无事可做 TASK_RESULT: DONE (idle)" ;;'
+          echo '  *) echo "did work. TASK_RESULT: $resp" ;;'
+          echo 'esac'
+        } > "$script"
+        chmod +x "$script"
+    }
+    it_wait() { local desc="$1" file="$2" pat="$3" lim="$4" n=0
+        while [ "$n" -lt "$lim" ]; do grep -qE -- "$pat" "$file" 2>/dev/null && { echo "  ok: $desc"; return 0; }; sleep 1; n=$((n+1)); done
+        echo "  FAIL: $desc (timeout)"; IT_FAILURES=$((IT_FAILURES+1)); return 1; }
+    it_wait_file() { local desc="$1" path="$2" n=0
+        while [ "$n" -lt "$3" ]; do [ -e "$path" ] && { echo "  ok: $desc"; return 0; }; sleep 1; n=$((n+1)); done
+        echo "  FAIL: $desc (timeout waiting for $path)"; IT_FAILURES=$((IT_FAILURES+1)); return 1; }
+    it_world() { rm -rf "$1"; mkdir -p "$1/proj/.codingkeeper"; }
+
+    echo "== HL-1: happy path =="
+    root="$base-hl1"; it_world "$root"; sess="hl1-$$"
+    printf '# q
+## ready
+- [ ] 任务A\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    fake_worker "$root/worker" DONE DONE
+    it_fake_review_sh "$root/review.sh" 0 0
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_TURN_RETRIES=2 \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait "turn ran and accepted" "$root/proj/.codingkeeper/journal" '任务A' 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-2: empty stdout (auth fail) -> park after retries =="
+    root="$base-hl2"; it_world "$root"
+    fake_worker "$root/worker" EMPTY EMPTY EMPTY
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_TURN_RETRIES=2 \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait_file "parked after empty turns" "$root/proj/.codingkeeper/loop.halt" 60
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-3: burn mode — idle work accepted then no-op park =="
+    root="$base-hl3"; it_world "$root"
+    ( cd "$root/proj" && git init -q && echo x > README.md && git add . && git commit -qm i )
+    fake_worker "$root/worker" DONE IDLE-DONE IDLE-DONE
+    it_fake_review_sh "$root/review.sh" 0 0 0 0
+    printf '# q\n## ready\n(空 — burn 直接投喂持续改进指令)\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait "burn turn accepted" "$root/proj/.codingkeeper/journal" 'idle 持续改进' 40
+    it_wait_file "parked after idle exhaustion" "$root/proj/.codingkeeper/loop.halt" 60
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-4: hung worker -> timeout park =="
+    root="$base-hl4"; it_world "$root"
+    fake_worker "$root/worker" SLEEP SLEEP SLEEP
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_HEADLESS_TIMEOUT=5 CODEXC_TURN_RETRIES=1 \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait_file "parked after turn timeout" "$root/proj/.codingkeeper/loop.halt" 60
+    pgrep -f "$root/worker" >/dev/null 2>&1 && { echo "  FAIL: worker tree survived"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: worker tree reaped"
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    rm -rf "/tmp/codexc-hl-it.$$" 2>/dev/null
+    if [ "$IT_FAILURES" -eq 0 ]; then echo "HEADLESS INTEGRATION PASS"; return 0; fi
+    echo "HEADLESS INTEGRATION FAILED ($IT_FAILURES)"; return 1
+}
+
+# ---- status: cross-project aggregation (pure reader, zero writes) ----
+
+cmd_status() {
+    local reg="$HOME/.codingkeeper/projects"
+    if [ ! -s "$reg" ]; then
+        echo "（尚无登记项目 — 在项目目录运行任一 c 命令即自动登记）"
+        return 0
+    fi
+    # header
+    printf '%-4s %-20s %-8s %5s  %s\n' "状态" "项目" "队列" "最近验收" "当前任务"
+    printf '%s\n' "$(printf '%0.s─' $(seq 1 78))"
+    while IFS= read -r proj; do
+        [ -n "$proj" ] || continue
+        _status_row "$proj"
+    done < "$reg"
+}
+
+_status_row() {  # $1=project dir
+    local proj="$1" kd="$1/.codingkeeper"
+    local name icon state task_short last_journal ready_n
+    name="$(basename "$proj")"
+    [ ${#name} -gt 18 ] && name="${name:0:16}…"
+    # project dir gone
+    if [ ! -d "$proj" ]; then
+        printf '%-4s %-20s %-8s %5s  %s\n' "✗" "$name" "目录不存在" "" ""
+        return
+    fi
+    # no keeper state
+    if [ ! -d "$kd" ]; then
+        printf '%-4s %-20s %-8s %5s  %s\n' "·" "$name" "未初始化" "" ""
+        return
+    fi
+    # running / parked
+    local running=false parked=false
+    if [ -f "$kd/loop.pid" ]; then
+        local p; p="$(cat "$kd/loop.pid" 2>/dev/null)"
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && running=true
+    fi
+    [ -f "$kd/loop.halt" ] && parked=true
+    if [ "$parked" = "true" ]; then
+        icon="⏸"; state="已挂起"
+    elif [ "$running" = "true" ]; then
+        icon="🔥"; state="燃烧中"
+    else
+        icon="·"; state="空闲"
+    fi
+    # queue counts (strip all whitespace/newlines from grep output)
+    local q="$kd/queue.md" ready=0 done_n=0
+    if [ -f "$q" ]; then
+        ready=$(grep -c '^\s*- \[ \]' "$q" 2>/dev/null | tr -d '[:space:]')
+        done_n=$(grep -c '^\s*- \[x\]' "$q" 2>/dev/null | tr -d '[:space:]')
+    fi
+    # last journal entry (task text, truncated)
+    local last=""
+    local j="$kd/journal"
+    [ -f "$j" ] && last="$(tail -1 "$j" 2>/dev/null | sed 's/^[^|]*| //;s/ | [^|]*$//' | head -c 40)"
+    [ -z "$last" ] && last="(无验收)"
+    # status.json current task
+    task_short=""
+    if [ -f "$kd/status.json" ]; then
+        task_short="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open('$kd/status.json'))
+    t=d.get('task','').replace(chr(10),' ').replace(chr(13),'')
+    print(t[:36]+'…' if len(t)>36 else t)
+except: pass
+" 2>/dev/null)"
+    fi
+    task_short="${task_short//$'\n'/ }"; task_short="${task_short//$'\r'/ }"
+    last="${last//$'\n'/ }"
+    printf '%-4s %-20s %-8s %5s  %s\n' "$icon" "$name" "$state" "$ready/$done_n" "${task_short:-$last}"
+}
+
+usage() {
+    awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0"
+}
+
+case "${1:-}" in
+    status)  shift; cmd_status "$@" ;;
+    init)    shift; cmd_init ;;
+    run)     shift; run_runner ;;
+    selftest) cmd_selftest ;;
+    selftest-integration) shift; cmd_selftest_integration ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

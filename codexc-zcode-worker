@@ -1,0 +1,81 @@
+#!/bin/bash
+# codexc-zcode-worker — headless worker adapter for ZCode's CLI.
+#
+# Reads the task from stdin, runs one non-interactive zcode turn, prints the
+# model's final response to stdout (for the TASK_RESULT contract), and keeps
+# the session alive across turns by persisting sessionId to
+# $ZCODE_SESSION_FILE (default .codingkeeper/zcode-session-id) — burn mode depends
+# on this continuity ("按你说的来" needs the worker to remember its own plan).
+#
+# Reference: apps/zcode-cli/docs/usage in zai-org/ZCode (v0.17):
+#   zcode --prompt T [--resume SID] --cwd D --mode yolo --json --no-color
+# JSON output carries sessionId + response. Automation should disallow the
+# interactive tools. Requires Node >= 24 to run zcode.cjs.
+#
+# Env:
+#   ZCODE_CJS           path to zcode.cjs
+#                       (default /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs)
+#   ZCODE_SESSION_FILE  sessionId persistence path (default .codingkeeper/zcode-session-id)
+#   ZCODE_MODE          permission mode (default yolo)
+
+set -u
+ZCODE_CJS="${ZCODE_CJS:-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs}"
+ZCODE_SESSION_FILE="${ZCODE_SESSION_FILE:-.codingkeeper/zcode-session-id}"
+ZCODE_MODE="${ZCODE_MODE:-yolo}"
+
+[ -f "$ZCODE_CJS" ] || { echo "codexc-zcode-worker: zcode.cjs not found at $ZCODE_CJS (set ZCODE_CJS)" >&2; exit 1; }
+command -v node >/dev/null || { echo "codexc-zcode-worker: node is required (>= 24)" >&2; exit 1; }
+
+task="$(cat)"
+[ -n "$task" ] || { echo "codexc-zcode-worker: empty task" >&2; exit 1; }
+
+args=(--prompt "$task" --cwd "$PWD" --mode "$ZCODE_MODE" --no-color --json
+      --disallowed-tools "AskUserQuestion EnterPlanMode ExitPlanMode")
+sid=""
+if [ -s "$ZCODE_SESSION_FILE" ]; then
+    sid="$(head -1 "$ZCODE_SESSION_FILE" | tr -d '[:space:]')"
+    case "$sid" in ses_*) args=(--resume "$sid" "${args[@]}") ;; esac
+fi
+
+# capture via TEMP FILE, never $(...): zcode spawns background children
+# (MCP servers etc.) that inherit stdout and would hold a pipe open forever,
+# blocking command substitution after the turn itself has finished
+turn_out="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-out.XXXXXX")"
+node "$ZCODE_CJS" "${args[@]}" > "$turn_out" 2>/dev/null &
+node_pid=$!
+wait "$node_pid"; rc=$?
+raw="$(cat "$turn_out" 2>/dev/null)"
+rm -f "$turn_out"
+[ "$rc" = "0" ] || { echo "zcode turn failed (rc=$rc): $(tail -c 200 /dev/null 2>/dev/null)"; exit 1; }
+
+python3 - "$raw" "$ZCODE_SESSION_FILE" <<'PYEOF'
+import json, os, sys
+raw, sess_file = sys.argv[1], sys.argv[2]
+try:
+    d = json.loads(raw)
+except Exception:
+    # NDJSON fallback: scan lines for the one carrying sessionId/response
+    d = {}
+    for line in raw.splitlines():
+        try:
+            cand = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(cand, dict) and ("response" in cand or "sessionId" in cand):
+            d = cand
+            break
+if not isinstance(d, dict):
+    raise SystemExit(1)
+resp = d.get("response")
+if not isinstance(resp, str) or not resp.strip():
+    raise SystemExit(1)
+sid = d.get("sessionId", "")
+if sid:
+    try:
+        os.makedirs(os.path.dirname(sess_file) or ".", exist_ok=True)
+        with open(sess_file, "w", encoding="utf-8") as fh:
+            fh.write(sid + "\n")
+    except OSError:
+        pass
+sys.stdout.write(resp)
+PYEOF

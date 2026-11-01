@@ -17,8 +17,19 @@
 #                                  name collisions resolve by walking up the
 #                                  parent dirs until the name is unique
 #                                  (e.g. api, then a-api, then x-a-api).
+#                                  The delivery loop is armed by default
+#                                  (auto-scaffolds .codingkeeper/ on first run);
+#                                  --no-loop for a bare session.
 #   codexc -n <name> [codex args]  explicit session name instead of the
 #                                  automatic per-directory one
+#   codexc -T claude|pi|opencode   drive that tool instead of codex (same
+#                                  loop/gate/review pipeline; reviews stay
+#                                  on codex for cross-model independence)
+#   codexc -T claude [args]        drive Claude Code instead of codex
+#                                  (CODEXC_TOOL=claude env also works; the
+#                                  delivery loop, gate and reviews work the
+#                                  same — reviews stay on codex for
+#                                  cross-model independence)
 #   codexc resume --last           any other args are passed through to codex
 #   codexc "do the task"           (session name comes from the directory)
 #   codexc -t 10:00 "do the task"  scheduled task: codex starts now (idle) and
@@ -27,11 +38,19 @@
 #                                  "+2h"/"+30m"/"+45s"/"+90" (minutes) are
 #                                  relative. Works with an existing session
 #                                  too (queues the prompt into it).
+#   codexc loop [codex args]       same as plain codex (the loop is already
+#                                  armed by default); kept for explicitness
 #   codexc ls                      list all tmux sessions
+#   codexc status                  cross-project task/runner overview
+#   codexc fuel                    boiler fuel gauge: current provider, cc-switch
+#                                  failover queue, today/month spend, recent
+#                                  relay errors, loop state (read-only)
 #   codexc -h                      show this help
 #
 # Environment overrides:
 #   CODEXC_SESSION         tmux session name (default: auto from $PWD)
+#   CODEXC_TOOL            coding tool to drive: codex (default) | claude |
+#                          pi | opencode (-T/--tool sets the same thing)
 #   CODEXC_MESSAGE         injected prompt text      (default: continue)
 #   CODEXC_COOLDOWN        min seconds between sends (0-86400, default: 10)
 #   CODEXC_MAX_CONTINUES   max auto-continues (0-10000, default: 30, then notification)
@@ -79,6 +98,19 @@ case "$CODEXC_AUTO_YES" in
     *) echo "codexc: invalid CODEXC_AUTO_YES '$CODEXC_AUTO_YES'; disabling auto-yes" >&2; CODEXC_AUTO_YES=0 ;;
 esac
 CODEXC_PROMPT="${CODEXC_PROMPT:-}"
+TAB="$(printf '\t')"
+CODEXC_TOOL="${CODEXC_TOOL:-codex}"
+case "$CODEXC_TOOL" in
+    codex|claude|pi|opencode) ;;
+    dsh) echo "codexc: dsh is a headless/web harness (profiles: headless, web) — no TUI to feed; it needs the headless driver lane, not codexc loop" >&2; exit 1 ;;
+    *) echo "codexc: unsupported CODEXC_TOOL '$CODEXC_TOOL' (use codex|claude|pi|opencode)" >&2; exit 1 ;;
+esac
+CODEXC_LOOP="${CODEXC_LOOP:-1}"
+case "$CODEXC_LOOP" in
+    0|off|no|false) CODEXC_LOOP=0 ;;
+    1|on|yes|true) CODEXC_LOOP=1 ;;
+    *) echo "codexc: invalid CODEXC_LOOP '$CODEXC_LOOP'; arming the delivery loop" >&2; CODEXC_LOOP=1 ;;
+esac
 
 normalize_uint() {
     local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number leading_zeroes
@@ -104,7 +136,7 @@ normalize_uint() {
 has_explicit_auto_mode() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --ask-for-approval|--ask-for-approval=*|--sandbox|--sandbox=*|--dangerously-bypass-approvals-and-sandbox|--full-auto|--yolo|-a|-s|-a=*|-s=*) return 0 ;;
+            --ask-for-approval|--ask-for-approval=*|--sandbox|--sandbox=*|--dangerously-bypass-approvals-and-sandbox|--full-auto|--yolo|-a|-s|-a=*|-s=*|--dangerously-skip-permissions|--permission-mode|--permission-mode=*|--auto) return 0 ;;
             --) return 1 ;;
         esac
         shift
@@ -128,7 +160,7 @@ CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 # windows where every request 401s (observed 30s burst on 2026-09-06; key
 # itself stayed valid). Extendable via ~/.codex/codexc.patterns or
 # CODEXC_EXTRA_RE — see load_extra_patterns().
-TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before completion|error sending request|connection closed|connection reset|timed out|check the request body|401 Unauthorized|INVALID_API_KEY|server error|Bad Gateway|Service Unavailable|Internal Server Error|overloaded|fetch failed|socket hang up|premature close|network error|ECONNRESET|empty response'
+TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before completion|error sending request|connection closed|connection reset|timed out|check the request body|401 Unauthorized|INVALID_API_KEY|server error|Bad Gateway|Service Unavailable|Internal Server Error|overloaded|fetch failed|socket hang up|premature close|network error|ECONNRESET|empty response|Selected model is at capacity'
 
 # Hard caps that must never be auto-continued (checked BEFORE TRANSIENT_RE so
 # even a broad custom pattern can't cause pointless retries): quotas and
@@ -180,19 +212,121 @@ ensure_project_trust() {
     [ "$CODEXC_AUTO_YES" != "0" ] || return 0
     (umask 077; mkdir -p "$CODEX_HOME_DIR") || return 1
     if [ ! -f "$cfg" ]; then (umask 077; : > "$cfg") || return 1; fi
-    dir="$(pwd -P && printf '.')" || return 1
-    dir="${dir%.}"
-    project_key="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$dir")" || return 1
-    grep -Fxq -- "[projects.$project_key]" "$cfg" && return 0
-    printf '\n[projects.%s]\ntrust_level = "trusted"\n' "$project_key" >> "$cfg"
-    echo "$(date '+%F %T') self-heal: trusted project added to config.toml: $dir" >> "$WATCHLOG"
+    # codex keys trust on the directory the TUI sees, which is not always the
+    # physical path (symlinked cwd chains, /tmp -> /private/tmp): trust BOTH
+    # forms or an unattended run stalls on the trust gate forever
+    for dir in "$PWD" "$(pwd -P)"; do
+        [ -n "$dir" ] || continue
+        project_key="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$dir")" || return 1
+        grep -Fxq -- "[projects.$project_key]" "$cfg" && continue
+        printf '\n[projects.%s]\ntrust_level = "trusted"\n' "$project_key" >> "$cfg"
+        echo "$(date '+%F %T') self-heal: trusted project added to config.toml: $dir" >> "$WATCHLOG"
+    done
+}
+
+# ---- claude tool profile ----------------------------------------------------
+# claude 2.1.x facts (verified): sessions live in
+# $CLAUDE_DIR/projects/<munged-cwd>/<uuid>.jsonl where munging maps BOTH "/"
+# and "." to "-" (underscores survive); assistant events carry
+# isApiErrorMessage + apiErrorStatus and only land after claude's own
+# 10-retry cycle is exhausted; sidechain (subagent) events share the file
+# behind isSidechain:true.
+
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+claude_project_dir() {  # $1=cwd -> munged project dir name (first that exists)
+    local p form
+    for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
+        [ -n "$p" ] || continue
+        form="$(printf '%s' "$p" | sed 's/[\/.]/-/g')"
+        [ -d "$CLAUDE_DIR/projects/$form" ] && { printf '%s' "$form"; return 0; }
+    done
+    printf '%s' "$(printf '%s' "$1" | sed 's/[\/.]/-/g')"
+}
+
+# claude gates unattended runs on two dialogs: the folder trust dialog
+# (projects[path].hasTrustDialogAccepted) and the bypass-permissions warning
+# (top-level bypassPermissionsModeAccepted). Seed both, on both path forms,
+# or the TUI stalls forever exactly like codex's trust gate did.
+seed_claude_trust() {
+    [ "$CODEXC_AUTO_YES" != "0" ] || return 0
+    local cfg="$CLAUDE_DIR/.claude.json" p
+    (umask 077; mkdir -p "$CLAUDE_DIR") || return 1
+    python3 - "$cfg" "$PWD" "$(pwd -P)" <<'PYEOF'
+import json, os, sys
+cfg, logical, physical = sys.argv[1], sys.argv[2], sys.argv[3]
+data = {}
+if os.path.isfile(cfg):
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+data["hasCompletedOnboarding"] = True
+if data.get("bypassPermissionsModeAccepted") is not True:
+    data["bypassPermissionsModeAccepted"] = True
+projects = data.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+for path in {logical, physical}:
+    entry = projects.get(path)
+    if not isinstance(entry, dict):
+        entry = {}
+    if entry.get("hasTrustDialogAccepted") is not True:
+        entry["hasTrustDialogAccepted"] = True
+    if entry.get("hasCompletedProjectOnboarding") is not True:
+        entry["hasCompletedProjectOnboarding"] = True
+    projects[path] = entry
+data["projects"] = projects
+tmp = cfg + ".codingkeeper-tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, indent=2)
+# preserve the original file's mode across the replace — os.replace adopts
+# the tmp file's perms, which would silently open a 600 config to world-read
+try:
+    os.chmod(tmp, os.stat(cfg).st_mode & 0o777)
+except OSError:
+    os.chmod(tmp, 0o600)
+os.replace(tmp, cfg)
+PYEOF
+    echo "$(date '+%F %T') self-heal: claude trust/onboarding seeded for $PWD" >> "$WATCHLOG"
+}
+
+# ---- pi / opencode profiles -------------------------------------------------
+# pi 0.84: sessions in ~/.pi/agent/sessions/<munged>/<ts>_<uuid>.jsonl; the
+# munge maps "/" to "-" and pads a dash on each end (/tmp/ -> --tmp--).
+# Turn ends carry message.stopReason ("stop" = done, "toolUse" = mid-turn).
+# opencode 2.0: sessions in ~/.local/share/opencode/storage/session/global/
+# ses_*.json (directory field), messages in storage/message/<sid>/msg_*.json
+# (role, error{data.statusCode}, time.finish), text parts in storage/part/.
+PI_DIR="${PI_DIR:-$HOME/.pi/agent}"
+OPENCODE_DIR="${OPENCODE_DATA_DIR:-$HOME/.local/share/opencode}"
+
+pi_project_dir() {  # $1=cwd -> munged sessions dir (first that exists)
+    local p form
+    for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
+        [ -n "$p" ] || continue
+        form="-$(printf '%s' "$p" | sed 's/\//-/g')-"
+        [ -d "$PI_DIR/sessions/$form" ] && { printf '%s' "$form"; return 0; }
+    done
+    printf '%s' "-$(printf '%s' "${1%/}/" | sed 's/\//-/g')-"
 }
 
 # ---- session-name resolution ------------------------------------------------
 # tmux session names may not contain ':' or '.'; replace anything exotic with
 # '-' so paths survive as session names.
 sanitize_name() {
-    printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-'
+    local name
+    name="$(printf '%s' "$1" | tr -cs 'A-Za-z0-9_-' '-')"
+    # non-ASCII directory names (CJK etc.) collapse to "-" — every such
+    # directory would share one session name; append a content hash so each
+    # stays unique. ASCII names are untouched (existing sessions keep working)
+    case "$(printf '%s' "$name" | tr -d '-')" in
+        '') name="-$(printf '%s' "$1" | md5 -q | cut -c1-8)" ;;
+    esac
+    printf '%s' "$name"
 }
 
 # Pick a stable session name for the current directory:
@@ -417,71 +551,57 @@ rediscover_thread() {
 
 watch_and_run() {
     local follow_pid="$1" pane="$2"
-    local last_id row_id head body thread_id count=0 ts_last=0 now logdb poll_n=0 row_thread
-    local match_re extra_re
+    local match_re extra_re count=0 ts_last=0 now
+    local sess_file="" line_wm=0 total new_lines status rollout
 
-    # codex creates its log store on first run; wait for it
-    logdb=""
-    for _ in $(seq 1 30); do
-        logdb="$(ls -t "$CODEX_HOME_DIR"/logs_*.sqlite 2>/dev/null | head -1)"
-        [ -n "$logdb" ] && break
-        kill -0 "$follow_pid" 2>/dev/null || return 0
-        sleep 1
-    done
-    [ -n "$logdb" ] || { echo "$(date '+%F %T') no logs db appeared, watcher giving up" >> "$WATCHLOG"; return 0; }
-
-    # initial session discovery; retried lazily later (/resume switches files)
-    thread_id=""
-    rediscover_thread
-
-    # only rows logged after the watcher started count; last_id stays 0 until
-    # the thread id is known so pre-discovery errors are still evaluated
-    local start_floor=$(( $(date +%s) - 5 ))
-    last_id=0
-
-    # auto-continue match set: built-in transient list OR'd with the user's
-    # extensions (~/.codex/codexc.patterns + CODEXC_EXTRA_RE)
     match_re="$TRANSIENT_RE"
     extra_re="$(load_extra_patterns)"
     [ -n "$extra_re" ] && match_re="$match_re|$extra_re"
 
+    # error source: the session ROLLOUT's task_complete.error events. The
+    # sqlite logs table does not carry model-availability errors ("Selected
+    # model is at capacity" etc.) — verified on codex 0.162 — so the rollout
+    # tail is the authoritative feed. Claude/pi watchers use the same shape.
+    rollout=""
+    for _ in $(seq 1 30); do
+        rollout="$(watcher_find_rollout "$pane")"
+        [ -n "$rollout" ] && break
+        kill -0 "$follow_pid" 2>/dev/null || return 0
+        sleep 1
+    done
+    [ -n "$rollout" ] || { echo "$(date '+%F %T') watcher: no rollout appeared, giving up" >> "$WATCHLOG"; return 0; }
+    sess_file="$rollout"
+    line_wm=$(wc -l < "$sess_file" 2>/dev/null || echo 0)   # skip history
+
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
-        poll_n=$((poll_n + 1))
-        # periodic re-discovery: /resume or forks switch the active session
-        [ $((poll_n % 3)) -eq 0 ] && rediscover_thread
-        [ -n "$thread_id" ] || continue
-
-        local rows
-        rows="$(sqlite3 -readonly "$logdb" \
-            "SELECT id,
-                    substr(feedback_log_body, 1, 120),
-                    substr(feedback_log_body, instr(feedback_log_body, 'Turn error'), 200)
-             FROM logs
-             WHERE id > $last_id AND ts >= $start_floor
-               AND feedback_log_body LIKE '%Turn error:%'
-             ORDER BY id;" 2>/dev/null)" || continue
-        [ -n "$rows" ] || continue
-
-        while IFS='|' read -r row_id head body; do
-            case "${row_id:-}" in ''|*[!0-9]*) continue ;; esac
-            [ "${#row_id}" -le 19 ] || continue
-            # only advance the cursor once we know which session is ours
-            [ -n "$thread_id" ] && last_id="$row_id"
-            row_thread="$(printf '%s\n' "$head" | sed -n 's/.*thread_id=\([0-9a-f-]*\).*/\1/p')"
-            # an unknown thread id means the session was resumed/forked
-            if [ -n "$row_thread" ] && [ "$row_thread" != "$thread_id" ]; then
-                rediscover_thread
-            fi
-            [ -n "$thread_id" ] && [ "$row_thread" = "$thread_id" ] || continue
-            # hard caps first: usage-limit/subscription errors are NEVER
-            # auto-continued — the blocklist wins even over custom patterns
-            printf '%s\n' "$body" | grep -qiE "$BLOCK_RE" && continue
-            # transient (built-in list + user extensions) -> auto-continue
-            # (case-insensitive: codex capitalizes error text inconsistently)
-            printf '%s\n' "$body" | grep -qiE "$match_re" || continue
-
-            # transient error: wait out the cooldown, then fire — never drop it
+        newest="$(watcher_find_rollout "$pane")"
+        if [ -n "$newest" ] && [ "$newest" != "$sess_file" ]; then
+            sess_file="$newest"
+            line_wm=$(wc -l < "$sess_file" 2>/dev/null || echo 0)   # /resume: skip history
+        fi
+        total=$(wc -l < "$sess_file" 2>/dev/null || echo 0)
+        [ "$total" -gt "$line_wm" ] || continue
+        new_lines="$(tail -n +$((line_wm + 1)) "$sess_file")"
+        line_wm=$total
+        status="$(printf '%s\n' "$new_lines" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except Exception: continue
+    payload = d.get("payload") if isinstance(d, dict) else None
+    if not isinstance(payload, dict) or payload.get("type") != "task_complete": continue
+    err = payload.get("error")
+    if not err: continue
+    text = err.get("message", "") if isinstance(err, dict) else str(err)
+    print(f"0\t{text}")
+' 2>/dev/null)"
+        [ -n "$status" ] || continue
+        while IFS=$TAB read -r api_code api_text; do
+            [ -n "$api_text" ] || continue
+            echo "$(date '+%F %T') codex turn error: ${api_text:0:100}" >> "$WATCHLOG"
+            printf '%s\n' "$api_text" | grep -qiE "$BLOCK_RE" && continue
+            printf '%s\n' "$api_text" | grep -qiE "$match_re" || continue
             now=$(date +%s)
             while [ $((now - ts_last)) -lt "$CODEXC_COOLDOWN" ]; do
                 sleep 1
@@ -494,47 +614,68 @@ watch_and_run() {
                 echo "$(date '+%F %T') reached max continues ($count), stopping" >> "$WATCHLOG"
                 return 0
             fi
-
-            # only type into an idle TUI (a running turn shows "esc to interrupt")
-            if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-                echo "$(date '+%F %T') pane gone, watcher stopping" >> "$WATCHLOG"
-                return 0
-            fi
-            if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
+            tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || { echo "$(date '+%F %T') pane gone, watcher stopping" >> "$WATCHLOG"; return 0; }
+            if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "to interrupt"; then
                 echo "$(date '+%F %T') turn still active, skipping send" >> "$WATCHLOG"
                 continue
             fi
-
-            sleep 3   # let the TUI render the error and settle
-            if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-                echo "$(date '+%F %T') pane gone before send, watcher stopping" >> "$WATCHLOG"
-                return 0
-            fi
-            if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
-                echo "$(date '+%F %T') turn became active before send, skipping" >> "$WATCHLOG"
-                continue
-            fi
-            echo "$(date '+%F %T') Turn error in $thread_id -> auto-continue #$((count+1)): ${body##*Turn error: }" >> "$WATCHLOG"
-            # text and Enter must be sent as separate writes — a single burst
-            # makes the TUI drop the Enter keypress
-            tmux send-keys -t "$pane" -l "$CODEXC_MESSAGE" || {
-                echo "$(date '+%F %T') failed to send auto-continue text" >> "$WATCHLOG"
-                return 0
-            }
+            sleep 3
+            tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || return 0
+            tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "to interrupt" && continue
+            echo "$(date '+%F %T') Turn error in rollout -> auto-continue #$((count+1)): ${api_text:0:80}" >> "$WATCHLOG"
+            tmux send-keys -t "$pane" -l "$CODEXC_MESSAGE" || return 0
             sleep 0.4
-            tmux send-keys -t "$pane" Enter || {
-                echo "$(date '+%F %T') failed to submit auto-continue" >> "$WATCHLOG"
-                return 0
-            }
-            count=$((count + 1))
-            ts_last=$(date +%s)
-            # skip any sibling rows of the same event window
-            last_id="$(sqlite3 -readonly "$logdb" "SELECT COALESCE(MAX(id),0) FROM logs;" 2>/dev/null || echo "$last_id")"
-            break
-        done <<< "$rows"
+            tmux send-keys -t "$pane" Enter || return 0
+            count=$((count + 1)); ts_last=$(date +%s)
+        done <<EOF
+$status
+EOF
     done
     echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
 }
+
+# the watcher's rollout discovery: newest sessions/*.jsonl held open inside
+# the pane's process tree (same approach as codexc-loop)
+watcher_find_rollout() {  # $1=pane -> prints path or nothing
+    local pane="$1" root_pids all p f m newest="" newest_m=0 lsof_out
+    local home_log="$CODEX_HOME_DIR" home_phys
+    home_phys="$(cd "$CODEX_HOME_DIR" 2>/dev/null && pwd -P)"
+    root_pids="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)"
+    [ -n "$root_pids" ] || return 0
+    lsof_out=".codingkeeper-watcher-lsof.$$"
+    all="$root_pids"
+    for _ in 1 2 3; do
+        for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
+    done
+    : > "$lsof_out" 2>/dev/null || { lsof_out="/tmp/codexc-watcher-lsof.$$"; : > "$lsof_out"; }
+    for p in $all; do
+        lsof -Fn -p "$p" 2>/dev/null | sed -n 's/^n//p' >> "$lsof_out"
+    done
+    while IFS= read -r f; do
+        # macOS /tmp -> /private/tmp etc.: the fd path is physical while
+        # CODEX_HOME may be logical — accept both forms
+        case "$f" in
+            "$home_log"/sessions/*.jsonl|"$home_phys"/sessions/*.jsonl) ;;
+            *) continue ;;
+        esac
+        m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
+        [ "$m" -gt "$newest_m" ] && newest_m=$m && newest="$f"
+    done < "$lsof_out"
+    rm -f "$lsof_out"
+    [ -n "$newest" ] && printf '%s' "$newest"
+}
+
+# ---- internal: standalone watcher entry (live restart of long sessions) -----
+# codexc __watcher_run <pane-id> <codex-pid>: re-arms the rollout-tail
+# watcher for a session whose watcher predates a code update; the follow pid
+# is the codex process itself, so the watcher exits when codex exits.
+if [ "${1:-}" = "__watcher_run" ]; then
+    [ $# -ge 3 ] || { echo "codexc: __watcher_run needs <pane-id> <codex-pid>" >&2; exit 1; }
+    prepare_watch_log || exit 1
+    echo "$(date '+%F %T') watcher: standalone watcher armed on pane $2 (codex pid $3)" >> "$WATCHLOG"
+    watch_and_run "$3" "$2"
+    exit $?
+fi
 
 # ---- internal: detached scheduler entry ------------------------------------
 # codexc calls this via nohup to queue a scheduled prompt into an
@@ -560,6 +701,13 @@ while [ $# -gt 0 ]; do
         -t|--at)
             [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a time (HH:MM or +N[h|m|s])" >&2; exit 1; }
             CODEXC_AT="$2"; shift 2 ;;
+        loop) ACTION="loop"; shift ;;
+        --no-loop) CODEXC_LOOP=0; shift ;;
+        -T|--tool)
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a tool (codex|claude)" >&2; exit 1; }
+            CODEXC_TOOL="$2"; shift 2 ;;
+        fuel) ACTION="fuel"; shift ;;
+        status) ACTION="status"; shift ;;
         ls)  ACTION="ls"; shift ;;
         -h|--help|help) ACTION="help"; shift ;;
         *)   break ;;
@@ -573,6 +721,63 @@ if [ "$ACTION" = "ls" ]; then
     command -v tmux >/dev/null || { echo "codexc: tmux is required" >&2; exit 1; }
     tmux ls 2>/dev/null || echo "codexc: no tmux sessions (tmux server not started?)" >&2
     exit 0
+fi
+if [ "$ACTION" = "status" ]; then
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+    worker="$self_dir/codexc-headless"
+    [ -x "$worker" ] || worker="$(command -v codexc-headless 2>/dev/null || echo codexc-headless)"
+    exec "$worker" status "$@"
+fi
+if [ "$ACTION" = "fuel" ]; then
+    command -v sqlite3 >/dev/null || { echo "codexc: sqlite3 is required" >&2; exit 1; }
+    FUEL_TOOL="${1:-$CODEXC_TOOL}"
+    case "$FUEL_TOOL" in codex|claude|pi|opencode) ;; *) echo "codexc fuel: unknown tool '$FUEL_TOOL' (codex|claude|pi|opencode)" >&2; exit 1 ;; esac
+    db="$HOME/.cc-switch/cc-switch.db"
+    if [ ! -f "$db" ]; then
+        echo "codexc fuel: cc-switch 数据库不存在 ($db) — 没有煤仓可显示"
+        exit 0
+    fi
+    q() { sqlite3 -readonly "$db" "$1" 2>/dev/null; }
+    echo "== 锅炉燃料表 $FUEL_TOOL $(date '+%F %T') =="
+    cur="$(q "SELECT name FROM providers WHERE app_type='$FUEL_TOOL' AND is_current=1 LIMIT 1")"
+    echo "当前煤: ${cur:-<无>}"
+    row="$(q "SELECT proxy_enabled, enabled, auto_failover_enabled, max_retries FROM proxy_config WHERE app_type='$FUEL_TOOL'")"
+    if [ -n "$row" ]; then
+        on="$(echo "$row" | cut -d'|' -f1)"
+        failover="$(echo "$row" | cut -d'|' -f3)"
+        retries="$(echo "$row" | cut -d'|' -f4)"
+        echo "中转(127.0.0.1:15721): 启用=$on 自动换煤=$failover 单provider重试=$retries"
+        [ "$failover" = "0" ] && echo "  ⚠ 自动换煤未开启 — 煤烧完只会熄火 (在 cc-switch 里启用并往队列加煤)"
+    fi
+    queue="$(q "SELECT group_concat(name, ' → ') FROM (SELECT name FROM providers WHERE app_type='$FUEL_TOOL' AND in_failover_queue=1 ORDER BY sort_index)")"
+    echo "换煤队列: ${queue:-（空）}"
+    unhealthy="$(q "SELECT p.name||' (连续失败 '||h.consecutive_failures||')' FROM provider_health h JOIN providers p ON p.id=h.provider_id AND p.app_type=h.app_type WHERE h.app_type='$FUEL_TOOL' AND (h.is_healthy=0 OR h.consecutive_failures>0) ORDER BY h.consecutive_failures DESC")"
+    if [ -n "$unhealthy" ]; then
+        echo "不健康的煤:"
+        printf '  %s\n' "$unhealthy"
+    fi
+    # spend from proxy_request_logs (authoritative, epoch created_at); the
+    # usage_daily_rollups table does not carry codex rows in this setup
+    spend="$(q "SELECT round(sum(CAST(total_cost_usd AS REAL)),2)||' USD / '||count(*)||' req' FROM proxy_request_logs WHERE app_type='$FUEL_TOOL' AND created_at>=strftime('%s','now','localtime','start of day')")"
+    echo "今日消耗: ${spend:-0 USD / 0 req} (relay 日志落库有秒级延迟)"
+    spend="$(q "SELECT round(sum(CAST(total_cost_usd AS REAL)),2)||' USD / '||count(*)||' req' FROM proxy_request_logs WHERE app_type='$FUEL_TOOL' AND created_at>=strftime('%s','now','localtime','start of month')")"
+    echo "本月消耗: ${spend:-0 USD / 0 req}"
+    errs="$(q "SELECT datetime(l.created_at,'unixepoch','localtime')||' ['||l.status_code||'] '||p.name||': '||substr(coalesce(l.error_message,''),1,70) FROM proxy_request_logs l JOIN providers p ON p.id=l.provider_id AND p.app_type=l.app_type WHERE l.app_type='$FUEL_TOOL' AND l.status_code>=400 ORDER BY l.created_at DESC LIMIT 3")"
+    if [ -n "$errs" ]; then
+        echo "最近中转错误:"
+        printf '  %s\n' "$errs"
+    fi
+    if [ -e ".codingkeeper/loop.halt" ]; then
+        echo "codexc 循环: 挂起 (.codingkeeper/loop.halt 存在 — rm 后复燃)"
+    elif [ -f ".codingkeeper/queue.md" ]; then
+        ready="$(grep -c '^- \[ \]' .codingkeeper/queue.md 2>/dev/null)"
+        echo "codexc 循环: 队列就绪 (${ready:-0} 个待投喂任务)"
+    fi
+    exit 0
+fi
+if [ "$ACTION" = "loop" ]; then
+    CODEXC_LOOP=1
+    ACTION=""
 fi
 command -v tmux    >/dev/null || { echo "codexc: tmux is required" >&2; exit 1; }
 command -v sqlite3 >/dev/null || { echo "codexc: sqlite3 is required" >&2; exit 1; }
@@ -603,12 +808,25 @@ if [ -z "$CODEXC_SESSION" ]; then
     CODEXC_SESSION="$(resolve_session_name)"
 fi
 
+if [ "$CODEXC_TOOL" = "claude" ] && [ "${1:-}" = "resume" ] && [ "${2:-}" = "--last" ]; then
+    shift 2            # claude speaks --continue, not `resume --last`
+    set -- --continue "$@"
+fi
+
 # ---- inside tmux: run codex + watcher (+ optional scheduler) in this pane --
 if [ -n "${TMUX:-}" ]; then
-    command -v codex >/dev/null || { echo "codexc: codex CLI is required" >&2; exit 1; }
+    case "$CODEXC_TOOL" in
+        claude)   command -v claude   >/dev/null || { echo "codexc: claude CLI is required" >&2; exit 1; } ;;
+        pi)       command -v pi       >/dev/null || { echo "codexc: pi CLI is required" >&2; exit 1; } ;;
+        opencode) command -v opencode >/dev/null || { echo "codexc: opencode CLI is required" >&2; exit 1; } ;;
+        *)        command -v codex    >/dev/null || { echo "codexc: codex CLI is required" >&2; exit 1; } ;;
+    esac
     PANE="$(tmux display-message -p '#{pane_id}')"
-    ensure_retry_config
-    ensure_project_trust
+    case "$CODEXC_TOOL" in
+        claude) seed_claude_trust ;;
+        codex)  ensure_retry_config; ensure_project_trust ;;
+        *)      : ;;
+    esac
     sched_pid=""
     if [ -n "$CODEXC_AT" ]; then
         CODEXC_PROMPT="${CODEXC_PROMPT:-$*}"
@@ -617,21 +835,67 @@ if [ -n "${TMUX:-}" ]; then
         sched_pid=$!
         set --   # the prompt goes to the scheduler, not to codex's argv
     fi
-    ( watch_and_run "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) &
+    case "$CODEXC_TOOL" in
+        claude)   ( watch_and_run_claude "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
+        pi)       ( watch_and_run_pi "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
+        opencode) ( watch_and_run_opencode "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
+        *)        ( watch_and_run "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
+    esac
     watcher=$!
+    loop_pid=""
+    if [ "${CODEXC_LOOP:-0}" = "1" ] && [ -n "$CODEXC_AT" ]; then
+        echo "codexc: warning — scheduled prompt (-t) and the delivery loop both feed this TUI; they can interleave. Prefer one." >&2
+    fi
+    if [ "${CODEXC_LOOP:-0}" = "1" ]; then
+        loop_bin="$(dirname "$0")/codexc-loop"
+        [ -x "$loop_bin" ] || loop_bin="$(command -v codexc-loop 2>/dev/null || true)"
+        if [ -n "$loop_bin" ] && [ -x "$loop_bin" ]; then
+            if [ ! -f ".codingkeeper/queue.md" ]; then
+                "$loop_bin" init >> "$WATCHLOG" 2>&1
+                echo "$(date '+%F %T') loop: auto-init (队列/门禁已按项目探测生成)" >> "$WATCHLOG"
+            fi
+            ( "$loop_bin" run "$PANE" >> "$WATCHLOG" 2>&1 ) &
+            loop_pid=$!
+            echo "$(date '+%F %T') loop: driver spawned (pid $loop_pid)" >> "$WATCHLOG"
+        else
+            echo "codexc: CODEXC_LOOP=1 but codexc-loop not found — running without the delivery loop" >&2
+        fi
+    fi
     # auto-yes: official flags skip all approval prompts; never override
     # approval/sandbox flags the user passed explicitly
     codex_flags=""
     if ! has_explicit_auto_mode "$@"; then
-        case "$CODEXC_AUTO_YES" in
-            1) codex_flags="--dangerously-bypass-approvals-and-sandbox" ;;
-            2) codex_flags="--ask-for-approval never --sandbox workspace-write" ;;
+        case "$CODEXC_TOOL" in
+            claude)
+                case "$CODEXC_AUTO_YES" in
+                    1) codex_flags="--dangerously-skip-permissions" ;;
+                    2) codex_flags="--permission-mode acceptEdits" ;;
+                esac
+                ;;
+            opencode)
+                case "$CODEXC_AUTO_YES" in
+                    1) codex_flags="--auto" ;;
+                esac
+                ;;
+            codex)
+                case "$CODEXC_AUTO_YES" in
+                    1) codex_flags="--dangerously-bypass-approvals-and-sandbox" ;;
+                    2) codex_flags="--ask-for-approval never --sandbox workspace-write" ;;
+                esac
+                ;;
+            pi) : ;;
         esac
     fi
-    codex $codex_flags "$@"
+    case "$CODEXC_TOOL" in
+        claude)   claude   $codex_flags "$@" ;;
+        pi)       pi       $codex_flags "$@" ;;
+        opencode) opencode $codex_flags "$@" ;;
+        *)        codex    $codex_flags "$@" ;;
+    esac
     rc=$?
     kill "$watcher" 2>/dev/null
     [ -n "$sched_pid" ] && kill "$sched_pid" 2>/dev/null
+    [ -n "$loop_pid" ] && kill "$loop_pid" 2>/dev/null
     exit $rc
 fi
 
@@ -647,7 +911,12 @@ if tmux has-session -t "=$CODEXC_SESSION" 2>/dev/null; then
     exec tmux attach -t "=$CODEXC_SESSION"
 fi
 
-command -v codex >/dev/null || { echo "codexc: codex CLI is required" >&2; exit 1; }
+case "$CODEXC_TOOL" in
+    claude)   command -v claude   >/dev/null || { echo "codexc: claude CLI is required for CODEXC_TOOL=claude" >&2; exit 1; } ;;
+    pi)       command -v pi       >/dev/null || { echo "codexc: pi CLI is required for CODEXC_TOOL=pi" >&2; exit 1; } ;;
+    opencode) command -v opencode >/dev/null || { echo "codexc: opencode CLI is required for CODEXC_TOOL=opencode" >&2; exit 1; } ;;
+    *)        command -v codex    >/dev/null || { echo "codexc: codex CLI is required" >&2; exit 1; } ;;
+esac
 
 codex_args=""
 [ $# -gt 0 ] && codex_args="$(printf '%q ' "$@")"
@@ -664,6 +933,9 @@ CODEXC_TARGET=$(printf '%q' "$CODEXC_TARGET") \
 CODEXC_PROMPT=$(printf '%q' "$CODEXC_PROMPT") \
 CODEXC_EXTRA_RE=$(printf '%q' "$CODEXC_EXTRA_RE") \
 CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") \
+CODEXC_LOOP=$(printf '%q' "${CODEXC_LOOP:-}") \
+CODEXC_TOOL=$(printf '%q' "$CODEXC_TOOL") \
+CLAUDE_CONFIG_DIR=$(printf '%q' "${CLAUDE_CONFIG_DIR:-}") \
 $(printf '%q' "$0") $codex_args"
 
 if [ -n "$CODEXC_AT" ]; then

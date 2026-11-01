@@ -31,9 +31,27 @@ link() {  # link <src> <dest>
 }
 
 echo "==== scripts ===="
-link "$HERE/codexc" "$CODEX_BIN_DIR/codexc"
+link "$HERE/ck" "$CODEX_BIN_DIR/ck"
+link "$HERE/codexc" "$CODEX_BIN_DIR/codexc"   # backward compat
+# 内部实现脚本（ck 通过绝对路径调用）
+link "$HERE/codexc-loop" "$CODEX_BIN_DIR/codexc-loop"
+link "$HERE/codexc-headless" "$CODEX_BIN_DIR/codexc-headless"
+link "$HERE/codexc-zcode-worker" "$CODEX_BIN_DIR/codexc-zcode-worker"
+link "$HERE/codexc-dsh-worker" "$CODEX_BIN_DIR/codexc-dsh-worker"
 link "$HERE/codexc-daily" "$CODEX_BIN_DIR/codexc-daily"
 link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"
+link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"
+
+echo
+echo "==== desktop menubar (可选, 需 swiftc) ===="
+if command -v swiftc >/dev/null 2>&1 && [ -f "$HERE/desktop/CodingKeeperBar.swift" ]; then
+    mkdir -p "$HOME/.codingkeeper/bin"
+    swiftc -O -o "$HOME/.codingkeeper/bin/CodingKeeperBar" "$HERE/desktop/CodingKeeperBar.swift" 2>/dev/null \
+        && echo "  built: $HOME/.codingkeeper/bin/CodingKeeperBar (启动: 直接运行该文件)" \
+        || echo "  build failed — 面板暂不可用"
+else
+    echo "  skipped (无 swiftc 或源码缺失)"
+fi
 
 echo
 echo "==== dependencies ===="
