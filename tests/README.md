@@ -18,6 +18,16 @@
 - 新增工具适配时: 单元进对应脚本内嵌 selftest，场景进对应集成套件，
   并在 tests/conformance.sh 增加该工具的声明核对行。
 
+## 提交门禁（pre-commit hook）
+
+`.githooks/pre-commit` 在每次 `git commit` 前自动跑 syntax + unit + conformance
+（约 7s），任何失败都会拦截提交。启用（每个克隆一次性）:
+
+    git config core.hooksPath .githooks
+
+integration / faultinjection 耗时长（15min+），不进钩子，发布前手动
+`tests/run-all` 跑全量。紧急提交可 `git commit --no-verify` 绕过，但别养成习惯。
+
 ## 共享库 ck-common.sh
 
 三车道（codexc-loop / codexc-headless / codexc-daily）共用的队列/gate/审查/

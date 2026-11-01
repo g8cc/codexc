@@ -1,0 +1,11 @@
+#!/bin/bash
+# pre-commit 门禁 — syntax + unit + conformance (约 7s)。
+# 防止语法坏/单测红/契约漂移的代码进历史（v2.0 那次 run_runner 语法坏
+# 直接进了 main，就是没有这道闸）。
+#
+# 启用: git config core.hooksPath .githooks
+# integration(15min)/faultinjection(3min) 不进钩子 — 发布前手动 tests/run-all。
+# 紧急绕过: git commit --no-verify
+set -u
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+exec "$root/tests/run-all" syntax unit conformance
