@@ -40,8 +40,8 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `ck status` | 跨项目总览 |
 | `ck fuel [tool]` | 燃料表 |
 | `codexc` | 兼容别名，等同 `ck codex` |
-| `codexc` | 接入/创建本目录的会话 — 默认装配交付循环（首次运行自动生成 `.codingkeeper/`） |
-| `codexc --no-loop` | 不带循环的裸会话 |
+| `codexc` | 接入/创建本目录的会话 — 默认纯交互，不自动投喂任何内容 |
+| `codexc loop` | 显式装配无人值守交付循环（首次运行自动生成 `.codingkeeper/`；`--no-loop` 强制关闭） |
 | `codexc codex <参数>` | `codexc codex -m o3 --search` → 本目录新开会话并携带 codex 参数 |
 | `codexc resume --last` | 续跑最近一次 codex 会话 |
 | `codexc resume <会话id>` | 续跑指定会话 |

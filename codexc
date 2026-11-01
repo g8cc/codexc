@@ -17,9 +17,11 @@
 #                                  name collisions resolve by walking up the
 #                                  parent dirs until the name is unique
 #                                  (e.g. api, then a-api, then x-a-api).
-#                                  The delivery loop is armed by default
-#                                  (auto-scaffolds .codingkeeper/ on first run);
-#                                  --no-loop for a bare session.
+#                                  Interactive by default: nothing is fed
+#                                  into the TUI. `codexc loop` arms the
+#                                  unattended delivery loop (auto-scaffolds
+#                                  .codingkeeper/ on first run); CODEXC_LOOP=1
+#                                  is the env equivalent.
 #   codexc -n <name> [codex args]  explicit session name instead of the
 #                                  automatic per-directory one
 #   codexc -T claude|pi|opencode   drive that tool instead of codex (same
@@ -38,8 +40,8 @@
 #                                  "+2h"/"+30m"/"+45s"/"+90" (minutes) are
 #                                  relative. Works with an existing session
 #                                  too (queues the prompt into it).
-#   codexc loop [codex args]       same as plain codex (the loop is already
-#                                  armed by default); kept for explicitness
+#   codexc loop [codex args]       arm the unattended delivery loop on this
+#                                  session (queue feeding + burn mode)
 #   codexc ls                      list all tmux sessions
 #   codexc status                  cross-project task/runner overview
 #   codexc fuel                    boiler fuel gauge: current provider, cc-switch
@@ -105,11 +107,11 @@ case "$CODEXC_TOOL" in
     dsh) echo "codexc: dsh is a headless/web harness (profiles: headless, web) — no TUI to feed; it needs the headless driver lane, not codexc loop" >&2; exit 1 ;;
     *) echo "codexc: unsupported CODEXC_TOOL '$CODEXC_TOOL' (use codex|claude|pi|opencode)" >&2; exit 1 ;;
 esac
-CODEXC_LOOP="${CODEXC_LOOP:-1}"
+CODEXC_LOOP="${CODEXC_LOOP:-0}"
 case "$CODEXC_LOOP" in
     0|off|no|false) CODEXC_LOOP=0 ;;
     1|on|yes|true) CODEXC_LOOP=1 ;;
-    *) echo "codexc: invalid CODEXC_LOOP '$CODEXC_LOOP'; arming the delivery loop" >&2; CODEXC_LOOP=1 ;;
+    *) echo "codexc: invalid CODEXC_LOOP '$CODEXC_LOOP'; running a bare session (codexc loop to arm)" >&2; CODEXC_LOOP=0 ;;
 esac
 
 normalize_uint() {
@@ -859,6 +861,11 @@ if [ -n "${TMUX:-}" ]; then
             echo "$(date '+%F %T') loop: driver spawned (pid $loop_pid)" >> "$WATCHLOG"
         else
             echo "codexc: CODEXC_LOOP=1 but codexc-loop not found — running without the delivery loop" >&2
+        fi
+    else
+        if [ -f ".codingkeeper/queue.md" ]; then
+            ready_q="$(grep -c '^- \[ \]' .codingkeeper/queue.md 2>/dev/null || true)"
+            echo "codexc: delivery loop off — ${ready_q:-0} 个就绪任务未投喂 (codexc loop 显式开启)" >&2
         fi
     fi
     # auto-yes: official flags skip all approval prompts; never override

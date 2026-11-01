@@ -38,8 +38,8 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `ck status` | cross-project overview |
 | `ck fuel [tool]` | fuel gauge |
 | `codexc` | backward compat alias for `ck codex` |
-| `codexc` | create-or-attach this directory's session — the delivery loop is armed by default (auto-scaffolds `.codingkeeper/` on first run) |
-| `codexc --no-loop` | bare session without the delivery loop |
+| `codexc` | create-or-attach this directory's session — interactive by default, nothing auto-fed |
+| `codexc loop` | arm the unattended delivery loop (auto-scaffolds `.codingkeeper/` on first run; `--no-loop` forces it off) |
 | `codex <args>` | `codexc codex -m o3 --search` → fresh session in this dir with those codex args |
 | `codexc resume --last` | continue the most recent codex session |
 | `codexc resume <session-id>` | continue a specific session |
