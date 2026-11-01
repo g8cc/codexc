@@ -219,6 +219,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return kill(pid, 0) == 0
     }
 
+    // 工具身份色点 (小横幅的"logo"; 真品牌图标可后续以资源图替换)
+    func toolDot(_ tool: String) -> String {
+        switch tool {
+        case "codex":    return "🟢"
+        case "claude":   return "🟠"
+        case "pi":       return "🔵"
+        case "opencode": return "🟣"
+        case "zcode":    return "🔴"
+        case "dsh":      return "⚫️"
+        default:         return "⚪️"
+        }
+    }
+
     // 回合时长: started_at 未知显示 "—"
     func duration(_ startedAt: TimeInterval) -> String {
         guard startedAt > 0 else { return "—" }
@@ -241,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func refresh() {
         let projects = registry()
         var running: [ProjStatus] = []
-        var attention: [(String, String)] = []   // 需要人类协助/决策 (常驻)
+        var attention: [(name: String, tool: String, reason: String)] = []   // 需要人类协助/决策 (常驻)
         var doneItems: [(name: String, tool: String, task: String, ts: TimeInterval)] = []
         var events: [(String, String)] = []
         var flashCandidate: (kind: String, title: String, body: String)?
@@ -253,9 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if st.parked {
                 // parked 是监督器状态 (自动循环停机待复燃), 不是任务状态
                 events.append(("⏸ \(st.name) 自动循环已暂停", "加任务到 queue.md 或 rm loop.halt 复燃"))
-                attention.append((st.name, "自动循环已暂停 (rm loop.halt 复燃)"))
+                attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
+                                  reason: "自动循环已暂停 (rm loop.halt 复燃)"))
             } else if st.task.hasPrefix("⛔") {
-                attention.append((st.name, String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
+                attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
+                                  reason: String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
             }
             if st.running {
                 running.append(st)
@@ -277,11 +292,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDoneKeys = nowDoneKeys
         didBaseline = true
 
-        // 小横幅: 状态计数
-        var parts: [String] = []
-        if !running.isEmpty { parts.append("🔥 \(running.count) 跑") }
-        if !attention.isEmpty { parts.append("⚠️ \(attention.count) 待处理") }
-        let countText = parts.joined(separator: " · ")
+        // 小横幅: 按客户端分段 — 身份色点 + 名称 + 运行数 + 待处理数
+        var counts: [String: (run: Int, pend: Int)] = [:]
+        for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
+        for a in attention { counts[a.tool, default: (0, 0)].pend += 1 }
+        let countText = counts.sorted { $0.key < $1.key }
+            .map { key, v -> String in
+                var s = "\(toolDot(key))\(key)"
+                if v.run > 0 { s += " \(v.run)" }
+                if v.pend > 0 { s += " ⚠️\(v.pend)" }
+                return s
+            }
+            .joined(separator: " · ")
         let lastDone = doneItems.max { $0.ts < $1.ts }
 
         // 展开面板: 任务表格 (行数决定高度, 封顶半屏, 超出滚动)
@@ -290,9 +312,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rows.append("🔥 \(st.tool.isEmpty ? "codex" : st.tool) · \(st.name) · \(duration(st.startedAt))")
             rows.append("   \(st.task)")
         }
-        for (name, reason) in attention {
-            rows.append("⚠️ \(name)")
-            rows.append("   \(reason)")
+        for a in attention {
+            rows.append("⚠️ \(a.tool) · \(a.name)")
+            rows.append("   \(a.reason)")
         }
         for d in doneItems.sorted(by: { $0.ts > $1.ts }) {
             rows.append("✅ \(d.tool.isEmpty ? "codex" : d.tool) · \(d.name) · \(completionTime(d.ts))")
@@ -325,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.flashTitle.isHidden = true
                 self.flashBody.isHidden = true
                 self.bannerText.isHidden = false
-                if parts.isEmpty {
+                if counts.isEmpty {
                     if let last = lastDone {
                         self.bannerText.stringValue = "⚙︎ 空闲 · 上次完成 \(self.completionTime(last.ts))"
                     } else {
