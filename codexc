@@ -833,6 +833,45 @@ watcher_find_rollout() {  # $1=pane -> prints path or nothing
         [ "$m" -gt "$newest_m" ] && newest_m=$m && newest="$f"
     done < "$lsof_out"
     rm -f "$lsof_out"
+    # codex 更新版本写入即关, 不再持有 fd — lsof 路径会空手而归。fallback:
+    # 找 5 分钟内活跃的 rollout, 用文件头 session_meta.cwd 匹配当前项目
+    # (多项目并行各认各的会话, 不误抢别家的)
+    if [ -z "$newest" ]; then
+        newest="$(python3 - "$CODEX_HOME_DIR/sessions" "$PWD" <<'PYEOF5'
+import json, os, sys, time
+
+root, proj = sys.argv[1], os.path.realpath(sys.argv[2])
+if not os.path.isdir(root):
+    raise SystemExit(0)
+now = time.time()
+cands = []
+for current, dirs, files in os.walk(root, onerror=lambda _e: None):
+    for name in files:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(current, name)
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        if now - info.st_mtime <= 300:
+            cands.append((info.st_mtime, path))
+cands.sort(reverse=True)
+for _mtime, path in cands[:6]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            meta = json.loads(fh.readline())
+        payload = meta.get("payload")
+        cwd = payload.get("cwd") if isinstance(payload, dict) else None
+        cwd = cwd or meta.get("cwd") or ""
+        if os.path.realpath(cwd) == proj:
+            print(path)
+            break
+    except Exception:
+        continue
+PYEOF5
+)"
+    fi
     [ -n "$newest" ] && printf '%s' "$newest"
 }
 
