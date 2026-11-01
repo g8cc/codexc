@@ -222,15 +222,15 @@ migrate_state_dir() {
     log "state dir merged: .codexc contents -> .codingkeeper"
 }
 
-status_write() {  # $1=状态文本 $2=工具名(空则不写) $3=active(1/0, 缺省 0)
+status_write() {  # $1=状态文本 $2=工具名 $3=active(1/0) $4=started_at epoch(0=未知)
     local pdir=".codingkeeper"
-    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" <<'PYEOF'
+    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" <<'PYEOF'
 import json, os, sys
 pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
-tool, active = sys.argv[4], sys.argv[5]
+tool, active, started_at = sys.argv[4], sys.argv[5] == "1", int(sys.argv[6] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
-        "tool": tool, "active": active == "1",
+        "tool": tool, "active": active, "started_at": started_at,
         "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
         "ts": int(__import__("time").time())}
 with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:

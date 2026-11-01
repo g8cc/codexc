@@ -583,7 +583,7 @@ watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
     local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc last_prompt="" last_hb=0 rediscover_at=0
-    local sess_file="" line_wm=0 total new_lines status rollout
+    local sess_file="" status rollout
 
     match_re="$TRANSIENT_RE"
     extra_re="$(load_extra_patterns)"
@@ -660,7 +660,7 @@ PYEOF4
     turn_start="$(printf '%s' "$infer" | cut -f1)"
     last_prompt="$(printf '%s' "$infer" | cut -f2)"
     case "$turn_start" in ''|0) turn_start="" ;; esac
-    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
+    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
 
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
@@ -668,7 +668,7 @@ PYEOF4
         # 心跳: 回合进行中每 30s 刷新 status.json (悬浮条新鲜窗口 120s;
         # 事件写入不受此限), 不依赖本轮是否读到新事件
         if [ -n "$turn_start" ] && [ $((now - last_hb)) -ge 30 ]; then
-            write_status "▶️ ${last_prompt:0:80}" 1
+            write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
             last_hb=$now
         fi
         # /resume 换文件检测降频到 30s 一次 (lsof 扫树不便宜)
@@ -743,15 +743,15 @@ PYEOF6
             case "$api_code" in
                 start)
                     turn_start="$(date +%s)"
-                    write_status "▶️ ${last_prompt:0:80}" 1
+                    write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
                     continue ;;
                 prompt)
                     [ -n "$api_text" ] && last_prompt="$api_text"
-                    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
+                    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1 "$turn_start"
                     continue ;;
                 done)
                     turn_start_prev="$turn_start"; turn_start=""
-                    write_status "✅ 完成: ${api_text:0:80}" 0
+                    write_status "✅ 完成: ${api_text:0:80}" 0 "${turn_start_prev:-0}"
                     [ "$CODEXC_NOTIFY" = "1" ] && [ -n "$turn_start_prev" ] || continue
                     now="$(date +%s)"; dur=$((now - turn_start_prev))
                     [ "$dur" -ge "$CODEXC_NOTIFY_SECS" ] || continue
@@ -775,7 +775,7 @@ PYEOF6
                 unrescuable=1
             fi
             if [ "$unrescuable" = "1" ]; then
-                write_status "⛔ codex 停了: ${api_text:0:60}" 0
+                write_status "⛔ codex 停了: ${api_text:0:60}" 0 "${turn_start:-0}"
                 if [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
                     notify "⛔ codex 停了: ${api_text:0:60}"
                     echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
@@ -810,26 +810,19 @@ PYEOF6
         done <<EOF
 $status
 EOF
-        # 心跳: 回合进行中每 30s 刷新 status.json (悬浮条新鲜窗口 120s,
-        # 30s 心跳足够; 收到任务/完成/停止等事件写入不受此限)
-        now="$(date +%s)"
-        if [ -n "$turn_start" ] && [ $((now - last_hb)) -ge 30 ]; then
-            write_status "▶️ ${last_prompt:0:80}" 1
-            last_hb=$now
-        fi
     done
     echo "$(date '+%F %T') codex exited, watcher stopping" >> "$WATCHLOG"
 }
 
-write_status() {  # $1=任务文本 $2=active(1/0) — status.json 快照 (悬浮条/ck status 数据源)
+write_status() {  # $1=任务文本 $2=active(1/0) $3=started_at epoch(0=未知)
     mkdir -p ".codingkeeper" 2>/dev/null
-    python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" <<'PYEOF3'
+    python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" "${3:-0}" <<'PYEOF3'
 import json, os, sys, time
 pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
-tool, active = sys.argv[3], sys.argv[4] == "1"
+tool, active, started_at = sys.argv[3], sys.argv[4] == "1", int(sys.argv[5] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
-        "tool": tool, "active": active,
+        "tool": tool, "active": active, "started_at": started_at,
         "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
         "ts": int(time.time())}
 with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:

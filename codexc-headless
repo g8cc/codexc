@@ -117,7 +117,7 @@ banner_set() {  # $1=横幅文本
         tmux set-option -p -t "$TMUX_PANE" pane-border-status top 2>/dev/null
         tmux set-option -p -t "$TMUX_PANE" pane-border-format " ⚙️ $txt" 2>/dev/null
     fi
-    status_write "$1" "$tool" "$active"
+    status_write "$1" "$tool" "$active" 0
     return 0
 }
 
