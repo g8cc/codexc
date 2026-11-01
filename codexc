@@ -57,6 +57,9 @@
 #   CODEXC_COOLDOWN        min seconds between sends (0-86400, default: 10)
 #   CODEXC_MAX_CONTINUES   max auto-continues (0-10000, default: 30, then notification)
 #   CODEXC_POLL            watcher poll interval seconds (1-60, default: 2)
+#   CODEXC_NOTIFY          completion/stop notifications (0/1, default: 1)
+#   CODEXC_NOTIFY_SECS     notify on clean turns this long (0-86400, default:
+#                          120 — shorter turns stay silent; 0 = every turn)
 #   CODEXC_AT              scheduled-fire spec (same as -t, e.g. "10:00")
 #   CODEXC_EXTRA_RE        extra auto-continue regex, OR'd with the built-ins
 #   CODEXC_AUTO_YES        auto-approve mode: 1 = full-auto (default: skip all
@@ -149,6 +152,8 @@ has_explicit_auto_mode() {
 CODEXC_COOLDOWN="$(normalize_uint CODEXC_COOLDOWN "$CODEXC_COOLDOWN" 10 0 86400)"
 CODEXC_MAX_CONTINUES="$(normalize_uint CODEXC_MAX_CONTINUES "$CODEXC_MAX_CONTINUES" 30 0 10000)"
 CODEXC_POLL="$(normalize_uint CODEXC_POLL "$CODEXC_POLL" 2 1 60)"
+CODEXC_NOTIFY="$(normalize_uint CODEXC_NOTIFY "${CODEXC_NOTIFY:-1}" 1 0 1)"
+CODEXC_NOTIFY_SECS="$(normalize_uint CODEXC_NOTIFY_SECS "${CODEXC_NOTIFY_SECS:-120}" 120 0 86400)"
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 
@@ -554,6 +559,7 @@ rediscover_thread() {
 watch_and_run() {
     local follow_pid="$1" pane="$2"
     local match_re extra_re count=0 ts_last=0 now
+    local turn_start="" turn_start_prev="" last_err_notify=0 unrescuable dur human esc
     local sess_file="" line_wm=0 total new_lines status rollout
 
     match_re="$TRANSIENT_RE"
@@ -592,18 +598,70 @@ for line in sys.stdin:
     try: d = json.loads(line)
     except Exception: continue
     payload = d.get("payload") if isinstance(d, dict) else None
-    if not isinstance(payload, dict) or payload.get("type") != "task_complete": continue
+    if not isinstance(payload, dict): continue
+    ptype = payload.get("type")
+    if ptype == "task_started":
+        print("start\t")
+        continue
+    if ptype != "task_complete": continue
     err = payload.get("error")
-    if not err: continue
-    text = err.get("message", "") if isinstance(err, dict) else str(err)
-    print(f"0\t{text}")
+    if err:
+        text = err.get("message", "") if isinstance(err, dict) else str(err)
+        print(f"err\t{text}")
+    else:
+        msg = payload.get("last_agent_message") or ""
+        print("done\t" + " ".join(str(msg).split())[:80])
 ' 2>/dev/null)"
         [ -n "$status" ] || continue
         while IFS=$TAB read -r api_code api_text; do
+            case "$api_code" in
+                start)
+                    turn_start="$(date +%s)"
+                    continue ;;
+                done)
+                    turn_start_prev="$turn_start"; turn_start=""
+                    [ "$CODEXC_NOTIFY" = "1" ] && [ -n "$turn_start_prev" ] || continue
+                    now="$(date +%s)"; dur=$((now - turn_start_prev))
+                    [ "$dur" -ge "$CODEXC_NOTIFY_SECS" ] || continue
+                    human="$((dur / 60))m$((dur % 60))s"
+                    esc="${api_text//\\/\\\\}"; esc="${esc//\"/\\\"}"
+                    command -v osascript >/dev/null && \
+                        osascript -e "display notification \"✅ 任务完成 (${human}): ${esc:0:60}\" with title \"codexc\"" 2>/dev/null
+                    echo "$(date '+%F %T') notified: task completed (${human}): ${api_text:0:80}" >> "$WATCHLOG"
+                    mkdir -p ".codingkeeper" 2>/dev/null
+                    python3 - "$PWD" "✅ 完成: ${api_text:0:80}" <<'PYEOF2'
+import json, os, sys, time
+pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
+snap = {"project": project, "task": task, "phase": task, "parked": os.path.exists(os.path.join(pdir, "loop.halt")),
+        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ts": int(time.time())}
+with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
+    json.dump(snap, fh, ensure_ascii=False)
+PYEOF2
+                    continue ;;
+                err) ;;
+                *) continue ;;
+            esac
             [ -n "$api_text" ] || continue
             echo "$(date '+%F %T') codex turn error: ${api_text:0:100}" >> "$WATCHLOG"
-            printf '%s\n' "$api_text" | grep -qiE "$BLOCK_RE" && continue
-            printf '%s\n' "$api_text" | grep -qiE "$match_re" || continue
+            now="$(date +%s)"
+            # 分流: usage limit / 未知错误 = 不可自动续跑 (通知用户处理, 60s 节流);
+            # 瞬态错误静默走自动续跑
+            if printf '%s\n' "$api_text" | grep -qiE "$BLOCK_RE"; then
+                unrescuable=1
+            elif printf '%s\n' "$api_text" | grep -qiE "$match_re"; then
+                unrescuable=0
+            else
+                unrescuable=1
+            fi
+            if [ "$unrescuable" = "1" ] && [ "$CODEXC_NOTIFY" = "1" ] && [ $((now - last_err_notify)) -ge 60 ]; then
+                esc="${api_text//\\/\\\\}"; esc="${esc//\"/\\\"}"
+                command -v osascript >/dev/null && \
+                    osascript -e "display notification \"⛔ codex 停了: ${esc:0:60}\" with title \"codexc\"" 2>/dev/null
+                echo "$(date '+%F %T') notified: unrescuable error: ${api_text:0:80}" >> "$WATCHLOG"
+                last_err_notify=$now
+            fi
+            [ "$unrescuable" = "1" ] && continue
             now=$(date +%s)
             while [ $((now - ts_last)) -lt "$CODEXC_COOLDOWN" ]; do
                 sleep 1
