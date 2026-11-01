@@ -32,7 +32,7 @@ stage_syntax() {
     done
     # Swift 侧语法检查 (今天两个坏提交都是 swift 编译错误漏过 bash -n 门禁)
     if [ -f desktop/CodingKeeperBar.swift ]; then
-        swiftc -parse desktop/CodingKeeperBar.swift >/dev/null 2>&1 || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
+        swiftc -typecheck desktop/CodingKeeperBar.swift >/dev/null 2>&1 || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
     fi
     [ "$bad" = "0" ] && { echo "  ok: 9 files + swift"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
     echo

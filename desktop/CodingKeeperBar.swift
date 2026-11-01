@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var notifyBody: NSTextField!
     var notifyTimer: Timer?
     var lastNotifyKey = ""
+    var hoverActive = false
+    var hoverMonitor: Any?
 
     let hIdle: CGFloat = 3        // 空闲: 细线 (无文字)
     let hSmall: CGFloat = 20      // 小横幅: 状态计数
@@ -52,10 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         let screen = NSScreen.screens[0]
         let bx = (screen.frame.width - barW) / 2
-        // 锚定菜单栏下方: visibleFrame.maxY = 可用区域顶边, 不遮挡菜单栏图标
-        let top = screen.visibleFrame.maxY
 
-        panel = KeyablePanel(contentRect: NSRect(x: bx, y: top - hIdle,
+        panel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hIdle,
                                                  width: barW, height: hSmall),
                              styleMask: [.borderless, .nonactivatingPanel],
                              backing: .buffered, defer: false)
@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 通知卡片
         let nW: CGFloat = 380, nH: CGFloat = 64
-        notifyPanel = KeyablePanel(contentRect: NSRect(x: bx, y: top - hSmall - nH - 4,
+        notifyPanel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hSmall - nH - 4,
                                                        width: nW, height: nH),
                                    styleMask: [.borderless, .nonactivatingPanel],
                                    backing: .buffered, defer: false)
@@ -169,6 +169,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in self.refresh() }
+
+        // 悬停检测: 全局监听鼠标移动 (只读坐标, 不拦截事件 — 菜单栏照常可点)。
+        // 光标进入横幅所在的菜单栏条带 → 弹出; 离开 → 收回细线
+        hoverMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
+            guard let self = self else { return }
+            let p = NSEvent.mouseLocation
+            let bx = (NSScreen.screens[0].frame.width - self.barW) / 2
+            let inStrip = p.x >= bx - 40 && p.x <= bx + self.barW + 40
+                          && p.y >= NSScreen.screens[0].frame.maxY - 24
+            if inStrip != self.hoverActive {
+                self.hoverActive = inStrip
+                DispatchQueue.main.async { self.refresh() }
+            }
+        }
     }
 
     @objc func toggleExpand() {
@@ -371,13 +385,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             var h: CGFloat
             if self.userExpanded {
-                h = min(detailHeight + 16, screen.visibleFrame.height / 2)
+                h = min(detailHeight + 16, screen.frame.height / 2)
             } else if flashing {
                 h = self.hFlash
-            } else if !counts.isEmpty {
-                h = self.hSmall
+            } else if self.hoverActive || !attention.isEmpty {
+                h = self.hSmall                      // 悬停 / 有待处理: 弹出计数
             } else {
-                h = self.hIdle                       // 空闲: 收成细线, 无文字
+                h = self.hIdle                       // 默认: 3px 细线贴在菜单栏行
             }
 
             if self.userExpanded {
@@ -433,8 +447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
             }
 
-            // 位置: 贴在菜单栏下方
-            let y = screen.visibleFrame.maxY - h
+            // 位置: 菜单栏行 (顶边), 空闲时只剩 3px 细线
+            let y = screen.frame.maxY - h
             self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
             self.panel.setFrame(NSRect(x: bx, y: y, width: self.barW, height: h),
                                 display: true, animate: true)
