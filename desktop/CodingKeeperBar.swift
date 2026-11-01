@@ -296,8 +296,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
                                   reason: "自动循环已暂停 (rm loop.halt 复燃)"))
             } else if st.task.hasPrefix("⛔") {
-                attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
-                                  reason: String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
+                // ⛔ 是心跳撑着的活状态: 会话退出后 status 过期, 警示随之消失
+                let fresh = Date().timeIntervalSince1970 - st.ts < freshWindow
+                if fresh {
+                    attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
+                                      reason: String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
+                }
             }
             if st.running {
                 running.append(st)
