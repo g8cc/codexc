@@ -1,4 +1,5 @@
 import AppKit
+import SQLite3
 
 // 可聚焦面板
 final class KeyablePanel: NSPanel {
@@ -276,6 +277,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSAttributedString(attachment: att)
     }
 
+    // 应用级任务发现: 不经 CodingKeeper 车道的应用, 直读其会话数据源
+    // workbuddy = ~/.workbuddy/workbuddy.db (sessions 表: cwd/title/status)
+    // zcode     = ~/.zcode/cli/db/db.sqlite (session 表: directory/title) +
+    //             rollout mtime 判活 (模型调用进行中 = 回合未结束)
+    struct AppTask {
+        var tool: String; var name: String; var task: String
+        var state: String            // run / done / stop
+        var startedAt: TimeInterval; var ts: TimeInterval
+    }
+
+    func trunc32(_ s: String) -> String {
+        let t = s.replacingOccurrences(of: "\n", with: " ")
+        return t.count > 32 ? String(t.prefix(30)) + "…" : t
+    }
+
+    func queryRows(_ dbPath: String, _ sql: String) -> [[String]] {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [[String]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            var row: [String] = []
+            for i in 0..<sqlite3_column_count(stmt) {
+                if let c = sqlite3_column_text(stmt, i) { row.append(String(cString: c)) }
+                else { row.append("") }
+            }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    func appTasks() -> [AppTask] {
+        var out: [AppTask] = []
+        let now = Date().timeIntervalSince1970
+        // workbuddy: pending=执行中, terminated=终止(需处理), completed 1h 内=已完成
+        for r in queryRows(NSHomeDirectory() + "/.workbuddy/workbuddy.db",
+            "SELECT cwd, COALESCE(custom_title,title,''), status, created_at, updated_at FROM sessions "
+          + "WHERE deleted_at IS NULL AND updated_at > \(Int((now - 86400) * 1000)) "
+          + "ORDER BY updated_at DESC LIMIT 8") where r.count >= 5 {
+            let name = (r[0] as NSString).lastPathComponent
+            let startedAt = (Double(r[3]) ?? 0) / 1000
+            let ts = (Double(r[4]) ?? 0) / 1000
+            if r[2] == "pending" {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("▶️ \(r[1])"), state: "run", startedAt: startedAt, ts: ts))
+            } else if r[2] == "terminated" {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("⛔ 停了: \(r[1])"), state: "stop", startedAt: startedAt, ts: ts))
+            } else if r[2] == "completed" && now - ts < 3600 {
+                out.append(AppTask(tool: "workbuddy", name: name, task: trunc32("✅ 完成: \(r[1])"), state: "done", startedAt: startedAt, ts: ts))
+            }
+        }
+        // zcode: 5 分钟内活跃的会话; 回合是否在跑看 rollout mtime (模型调用中)
+        let rollFresh = { let m = self.newestMtime(NSHomeDirectory() + "/.zcode/cli/rollout", suffix: ".jsonl"); return m > 0 && now - m < 20 }()
+        for r in queryRows(NSHomeDirectory() + "/.zcode/cli/db/db.sqlite",
+            "SELECT directory, title, time_created, time_updated FROM session "
+          + "WHERE time_updated > \(Int((now - 300) * 1000)) ORDER BY time_updated DESC LIMIT 3") where r.count >= 4 {
+            var tu = Double(r[3]) ?? 0
+            if tu > 1e12 { tu /= 1000 }
+            var tc = Double(r[2]) ?? 0
+            if tc > 1e12 { tc /= 1000 }
+            let name = (r[0] as NSString).lastPathComponent
+            if rollFresh {
+                out.append(AppTask(tool: "zcode", name: name, task: trunc32("▶️ \(r[1])"), state: "run", startedAt: tc, ts: tu))
+            } else if now - tu < 120 {
+                out.append(AppTask(tool: "zcode", name: name, task: trunc32("✅ 完成: \(r[1])"), state: "done", startedAt: tc, ts: tu))
+            }
+        }
+        return out
+    }
+
+    func newestMtime(_ dir: String, suffix: String) -> TimeInterval {
+        var latest: TimeInterval = 0
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return 0 }
+        for it in items where it.hasSuffix(suffix) {
+            let p = dir + "/" + it
+            if let attr = try? FileManager.default.attributesOfItem(atPath: p),
+               let m = attr[.modificationDate] as? Date, m.timeIntervalSince1970 > latest {
+                latest = m.timeIntervalSince1970
+            }
+        }
+        return latest
+    }
+
     // 回合时长: started_at 未知显示 "—"
     func duration(_ startedAt: TimeInterval) -> String {
         guard startedAt > 0 else { return "—" }
@@ -339,6 +425,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastRunningKeys = nowRunningKeys
         lastDoneKeys = nowDoneKeys
         didBaseline = true
+
+        // 应用级任务 (workbuddy/zcode): 与车道任务同权并入面板
+        for a in appTasks() {
+            if a.state == "run" {
+                running.append(ProjStatus(name: a.name, task: a.task, tool: a.tool,
+                                          active: true, parked: false, running: true,
+                                          startedAt: a.startedAt, ts: a.ts))
+            } else if a.state == "stop" {
+                attention.append((name: a.name, tool: a.tool,
+                                  reason: String(a.task.dropFirst("⛔ ".count))))
+            } else {
+                doneItems.append((name: a.name, tool: a.tool, task: a.task, ts: a.ts))
+            }
+        }
 
         // 小横幅: 按客户端分段 — logo 章 + 名称 + 运行数 + 待处理数 (富文本)
         var counts: [String: (run: Int, pend: Int)] = [:]
