@@ -55,7 +55,8 @@ ckge "横幅调用点(headless)" "$(grep -c 'banner_set "' codexc-headless)" 3
 echo "== 安全不变量 =="
 ckge "新鲜度令牌"     "$(grep -c '\.tok' codexc-loop)" 2
 ckge "runner 锁"      "$(grep -c 'loop.pid' codexc-loop)" 3
-ckge "kill_tree"      "$(grep -c 'kill_tree' codexc-loop codexc-headless | awk -F: '{s+=$2} END {print s}')" 4
+ckge "kill_tree (共享库)" "$(grep -c 'kill_tree' ck-common.sh)" 2
+ckge "三车道接库"     "$(grep -l '/ck-common.sh' codexc-loop codexc-headless codexc-daily 2>/dev/null | wc -l | tr -d ' ')" 3
 ckge "usage limit 永不续命" "$(grep -c 'usage limit' codexc)" 1
 ck "ck 入口"           "$([ -x ck ] && echo OK)" "OK"
 ck "codexc 兼容"       "$([ -x codexc ] && echo OK)" "OK"

@@ -27,10 +27,10 @@ stage() {  # $1=名称 $2=命令...
 stage_syntax() {
     echo "════ [syntax] ════"
     local bad=0
-    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker install.sh; do
+    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker ck-common.sh install.sh; do
         bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
     done
-    [ "$bad" = "0" ] && { echo "  ok: 12 files"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
+    [ "$bad" = "0" ] && { echo "  ok: 9 files"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
     echo
 }
 

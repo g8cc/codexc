@@ -72,15 +72,14 @@ LABEL="com.codexc.daily"
 PLIST="${CODEXC_DAILY_PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
+CK_LANE=codexc-daily
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/ck-common.sh" || { echo "codexc-daily: cannot source ck-common.sh (put it next to $0)" >&2; exit 1; }
+
+
 log() {
     (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$DAILYLOG") 2>/dev/null || return 1
     chmod 600 "$DAILYLOG" || return 1
     echo "$(date '+%F %T') daily: $*" >> "$DAILYLOG"
-}
-
-notify() {
-    command -v osascript >/dev/null && \
-        osascript -e "display notification \"$1\" with title \"codexc-daily\"" 2>/dev/null
 }
 
 # System-wide keyboard/mouse idle seconds (video playback doesn't count)

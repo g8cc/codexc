@@ -69,12 +69,14 @@
 
 set -u
 
+CK_LANE=codex-loop
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/ck-common.sh" || { echo "codex-loop: cannot source ck-common.sh (put it next to $0)" >&2; exit 1; }
+
+
 # absolute self path: the integration harness cds into scratch dirs before
 # re-invoking this script, so a relative $0 would break there
 SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
 CODEXC_TOOL="${CODEXC_TOOL:-codex}"
 case "$CODEXC_TOOL" in
     codex|claude|pi|opencode) ;;
@@ -83,19 +85,6 @@ esac
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 PI_DIR="${PI_DIR:-$HOME/.pi/agent}"
 OPENCODE_DIR="${OPENCODE_DATA_DIR:-$HOME/.local/share/opencode}"
-
-normalize_uint() {
-    local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number
-    case "$value" in
-        ''|*[!0-9]*) echo "codexc-loop: invalid $name '$value'; using $fallback" >&2; printf '%s' "$fallback"; return ;;
-    esac
-    number=$((10#$value))
-    if [ "$number" -lt "$minimum" ] || [ "$number" -gt "$maximum" ]; then
-        echo "codexc-loop: $name must be between $minimum and $maximum; using $fallback" >&2
-        number=$fallback
-    fi
-    printf '%s' "$number"
-}
 
 CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1 60)"
 CODEXC_GATE_TIMEOUT="$(normalize_uint CODEXC_GATE_TIMEOUT "${CODEXC_GATE_TIMEOUT:-900}" 900 5 86400)"
@@ -118,34 +107,10 @@ case "$_idle_raw" in
 esac
 CODEXC_IDLE_PARK="$(normalize_uint CODEXC_IDLE_PARK "${CODEXC_IDLE_PARK:-2}" 2 1 10)"
 CODEXC_LOOP_DRY="$(normalize_uint CODEXC_LOOP_DRY "${CODEXC_LOOP_DRY:-0}" 0 0 1)"
-TAB="$(printf '\t')"
-
-notify() {
-    [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
-    # task/bug text is LLM-authored: escape it or quotes break (and inject
-    # into) the AppleScript
-    local esc="${1//\\/\\\\}"; esc="${esc//\"/\\\"}"
-    command -v osascript >/dev/null && \
-        osascript -e "display notification \"$esc\" with title \"codexc-loop\"" 2>/dev/null
-    return 0
-}
-
-log() {
-    (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
-    echo "$(date '+%F %T') loop: $*" >> "$WATCHLOG"
-}
 
 # EXIT-trap cleanup must live on GLOBALS: a trap set inside a function that
 # references its locals evaluates them after the function returned (out of
 # scope), and set -u makes the whole rm fail silently
-LOOP_TMP_FILES=""
-loop_cleanup() {
-    # shellcheck disable=SC2086 — word splitting is the point; the names have
-    # no spaces
-    rm -f $LOOP_TMP_FILES ".codingkeeper/loop.pid" 2>/dev/null
-    return 0
-}
-
 # ---- pane helpers -----------------------------------------------------------
 
 # tmux 3.6a quirk: display-message exits 0 with empty output even for targets
@@ -542,161 +507,15 @@ print(status)
 PYEOF
 }
 
-result_marker() {  # $1=file with final message -> echoes DONE / BLOCKED / none
-    [ -s "$1" ] || { printf 'none'; return; }
-    line="$(grep -ioE 'TASK_RESULT:[[:space:]]*(DONE|BLOCKED)' "$1" | tail -1 | tr '[:upper:]' '[:lower:]')"
-    case "$line" in
-        *done*)    printf 'DONE' ;;
-        *blocked*) printf 'BLOCKED' ;;
-        *)         printf 'none' ;;
-    esac
-}
-
 # ---- queue ------------------------------------------------------------------
 # Sections: ## ready (auto-fed, top first) / ## review-needed (LLM-generated
 # candidates waiting for a human) / ## done. Only "- [ ] <task>" lines count.
 
-queue_next() {  # $1=queue file -> prints "lineno<TAB>b64(task)" or nothing
-    python3 - "$1" <<'PYEOF'
-import base64, sys
-try:
-    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-except OSError:
-    raise SystemExit(0)
-section = ""
-for i, line in enumerate(lines, 1):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section != "ready" or not stripped.startswith("- [ ]"):
-        continue
-    task = stripped[len("- [ ]"):].strip()
-    if not task:
-        continue
-    b64 = base64.b64encode(task.encode("utf-8")).decode("ascii")
-    print(f"{i}\t{b64}")
-    break
-PYEOF
-}
-
-queue_mark_done() {  # $1=queue file $2=b64(task) — first exact ready match -> [x]
-    python3 - "$1" "$2" <<'PYEOF'
-import base64, sys
-queue, b64 = sys.argv[1], sys.argv[2]
-task = base64.b64decode(b64).decode("utf-8", "replace")
-try:
-    lines = open(queue, encoding="utf-8").read().splitlines()
-except OSError:
-    raise SystemExit(0)
-section = ""
-for i, line in enumerate(lines):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section == "ready" and stripped == f"- [ ] {task}":
-        lines[i] = line.replace("- [ ]", "- [x]", 1)
-        print("marked")
-        break
-open(queue, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-PYEOF
-}
-
-journal_append() {  # $1=task $2=summary
-    printf '%s | %s | %s\n' "$(date '+%F %T')" "$1" "$2" >> ".codingkeeper/journal"
-}
-
 # ---- process helpers --------------------------------------------------------
-
-kill_tree() {  # $1=pid — kill a timed-out gate/review and its whole child
-               # tree (a plain kill would orphan npm/pytest grandchildren)
-    local p
-    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
-    kill -9 "$1" 2>/dev/null
-    return 0
-}
 
 # ---- gate -------------------------------------------------------------------
 
-gate_run() {  # runs .codingkeeper/gate.sh with a hard timeout; 0=pass; writes
-              # output tail to $1
-    local outfile="$1" gpid waited=0 rc
-    : > "$outfile"
-    if [ ! -x ".codingkeeper/gate.sh" ]; then
-        printf 'no gate.sh — gate skipped\n' > "$outfile"
-        return 0
-    fi
-    bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
-    gpid=$!
-    while kill -0 "$gpid" 2>/dev/null; do
-        if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
-            kill_tree "$gpid"
-            wait "$gpid" 2>/dev/null
-            printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
-            return 124
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    wait "$gpid" 2>/dev/null
-    rc=$?
-    return "$rc"
-}
-
-gate_tail() {  # last 500 chars of gate output, newlines flattened for feeding
-    tr '\n' ' ' < "$1" | tail -c 500
-}
-
 # ---- review -----------------------------------------------------------------
-
-parse_bugs() {  # $1=review output file -> prints bug count or "parse-fail".
-                # LAST "BUGS:" line wins: findings quoted mid-text can never
-                # outrank the reviewer's final verdict line
-    [ -f "$1" ] || { printf 'parse-fail'; return; }
-    local last
-    last="$(grep -an 'BUGS:' "$1" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
-    case "$last" in
-        ''|*[!0-9]*) printf 'parse-fail' ;;
-        *) printf '%s' "$last" ;;
-    esac
-}
-
-review_run() {  # $1=task text $2=outfile; prints bug count, "parse-fail" or
-                # "timeout" — a hung reviewer must not block the driver forever
-    local out="$2" instrfile="$2.instr" rpid waited=0 bugs
-    : > "$out"
-    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
-    printf '%s' "$instr" > "$instrfile"
-    if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
-        ( eval "$CODEXC_REVIEW_CMD" ) < "$instrfile" > "$out" 2>&1 &
-    else
-        ( codex exec --ephemeral -s read-only - ) < "$instrfile" > "$out" 2>&1 &
-    fi
-    rpid=$!
-    while kill -0 "$rpid" 2>/dev/null; do
-        if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
-            kill_tree "$rpid"
-            wait "$rpid" 2>/dev/null
-            printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
-            rm -f "$instrfile"
-            printf 'timeout'
-            return 0
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    wait "$rpid" 2>/dev/null
-    rm -f "$instrfile"
-    # codex exec mixes NUL bytes into stdout (app-server stream): without -a
-    # BSD grep classifies the file as binary and silently matches nothing
-    LC_ALL=C tr -d '\000' < "$out" > "$out.n" && mv "$out.n" "$out"
-    parse_bugs "$out"
-}
-
-review_tail() {  # findings tail for feeding back (NUL-free, one line)
-    LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600
-}
 
 # ---- driver -----------------------------------------------------------------
 # States: idle -> task(work -> gate -> review) -> idle | halt.
@@ -705,18 +524,6 @@ review_tail() {  # findings tail for feeding back (NUL-free, one line)
 # one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
 # anything creates the new dir; if a fresh scaffold already exists, the old
 # authoritative files (journal/queue/halt/sessions) override it.
-migrate_state_dir() {
-    [ -d .codexc ] || return 0
-    if [ ! -d .codingkeeper ]; then
-        mv .codexc .codingkeeper 2>/dev/null
-        log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
-        return 0
-    fi
-    ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
-    rmdir .codexc 2>/dev/null
-    log "state dir merged: .codexc contents -> .codingkeeper"
-}
-
 # 顶部任务横幅（类 Claude Code 任务面板）: pane-border-status top 常驻一行，
 # 随状态机每次变化刷新; # 转义为 ## 防 tmux 格式展开。CODEXC_BANNER=0 关闭。
 banner_set() {  # $1=横幅文本
@@ -729,30 +536,7 @@ banner_set() {  # $1=横幅文本
 }
 
 # 状态快照: 桌面面板(menu bar app)的数据源, 每次状态变化即覆盖写
-status_write() {  # $1=状态文本
-    local pdir=".codingkeeper"
-    python3 - "$pdir" "$PWD" "${1//#/##}" <<'PYEOF'
-import json, os, sys
-pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
-parked = os.path.exists(os.path.join(pdir, "loop.halt"))
-snap = {"project": project, "task": task, "phase": task, "parked": parked,
-        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
-        "ts": int(__import__("time").time())}
-with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
-    json.dump(snap, fh, ensure_ascii=False)
-PYEOF
-    return 0
-}
-
 # 项目登记表: 桌面面板发现项目的机制
-register_project() {
-    mkdir -p "$HOME/.codingkeeper" 2>/dev/null
-    local reg="$HOME/.codingkeeper/projects"
-    grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s
-' "$PWD" >> "$reg"
-    return 0
-}
-
 run_driver() {  # $1=pane
     local pane="$1" rollout msgfile status marker
     local mode="idle" phase="" task="" task_b64="" gate_rounds=0 review_rounds=0
@@ -1981,10 +1765,6 @@ PYEOF
 }
 
 # ---- dispatch ---------------------------------------------------------------
-
-usage() {
-    awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0"
-}
 
 case "${1:-}" in
     init)    shift; cmd_init ;;

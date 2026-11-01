@@ -45,24 +45,11 @@
 
 set -u
 
-SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
-TAB="$(printf '\t')"
-LOOP_TMP_FILES=""
+CK_LANE=codexc-headless
+. "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/ck-common.sh" || { echo "codexc-headless: cannot source ck-common.sh (put it next to $0)" >&2; exit 1; }
 
-normalize_uint() {
-    local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number
-    case "$value" in
-        ''|*[!0-9]*) echo "codexc-headless: invalid $name '$value'; using $fallback" >&2; printf '%s' "$fallback"; return ;;
-    esac
-    number=$((10#$value))
-    if [ "$number" -lt "$minimum" ] || [ "$number" -gt "$maximum" ]; then
-        echo "codexc-headless: $name must be between $minimum and $maximum; using $fallback" >&2
-        number=$fallback
-    fi
-    printf '%s' "$number"
-}
+
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 
 CODEXC_HEADLESS_TIMEOUT="$(normalize_uint CODEXC_HEADLESS_TIMEOUT "${CODEXC_HEADLESS_TIMEOUT:-3600}" 3600 5 86400)"
 CODEXC_TURN_RETRIES="$(normalize_uint CODEXC_TURN_RETRIES "${CODEXC_TURN_RETRIES:-3}" 3 1 20)"
@@ -83,163 +70,6 @@ case "$_idle_raw" in
     ""|1|on|yes|true) IDLE_PROMPT="$IDLE_PROMPT_DEFAULT" ;;
     *) IDLE_PROMPT="$(printf '%s' "$_idle_raw" | tr '\n' ' ')" ;;
 esac
-
-log() {
-    (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
-    echo "$(date '+%F %T') headless: $*" >> "$WATCHLOG"
-}
-
-notify() {
-    [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
-    local esc="${1//\\/\\}"; esc="${esc//\"/\\\"}"
-    command -v osascript >/dev/null && \
-        osascript -e "display notification \"$esc\" with title \"codexc-headless\"" 2>/dev/null
-    return 0
-}
-
-kill_tree() {
-    local p
-    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
-    kill -9 "$1" 2>/dev/null
-    return 0
-}
-
-LOOP_TMP_FILES=""
-loop_cleanup() {
-    # shellcheck disable=SC2086
-    rm -f $LOOP_TMP_FILES ".codingkeeper/loop.pid" 2>/dev/null
-    return 0
-}
-
-queue_next() {  # $1=queue file -> prints "lineno<TAB>b64(task)" or nothing
-    python3 - "$1" <<'PYEOF'
-import base64, sys
-try:
-    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-except OSError:
-    raise SystemExit(0)
-section = ""
-for i, line in enumerate(lines, 1):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section != "ready" or not stripped.startswith("- [ ]"):
-        continue
-    task = stripped[len("- [ ]"):].strip()
-    if not task:
-        continue
-    b64 = base64.b64encode(task.encode("utf-8")).decode("ascii")
-    print(f"{i}\t{b64}")
-    break
-PYEOF
-}
-
-queue_mark_done() {  # $1=queue file $2=b64(task) -> prints "marked" or "not-found"
-    python3 - "$1" "$2" <<'PYEOF'
-import base64, sys
-queue, b64 = sys.argv[1], sys.argv[2]
-task = base64.b64decode(b64).decode("utf-8", "replace")
-try:
-    lines = open(queue, encoding="utf-8").read().splitlines()
-except OSError:
-    print("not-found"); raise SystemExit(0)
-section = ""
-done_it = False
-for i, line in enumerate(lines):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section == "ready" and stripped == f"- [ ] {task}":
-        lines[i] = line.replace("- [ ]", "- [x]", 1)
-        done_it = True
-        break
-open(queue, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-print("marked" if done_it else "not-found")
-PYEOF
-}
-
-journal_append() {
-    printf '%s | %s | %s\n' "$(date '+%F %T')" "$1" "$2" >> ".codingkeeper/journal"
-}
-
-gate_run() {  # $1=outfile; 0=pass
-    local outfile="$1" gpid waited=0 rc
-    : > "$outfile"
-    if [ ! -x ".codingkeeper/gate.sh" ]; then
-        printf 'no gate.sh — gate skipped\n' > "$outfile"
-        return 0
-    fi
-    bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
-    gpid=$!
-    while kill -0 "$gpid" 2>/dev/null; do
-        if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
-            kill_tree "$gpid"
-            wait "$gpid" 2>/dev/null
-            printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
-            return 124
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    wait "$gpid" 2>/dev/null
-    rc=$?
-    return "$rc"
-}
-
-gate_tail() { tr '\n' ' ' < "$1" | tail -c 500; }
-
-parse_bugs() {  # $1=review output file -> bug count or "parse-fail"
-    [ -f "$1" ] || { printf 'parse-fail'; return; }
-    local last
-    last="$(grep -an 'BUGS:' "$1" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
-    case "$last" in
-        ''|*[!0-9]*) printf 'parse-fail' ;;
-        *) printf '%s' "$last" ;;
-    esac
-}
-
-review_run() {  # $1=task text $2=outfile -> bug count / "parse-fail" / "timeout"
-    local out="$2" instrfile="$2.instr" rpid waited=0 bugs
-    : > "$out"
-    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
-    printf '%s' "$instr" > "$instrfile"
-    if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
-        ( eval "$CODEXC_REVIEW_CMD" ) < "$instrfile" > "$out" 2>&1 &
-    else
-        ( codex exec --ephemeral -s read-only - ) < "$instrfile" > "$out" 2>&1 &
-    fi
-    rpid=$!
-    while kill -0 "$rpid" 2>/dev/null; do
-        if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
-            kill_tree "$rpid"
-            wait "$rpid" 2>/dev/null
-            printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
-            rm -f "$instrfile"
-            printf 'timeout'
-            return 0
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    wait "$rpid" 2>/dev/null
-    rm -f "$instrfile"
-    LC_ALL=C tr -d '\000' < "$out" > "$out.n" && mv "$out.n" "$out"
-    parse_bugs "$out"
-}
-
-review_tail() { LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600; }
-
-result_marker() {  # $1=stdout file -> DONE / BLOCKED / none
-    [ -s "$1" ] || { printf 'none'; return; }
-    line="$(grep -ioE 'TASK_RESULT:[[:space:]]*(DONE|BLOCKED)' "$1" | tail -1 | tr '[:upper:]' '[:lower:]')"
-    case "$line" in
-        *done*)    printf 'DONE' ;;
-        *blocked*) printf 'BLOCKED' ;;
-        *)         printf 'none' ;;
-    esac
-}
 
 # one headless turn: blocking subprocess with hard timeout; stdout carries the
 # worker's final message. Returns 0 and fills $2 (stdout file); rc 124 = timeout
@@ -274,18 +104,6 @@ headless_turn() {  # $1=task text $2=outfile
 # one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
 # anything creates the new dir; if a fresh scaffold already exists, the old
 # authoritative files (journal/queue/halt/sessions) override it.
-migrate_state_dir() {
-    [ -d .codexc ] || return 0
-    if [ ! -d .codingkeeper ]; then
-        mv .codexc .codingkeeper 2>/dev/null
-        log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
-        return 0
-    fi
-    ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
-    rmdir .codexc 2>/dev/null
-    log "state dir merged: .codexc contents -> .codingkeeper"
-}
-
 # 顶部任务横幅（同 codexc-loop）: 仅当 runner 自身在 tmux 内时渲染。
 banner_set() {  # $1=横幅文本
     [ "${CODEXC_BANNER:-1}" = "1" ] || return 0
@@ -298,25 +116,10 @@ banner_set() {  # $1=横幅文本
     return 0
 }
 
-status_write() {  # $1=状态文本 (headless 同款快照)
-    local pdir=".codingkeeper"
-    python3 - "$pdir" "$PWD" "${1//#/##}" <<'PYEOF'
-import json, os, sys
-pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
-parked = os.path.exists(os.path.join(pdir, "loop.halt"))
-snap = {"project": project, "task": task, "phase": task, "parked": parked,
-        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
-        "ts": int(__import__("time").time())}
-with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
-    json.dump(snap, fh, ensure_ascii=False)
-PYEOF
-    return 0
-}
-
-register_project() {
-    mkdir -p "$HOME/.codingkeeper" 2>/dev/null
-    local reg="$HOME/.codingkeeper/projects"
-    grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s\n' "$PWD" >> "$reg"
+park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_runner 的 local, 经 bash 动态作用域在此改写
+    notify "$1"
+    log "parked: $2"
+    mode="halt"; touch ".codingkeeper/loop.halt"
     return 0
 }
 
@@ -389,9 +192,7 @@ run_runner() {
             fail_streak=$((fail_streak + 1))
             log "turn timed out ($fail_streak/$CODEXC_TURN_RETRIES)"
             if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
-                notify "循环挂起: 连续 $fail_streak 个回合超时 — 请检查 worker"
-                log "parked: consecutive turn timeouts"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: 连续 $fail_streak 个回合超时 — 请检查 worker" "consecutive turn timeouts"
             fi
             continue
         fi
@@ -400,17 +201,13 @@ run_runner() {
             fail_streak=$((fail_streak + 1))
             log "turn produced no TASK_RESULT (empty/error stdout?) $fail_streak/$CODEXC_TURN_RETRIES (tail: $(LC_ALL=C tr -d '\000' < "$outfile" | tr '\n' ' ' | tail -c 150))"
             if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
-                notify "循环挂起: 连续 $fail_streak 个回合无有效输出 (worker 认证/配置?)"
-                log "parked: repeated empty turns"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: 连续 $fail_streak 个回合无有效输出 (worker 认证/配置?)" "repeated empty turns"
             fi
             continue
         fi
         fail_streak=0
         if [ "$marker" = "BLOCKED" ]; then
-            notify "循环挂起: worker 报告 BLOCKED — $task"
-            log "parked: worker reported BLOCKED"
-            mode="halt"; touch ".codingkeeper/loop.halt"
+            park "循环挂起: worker 报告 BLOCKED — $task" "worker reported BLOCKED"
             continue
         fi
         # ---- idle turns must prove real work before gate/review apply:
@@ -423,9 +220,7 @@ run_runner() {
                 idle_count=$((idle_count + 1))
                 log "idle turn $idle_count/$CODEXC_IDLE_PARK: nothing to do"
                 if [ "$idle_count" -ge "$CODEXC_IDLE_PARK" ]; then
-                    notify "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃"
-                    log "parked: idle exhaustion"
-                    mode="halt"; touch ".codingkeeper/loop.halt"
+                    park "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
                 fi
                 continue
             fi
@@ -438,9 +233,7 @@ run_runner() {
         if [ "$rc" -ne 0 ]; then
             gate_rounds=$((gate_rounds + 1))
             if [ "$gate_rounds" -gt "$CODEXC_GATE_RETRIES" ]; then
-                notify "循环挂起: gate 连续 $gate_rounds 次未通过 — $task"
-                log "parked: gate failed $gate_rounds times (tail: $(gate_tail "$gate_out"))"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: gate 连续 $gate_rounds 次未通过 — $task" "gate failed $gate_rounds times (tail: $(gate_tail "$gate_out"))"
                 continue
             fi
             banner_set "🔧 gate 修复中 (第 $gate_rounds/$CODEXC_GATE_RETRIES 轮) — $task"
@@ -465,22 +258,16 @@ run_runner() {
         while true; do
             review_rounds=$((review_rounds + 1))
             if [ "$review_rounds" -gt "$CODEXC_REVIEW_ROUNDS" ]; then
-                notify "循环挂起: 审查轮次超过 $CODEXC_REVIEW_ROUNDS 上限 — $task"
-                log "parked: review rounds exhausted"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: 审查轮次超过 $CODEXC_REVIEW_ROUNDS 上限 — $task" "review rounds exhausted"
                 break
             fi
             bugs="$(review_run "$task" "$review_out")"
             if [ "$bugs" = "timeout" ]; then
-                notify "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task"
-                log "parked: review timed out (tail: $(review_tail "$review_out"))"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task" "review timed out (tail: $(review_tail "$review_out"))"
                 break
             fi
             if [ "$bugs" = "parse-fail" ]; then
-                notify "循环挂起: 审查输出无法解析 (无 BUGS: 行) — $task"
-                log "parked: review output unparseable (tail: $(review_tail "$review_out"))"
-                mode="halt"; touch ".codingkeeper/loop.halt"
+                park "循环挂起: 审查输出无法解析 (无 BUGS: 行) — $task" "review output unparseable (tail: $(review_tail "$review_out"))"
                 break
             fi
             if [ "$bugs" -gt 0 ]; then
@@ -507,9 +294,7 @@ run_runner() {
             if [ "$task_kind" = "queue" ]; then
                 marked="$(queue_mark_done ".codingkeeper/queue.md" "$task_b64")"
                 if [ "$marked" != "marked" ]; then
-                    notify "循环挂起: 队列里找不到已验收的任务行（可能被改写）— 请人工核对 queue.md"
-                    log "parked: accepted task line not found in queue.md"
-                    mode="halt"; touch ".codingkeeper/loop.halt"
+                    park "循环挂起: 队列里找不到已验收的任务行（可能被改写）— 请人工核对 queue.md" "accepted task line not found in queue.md"
                     break
                 fi
             fi
@@ -739,10 +524,6 @@ except: pass
     task_short="${task_short//$'\n'/ }"; task_short="${task_short//$'\r'/ }"
     last="${last//$'\n'/ }"
     printf '%-4s %-20s %-8s %5s  %s\n' "$icon" "$name" "$state" "$ready/$done_n" "${task_short:-$last}"
-}
-
-usage() {
-    awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0"
 }
 
 case "${1:-}" in

@@ -4,7 +4,7 @@
 
 | 阶段 | 内容 | 耗时 |
 |---|---|---|
-| syntax | 12 个可执行件 bash -n | ~1s |
+| syntax | 9 个文件 bash -n（含共享库 ck-common.sh） | ~1s |
 | unit | codexc-loop / codexc-headless 纯逻辑断言 | ~5s |
 | integration | 4 工具 × 13 场景 (TUI) + 4 场景 (headless)，真实 tmux | ~15min |
 | faultinjection | 7 项破坏性注入（进程杀死/欺骗/超时/改写） | ~3min |
@@ -17,3 +17,10 @@
   真实凭证类验证归 keys 阶段（报告性）。
 - 新增工具适配时: 单元进对应脚本内嵌 selftest，场景进对应集成套件，
   并在 tests/conformance.sh 增加该工具的声明核对行。
+
+## 共享库 ck-common.sh
+
+三车道（codexc-loop / codexc-headless / codexc-daily）共用的队列/gate/审查/
+标记/迁移/登记等语义只维护在 `ck-common.sh` 一份里；车道差异（日志标签/
+通知标题/报错前缀）由 source 前设置的 `CK_LANE` 派生。改这些语义时改库 +
+跑两车道测试，不再各抄一份。

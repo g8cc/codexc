@@ -32,6 +32,7 @@ link() {  # link <src> <dest>
 
 echo "==== scripts ===="
 link "$HERE/ck" "$CODEX_BIN_DIR/ck"
+link "$HERE/ck-common.sh" "$CODEX_BIN_DIR/ck-common.sh"   # 三车道共享底层 (被 source)
 link "$HERE/codexc" "$CODEX_BIN_DIR/codexc"   # backward compat
 # 内部实现脚本（ck 通过绝对路径调用）
 link "$HERE/codexc-loop" "$CODEX_BIN_DIR/codexc-loop"
