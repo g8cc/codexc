@@ -366,6 +366,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return latest
     }
 
+    // 任务文本剥掉状态前缀 (▶️/✅/⛔/📋) — 状态由卡片色点表达, 不重复
+    func cleanTask(_ s: String) -> String {
+        for p in ["▶️ ", "✅ 完成: ", "⛔ codex 停了: ", "⛔ 停了: ", "📋 ", "✅ ", "⛔ "] {
+            if s.hasPrefix(p) { return String(s.dropFirst(p.count)) }
+        }
+        return s
+    }
+
     // 回合时长: started_at 未知显示 "—"
     func duration(_ startedAt: TimeInterval) -> String {
         guard startedAt > 0 else { return "—" }
@@ -465,21 +473,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }()
         let lastDone = doneItems.max { $0.ts < $1.ts }
 
-        // 展开面板: 任务表格 (行数决定高度, 封顶半屏, 超出滚动)
-        var rows: [String] = []
+        // 展开面板: 任务卡片 — 状态色点 + 加粗工具名 + 灰色项目/时长 头行,
+        // 缩进任务文本行; 任务文本剥掉状态前缀 (状态由色点表达, 不重复)
+        let detailAttr = NSMutableAttributedString()
+        var cardCount = 0
+        let cardPara = NSMutableParagraphStyle()
+        cardPara.paragraphSpacing = 7
+        cardPara.lineSpacing = 2
+        cardPara.alignment = .left
+        func cardHeader(_ color: NSColor, _ tool: String, _ name: String, _ tail: String) {
+            let font11 = NSFont.systemFont(ofSize: 11)
+            detailAttr.append(NSAttributedString(string: "● ", attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 10), .paragraphStyle: cardPara]))
+            detailAttr.append(NSAttributedString(string: tool, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .paragraphStyle: cardPara]))
+            detailAttr.append(NSAttributedString(string: " · \(name)", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: font11, .paragraphStyle: cardPara]))
+            if !tail.isEmpty {
+                detailAttr.append(NSAttributedString(string: " · \(tail)", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: font11, .paragraphStyle: cardPara]))
+            }
+            detailAttr.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: cardPara]))
+        }
+        func cardBody(_ text: String) {
+            detailAttr.append(NSAttributedString(string: "    \(text)\n", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: cardPara]))
+        }
         for st in running.sorted(by: { $0.startedAt < $1.startedAt }) {
-            rows.append("🔥 \(st.tool.isEmpty ? "codex" : st.tool) · \(st.name) · \(duration(st.startedAt))")
-            rows.append("   \(st.task)")
+            cardHeader(.systemGreen, st.tool.isEmpty ? "codex" : st.tool, st.name, duration(st.startedAt))
+            cardBody(cleanTask(st.task))
+            cardCount += 1
         }
         for a in attention {
-            rows.append("⚠️ \(a.tool) · \(a.name)")
-            rows.append("   \(a.reason)")
+            cardHeader(.systemOrange, a.tool, a.name, "")
+            cardBody(a.reason)
+            cardCount += 1
         }
         for d in doneItems.sorted(by: { $0.ts > $1.ts }) {
-            rows.append("✅ \(d.tool.isEmpty ? "codex" : d.tool) · \(d.name) · \(completionTime(d.ts))")
-            rows.append("   \(d.task)")
+            cardHeader(.secondaryLabelColor, d.tool.isEmpty ? "codex" : d.tool, d.name, completionTime(d.ts))
+            cardBody(cleanTask(d.task))
+            cardCount += 1
         }
-        let detailHeight: CGFloat = rows.isEmpty ? 24 : CGFloat(rows.count) * 15 + 16
+        if cardCount == 0 {
+            detailAttr.append(NSAttributedString(string: "暂无任务 — 在任意项目里提交一个任务, 这里就会亮起来",
+                attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: cardPara]))
+        }
+        let detailHeight: CGFloat = cardCount == 0 ? 30 : CGFloat(cardCount) * 38 + 14
 
         DispatchQueue.main.async {
             let screen = NSScreen.screens[0]
@@ -530,7 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // 任务表格内容与高度
-            self.detailText.string = rows.joined(separator: "\n")
+            self.detailText.textStorage?.setAttributedString(detailAttr)
             self.detailText.layoutManager?.ensureLayout(for: self.detailText.textContainer!)
             let used = self.detailText.layoutManager!.usedRect(for: self.detailText.textContainer!).size
             self.detailText.frame.size.height = max(used.height + 8, 1)
