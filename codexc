@@ -595,13 +595,17 @@ watch_and_run() {
     # model is at capacity" etc.) — verified on codex 0.162 — so the rollout
     # tail is the authoritative feed. Claude/pi watchers use the same shape.
     rollout=""
-    for _ in $(seq 1 30); do
+    tries=0
+    while :; do
         rollout="$(watcher_find_rollout "$pane")"
         [ -n "$rollout" ] && break
         kill -0 "$follow_pid" 2>/dev/null || return 0
+        # 闲置会话 (无新写入) 找不到活跃 rollout 是常态 — 跟随进程存活就持续
+        # 等, 用户提交任务后 rollout mtime 变新即被发现; 不再按次数放弃
+        tries=$((tries + 1))
+        [ "$tries" = "30" ] && echo "$(date '+%F %T') watcher: no rollout yet — waiting for session activity" >> "$WATCHLOG"
         sleep 1
     done
-    [ -n "$rollout" ] || { echo "$(date '+%F %T') watcher: no rollout appeared, giving up" >> "$WATCHLOG"; return 0; }
     sess_file="$rollout"
     sess_off="$(stat -f '%z' "$sess_file" 2>/dev/null || echo 0)"   # skip history
 
