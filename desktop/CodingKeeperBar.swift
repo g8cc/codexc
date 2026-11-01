@@ -276,18 +276,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func spinnerAttach() -> NSAttributedString {
         if spinnerFrames.isEmpty {
-            spinnerFrames = (0..<8).map { spinnerFrame($0) }
+            spinnerFrames = (0..<8).map { i in
+                let size = NSSize(width: 16, height: 12)
+                return NSImage(size: size, flipped: false) { _ in
+                    let a = CGFloat(i) / 8 * 360
+                    let p = NSBezierPath()
+                    p.appendArc(withCenter: NSPoint(x: 6, y: 6), radius: 4.5,
+                                startAngle: a, endAngle: a + 300)
+                    p.lineWidth = 2
+                    NSColor.systemGreen.setStroke()
+                    p.stroke()
+                    return true
+                }
+            }
         }
         let att = NSTextAttachment()
         att.image = spinnerFrames[spinnerIdx % spinnerFrames.count]
-        att.bounds = NSRect(x: 0, y: -1, width: 12, height: 12)
+        att.bounds = NSRect(x: 0, y: -1, width: 16, height: 12)
         return NSAttributedString(attachment: att)
     }
     func pauseAttach() -> NSAttributedString {
         if pauseIcon == nil {
-            let size = NSSize(width: 12, height: 12)
+            let size = NSSize(width: 16, height: 12)
             pauseIcon = NSImage(size: size, flipped: false) { _ in
-                let p = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 3, yRadius: 3)
+                let p = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 12, height: 12), xRadius: 3, yRadius: 3)
                 NSColor.systemOrange.setFill()
                 p.fill()
                 NSColor.white.setFill()
@@ -298,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let att = NSTextAttachment()
         att.image = pauseIcon
-        att.bounds = NSRect(x: 0, y: -1, width: 12, height: 12)
+        att.bounds = NSRect(x: 0, y: -1, width: 16, height: 12)
         return NSAttributedString(attachment: att)
     }
 
@@ -329,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 工具 logo: 优先 ~/.codingkeeper/assets/<tool>.png (真品牌图放这里即生效),
     // 缺省绘制品牌色圆角章 + 白色首字母
     func toolChip(_ tool: String) -> NSAttributedString {
-        let size = NSSize(width: 14, height: 14)
+        let size = NSSize(width: 18, height: 14)   // 14px 章体 + 4px 呼吸空间
         var image: NSImage?
         let assetPath = NSHomeDirectory() + "/.codingkeeper/assets/\(tool).png"
         if FileManager.default.fileExists(atPath: assetPath),
@@ -348,12 +360,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }()
             image = NSImage(size: size, flipped: false) { _ in
-                let p = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 3.5, yRadius: 3.5)
+                let p = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 14, height: 14), xRadius: 3.5, yRadius: 3.5)
                 color.setFill()
                 p.fill()
                 let para = NSMutableParagraphStyle()
                 para.alignment = .center
-                (glyph as NSString).draw(in: NSRect(x: 0, y: 1, width: size.width, height: size.height - 2),
+                (glyph as NSString).draw(in: NSRect(x: 0, y: 1, width: 14, height: 12),
                                          withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .bold),
                                                           .foregroundColor: NSColor.white,
                                                           .paragraphStyle: para])
