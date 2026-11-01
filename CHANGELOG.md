@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.1.0 (unreleased)
+悬浮条任务面板 + 监督链路自愈（v2.0 的显示与监督体系全面落地）:
+- 悬浮条任务面板: 空闲 3px 细线 / 悬停弹出状态计数 (品牌 logo + 转圈运行数 +
+  暂停待处理数) / 新任务蓝闪·完成绿闪 4s (10s 去重) / ⛔⏸ 琥珀常驻警示 /
+  点击展开自适应任务卡片 (状态色点 + 时长 + 完成时刻, 封顶半屏滚动)
+- 生命周期: 会话退出自动收线 (心跳过期语义), 闲置会话持续等待不自弃
+- 监督自愈: attach 补挂 watcher、rollout 发现 cwd 匹配 fallback (适配新版
+  codex 日期子目录)、逐会话判活、回扫无窗口上限
+- codexc 交互默认化: 默认纯交互不自动投喂, 无人值守显式 `codexc loop`
+- 通知: 完成绿闪+系统通知、不可续跑错误常驻警示 (stderr 尾带回), 全局弹窗
+  间隔总闸 (CODEXC_NOTIFY_GAP)
+- 治理: 集成测试 /tmp 世界不再污染项目注册表; 交互会话注册补齐
+- 诊断: zcode worker 失败带回 stderr 尾; 门禁加 swift -typecheck
+
 ## v2.0.0 (unreleased)
 多工具运行时（CodingKeeper 首个完整版）:
 - 工具适配: claude / pi / opencode (TUI), zcode / dsh (headless), 六工具矩阵
