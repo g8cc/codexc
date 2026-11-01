@@ -604,6 +604,44 @@ watch_and_run() {
     sess_file="$rollout"
     line_wm=$(wc -l < "$sess_file" 2>/dev/null || echo 0)   # skip history
 
+    # 中途接入 (attach 换挂/恢复): rollout 尾部若存在未配对的 task_started,
+    # 说明回合已在跑 — 起点取 started_at, 任务文本取最近的 UserMessage
+    infer="$(python3 - "$sess_file" <<'PYEOF4'
+import json, sys
+started_at = None
+prompt = ""
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+for line in reversed(lines[-400:]):
+    try: d = json.loads(line)
+    except Exception: continue
+    p = d.get("payload") if isinstance(d, dict) else None
+    if not isinstance(p, dict): continue
+    pt = p.get("type")
+    if pt == "task_complete" and started_at is None:
+        break                            # 最新回合已完成 → 不活跃
+    if pt == "task_started" and started_at is None:
+        sa = p.get("started_at")
+        started_at = int(sa) if isinstance(sa, (int, float)) else 0
+        continue                         # 起点已记, 继续回扫任务文本
+    if pt == "item_completed" and not prompt:
+        item = p.get("item")
+        if isinstance(item, dict) and item.get("type") == "UserMessage":
+            c = item.get("content")
+            if isinstance(c, list):
+                for x in c:
+                    if isinstance(x, dict) and x.get("type") == "text":
+                        prompt = " ".join(str(x.get("text") or "").split())[:120]
+                        break
+        if started_at is not None and prompt:
+            break
+print(f"{started_at or 0}\t{prompt}")
+PYEOF4
+)"
+    turn_start="$(printf '%s' "$infer" | cut -f1)"
+    last_prompt="$(printf '%s' "$infer" | cut -f2)"
+    case "$turn_start" in ''|0) turn_start="" ;; esac
+    [ -n "$turn_start" ] && write_status "▶️ ${last_prompt:0:80}" 1
+
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
         newest="$(watcher_find_rollout "$pane")"
@@ -739,6 +777,25 @@ snap = {"project": project, "task": task, "phase": task, "parked": parked,
 with open(os.path.join(pdir, "status.json"), "w", encoding="utf-8") as fh:
     json.dump(snap, fh, ensure_ascii=False)
 PYEOF3
+    return 0
+}
+
+spawn_watcher() {  # $1=follow_pid $2=pane — 先杀 pidfile 里的旧实例再换上新 watcher
+    local fp="$1" pane="$2" old wpid
+    mkdir -p ".codingkeeper" 2>/dev/null
+    old="$(cat ".codingkeeper/watcher.pid" 2>/dev/null || true)"
+    case "$old" in ''|*[!0-9]*) old="" ;; esac
+    [ -n "$old" ] && kill "$old" 2>/dev/null
+    case "$CODEXC_TOOL" in
+        claude)   ( watch_and_run_claude "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
+        pi)       ( watch_and_run_pi "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
+        opencode) ( watch_and_run_opencode "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
+        *)        ( watch_and_run "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
+    esac
+    wpid=$!
+    printf '%s\n' "$wpid" > ".codingkeeper/watcher.pid"
+    echo "$(date '+%F %T') watcher: spawned (pid $wpid pane $pane follow $fp)" >> "$WATCHLOG"
+    printf '%s' "$wpid"
     return 0
 }
 
@@ -949,13 +1006,7 @@ if [ -n "${TMUX:-}" ]; then
         sched_pid=$!
         set --   # the prompt goes to the scheduler, not to codex's argv
     fi
-    case "$CODEXC_TOOL" in
-        claude)   ( watch_and_run_claude "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
-        pi)       ( watch_and_run_pi "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
-        opencode) ( watch_and_run_opencode "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
-        *)        ( watch_and_run "$$" "$PANE" >> "$WATCHLOG" 2>&1 ) & ;;
-    esac
-    watcher=$!
+    watcher="$(spawn_watcher "$$" "$PANE")"
     loop_pid=""
     if [ "${CODEXC_LOOP:-0}" = "1" ] && [ -n "$CODEXC_AT" ]; then
         echo "codexc: warning — scheduled prompt (-t) and the delivery loop both feed this TUI; they can interleave. Prefer one." >&2
@@ -1027,6 +1078,10 @@ if tmux has-session -t "=$CODEXC_SESSION" 2>/dev/null; then
         nohup "$0" __schedule_run "$CODEXC_TARGET" "$sched_pane" "$CODEXC_PROMPT" >> "$WATCHLOG" 2>&1 &
         echo "codexc: scheduled ${CODEXC_AT} queued into session '${CODEXC_SESSION}' (log: ${WATCHLOG})" >&2
     fi
+    # 重新监督: 会话里的 watcher 可能已死 (升级/崩溃/退出) — attach 时总是
+    # 换上当前代码的 watcher; follow_pid 用 pane 进程, 会话关闭即自然退出
+    attach_pane="$(tmux display-message -p -t "$CODEXC_SESSION" '#{pane_id}')"
+    spawn_watcher "$(tmux display-message -p -t "$attach_pane" '#{pane_pid}')" "$attach_pane" >/dev/null
     exec tmux attach -t "=$CODEXC_SESSION"
 fi
 
