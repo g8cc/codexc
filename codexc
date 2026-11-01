@@ -602,40 +602,58 @@ watch_and_run() {
     done
     [ -n "$rollout" ] || { echo "$(date '+%F %T') watcher: no rollout appeared, giving up" >> "$WATCHLOG"; return 0; }
     sess_file="$rollout"
-    line_wm=$(wc -l < "$sess_file" 2>/dev/null || echo 0)   # skip history
+    sess_off="$(stat -f '%z' "$sess_file" 2>/dev/null || echo 0)"   # skip history
 
     # 中途接入 (attach 换挂/恢复): rollout 尾部若存在未配对的 task_started,
-    # 说明回合已在跑 — 起点取 started_at, 任务文本取最近的 UserMessage
+    # 说明回合已在跑 — 起点取 started_at, 任务文本取最近的 UserMessage。
+    # 成本控制: 子串预过滤替代全量 json 解析; 先扫 32MB 尾窗, 不够再 4 倍
+    # 扩宽 (数小时长回合的 task_started 会沉得很深)
     infer="$(python3 - "$sess_file" <<'PYEOF4'
-import json, sys
+import json, os, sys
+path = sys.argv[1]
+size = os.path.getsize(path)
+window = 32 << 20
 started_at = None
 prompt = ""
-lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-# 不设窗口上限: 长回合(数小时)的 task_started 会沉到几千行之前, 固定窗口
-# 会漏判; 倒扫在首个 task_* 事件即停, 全文件成本可接受
-for line in reversed(lines):
-    try: d = json.loads(line)
-    except Exception: continue
-    p = d.get("payload") if isinstance(d, dict) else None
-    if not isinstance(p, dict): continue
-    pt = p.get("type")
-    if pt == "task_complete" and started_at is None:
-        break                            # 最新回合已完成 → 不活跃
-    if pt == "task_started" and started_at is None:
-        sa = p.get("started_at")
-        started_at = int(sa) if isinstance(sa, (int, float)) else 0
-        continue                         # 起点已记, 继续回扫任务文本
-    if pt == "item_completed" and not prompt:
-        item = p.get("item")
-        if isinstance(item, dict) and item.get("type") == "UserMessage":
-            c = item.get("content")
-            if isinstance(c, list):
-                for x in c:
-                    if isinstance(x, dict) and x.get("type") == "text":
-                        prompt = " ".join(str(x.get("text") or "").split())[:120]
-                        break
-        if started_at is not None and prompt:
+while True:
+    w = min(window, size)
+    with open(path, "rb") as fh:
+        fh.seek(size - w)
+        data = fh.read().decode("utf-8", "replace")
+    lines = data.split("\n")
+    if w < size and lines:
+        lines = lines[1:]                     # 尾窗首行可能是半行, 丢弃
+    done = False
+    for line in reversed(lines):
+        if "task_" not in line and '"UserMessage"' not in line:
+            continue                          # 子串预过滤, 避开大行 json 解析
+        try: d = json.loads(line)
+        except Exception: continue
+        p = d.get("payload") if isinstance(d, dict) else None
+        if not isinstance(p, dict): continue
+        pt = p.get("type")
+        if pt == "task_complete" and started_at is None:
+            done = True                       # 最新回合已完成 → 不活跃
             break
+        if pt == "task_started" and started_at is None:
+            sa = p.get("started_at")
+            started_at = int(sa) if isinstance(sa, (int, float)) else 0
+            continue                          # 起点已记, 继续回扫任务文本
+        if pt == "item_completed" and not prompt:
+            item = p.get("item")
+            if isinstance(item, dict) and item.get("type") == "UserMessage":
+                c = item.get("content")
+                if isinstance(c, list):
+                    for x in c:
+                        if isinstance(x, dict) and x.get("type") == "text":
+                            prompt = " ".join(str(x.get("text") or "").split())[:120]
+                            break
+            if started_at is not None and prompt:
+                done = True
+                break
+    if done or window >= size:
+        break
+    window *= 4
 print(f"{started_at or 0}\t{prompt}")
 PYEOF4
 )"
@@ -646,25 +664,51 @@ PYEOF4
 
     while kill -0 "$follow_pid" 2>/dev/null; do
         sleep "$CODEXC_POLL"
-        newest="$(watcher_find_rollout "$pane")"
-        if [ -n "$newest" ] && [ "$newest" != "$sess_file" ]; then
-            sess_file="$newest"
-            line_wm=$(wc -l < "$sess_file" 2>/dev/null || echo 0)   # /resume: skip history
+        now="$(date +%s)"
+        # 心跳: 回合进行中每 30s 刷新 status.json (悬浮条新鲜窗口 120s;
+        # 事件写入不受此限), 不依赖本轮是否读到新事件
+        if [ -n "$turn_start" ] && [ $((now - last_hb)) -ge 30 ]; then
+            write_status "▶️ ${last_prompt:0:80}" 1
+            last_hb=$now
         fi
-        total=$(wc -l < "$sess_file" 2>/dev/null || echo 0)
-        [ "$total" -gt "$line_wm" ] || continue
-        new_lines="$(tail -n +$((line_wm + 1)) "$sess_file")"
-        line_wm=$total
-        status="$(printf '%s\n' "$new_lines" | python3 -c '
-import json, sys
-for line in sys.stdin:
+        # /resume 换文件检测降频到 30s 一次 (lsof 扫树不便宜)
+        if [ "$now" -ge "$rediscover_at" ]; then
+            rediscover_at=$((now + 30))
+            newest="$(watcher_find_rollout "$pane")"
+            if [ -n "$newest" ] && [ "$newest" != "$sess_file" ]; then
+                sess_file="$newest"
+                sess_off=-1                   # -1 = 从新文件 EOF 起步 (跳过历史)
+            fi
+        fi
+        cur="$(stat -f '%z' "$sess_file" 2>/dev/null || echo 0)"
+        [ "$cur" -ne "$sess_off" ] || continue
+        out="$(python3 - "$sess_file" "$sess_off" <<'PYEOF6'
+import json, os, sys
+path = sys.argv[1]
+offset = int(sys.argv[2])
+size = os.path.getsize(path)
+if offset < 0 or offset > size:
+    offset = size                              # -1 = 新文件跳过历史; 缩小 = 被截断, 就地重置
+if size <= offset:
+    print(offset)
+    raise SystemExit
+with open(path, "rb") as fh:
+    fh.seek(offset)
+    raw = fh.read(size - offset)
+parts = raw.split(b"\n")
+consumed = offset + len(raw) - len(parts[-1])  # 末段无换行 = 半行, 留在水位外
+out = []
+for b in parts[:-1]:
+    line = b.decode("utf-8", "replace")
+    if not line:
+        continue
     try: d = json.loads(line)
     except Exception: continue
     payload = d.get("payload") if isinstance(d, dict) else None
     if not isinstance(payload, dict): continue
     ptype = payload.get("type")
     if ptype == "task_started":
-        print("start\t")
+        out.append("start\t")
         continue
     if ptype == "item_completed":
         item = payload.get("item")
@@ -676,17 +720,24 @@ for line in sys.stdin:
                     if isinstance(c, dict) and c.get("type") == "text":
                         text = c.get("text") or ""
                         break
-            print("prompt\t" + " ".join(str(text).split())[:120])
+            out.append("prompt\t" + " ".join(str(text).split())[:120])
         continue
     if ptype != "task_complete": continue
     err = payload.get("error")
     if err:
         text = err.get("message", "") if isinstance(err, dict) else str(err)
-        print(f"err\t{text}")
+        out.append("err\t" + " ".join(str(text).split())[:200])
     else:
         msg = payload.get("last_agent_message") or ""
-        print("done\t" + " ".join(str(msg).split())[:80])
-' 2>/dev/null)"
+        out.append("done\t" + " ".join(str(msg).split())[:80])
+print(consumed)
+for e in out:
+    print(e)
+PYEOF6
+)"
+        sess_off="$(printf '%s' "$out" | head -1)"
+        case "$sess_off" in ''|*[!0-9]*) sess_off=-1; continue ;; esac
+        status="$(printf '%s' "$out" | tail -n +2)"
         [ -n "$status" ] || continue
         while IFS=$TAB read -r api_code api_text; do
             case "$api_code" in
