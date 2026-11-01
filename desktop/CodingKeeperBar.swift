@@ -371,7 +371,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 h = self.hSmall
             }
 
-            if flashing {
+            if self.userExpanded {
+                // 展开态 = 只显示明细表, 小横幅文字与闪现全部让位 (否则重叠)
+                self.flashTitle.isHidden = true
+                self.flashBody.isHidden = true
+                self.bannerText.isHidden = true
+            } else if flashing {
                 self.flashTitle.stringValue = self.flashCandidateTitle ?? ""
                 self.flashBody.stringValue = self.flashCandidateBody ?? ""
                 self.flashTitle.isHidden = false
