@@ -49,8 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastNotifyKey = ""
 
     let hIdle: CGFloat = 3        // 空闲: 细线
-    let hSmall: CGFloat = 20      // 小横幅: 状态计数
-    let hFlash: CGFloat = 44      // 闪现横幅
+    let hSmall: CGFloat = 22      // 小横幅: 状态计数
+    let hFlash: CGFloat = 48      // 闪现横幅
     let barW: CGFloat = 480
     let freshWindow: TimeInterval = 120   // status.json 心跳视为存活的窗口
 
@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
 
         bannerText = NSTextField(labelWithString: "⚙︎")
-        bannerText.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        bannerText.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         bannerText.textColor = .secondaryLabelColor
         bannerText.lineBreakMode = .byTruncatingTail
         bannerText.frame = NSRect(x: 10, y: 3, width: barW - 20, height: 15)
@@ -85,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.addSubview(bannerText)
 
         flashTitle = NSTextField(labelWithString: "")
-        flashTitle.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        flashTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         flashTitle.textColor = NSColor.white
         flashTitle.lineBreakMode = .byTruncatingTail
         flashTitle.frame = NSRect(x: 10, y: hFlash - 20, width: barW - 20, height: 16)
@@ -93,8 +93,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.addSubview(flashTitle)
 
         flashBody = NSTextField(labelWithString: "")
-        flashBody.font = NSFont.systemFont(ofSize: 11)
-        flashBody.textColor = .secondaryLabelColor
+        flashBody.font = NSFont.systemFont(ofSize: 12)
+        flashBody.textColor = NSColor(white: 0.88, alpha: 1)
         flashBody.lineBreakMode = .byTruncatingTail
         flashBody.frame = NSRect(x: 10, y: 4, width: barW - 20, height: 15)
         flashBody.isHidden = true
@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailScroll.hasVerticalScroller = true
         detailScroll.drawsBackground = false
         detailText = NSTextView(frame: NSRect(x: 0, y: 0, width: barW - 20, height: 1))
-        detailText.font = NSFont.systemFont(ofSize: 11)
+        detailText.font = NSFont.systemFont(ofSize: 12)
         detailText.textColor = NSColor.white
         detailText.backgroundColor = .clear
         detailText.isEditable = false
@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notifyBody = NSTextField(labelWithString: "")
         notifyBody.font = NSFont.systemFont(ofSize: 12)
-        notifyBody.textColor = .secondaryLabelColor
+        notifyBody.textColor = NSColor(white: 0.88, alpha: 1)
         notifyBody.frame = NSRect(x: 14, y: 8, width: nW - 28, height: nH - 36)
 
         let nbg = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: nW, height: nH))
@@ -366,18 +366,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cardPara.paragraphSpacing = 7
         cardPara.lineSpacing = 2
         cardPara.alignment = .left
+        let dim = NSColor(white: 0.85, alpha: 1)   // 次要信息: 亮灰 (替代 secondaryLabelColor)
         func cardHeader(_ color: NSColor, _ tool: String, _ name: String, _ tail: String) {
-            let font11 = NSFont.systemFont(ofSize: 11)
-            detailAttr.append(NSAttributedString(string: "● ", attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 10), .paragraphStyle: cardPara]))
-            detailAttr.append(NSAttributedString(string: tool, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .paragraphStyle: cardPara]))
-            detailAttr.append(NSAttributedString(string: " · \(name)", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: font11, .paragraphStyle: cardPara]))
+            let font12 = NSFont.systemFont(ofSize: 12)
+            detailAttr.append(NSAttributedString(string: "● ", attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: cardPara]))
+            detailAttr.append(NSAttributedString(string: tool, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .paragraphStyle: cardPara]))
+            detailAttr.append(NSAttributedString(string: " · \(name)", attributes: [.foregroundColor: dim, .font: font12, .paragraphStyle: cardPara]))
             if !tail.isEmpty {
-                detailAttr.append(NSAttributedString(string: " · \(tail)", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: font11, .paragraphStyle: cardPara]))
+                detailAttr.append(NSAttributedString(string: " · \(tail)", attributes: [.foregroundColor: dim, .font: font12, .paragraphStyle: cardPara]))
             }
             detailAttr.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: cardPara]))
         }
         func cardBody(_ text: String) {
-            detailAttr.append(NSAttributedString(string: "    \(text)\n", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: cardPara]))
+            detailAttr.append(NSAttributedString(string: "    \(text)\n", attributes: [.foregroundColor: dim, .font: NSFont.systemFont(ofSize: 12), .paragraphStyle: cardPara]))
         }
         for st in running.sorted(by: { $0.startedAt < $1.startedAt }) {
             cardHeader(.systemGreen, st.tool.isEmpty ? "codex" : st.tool, st.name, duration(st.startedAt))
@@ -398,7 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             detailAttr.append(NSAttributedString(string: "暂无任务 — 在任意项目里提交一个任务, 这里就会亮起来",
                 attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: cardPara]))
         }
-        let detailHeight: CGFloat = cardCount == 0 ? 30 : CGFloat(cardCount) * 38 + 14
+
 
         DispatchQueue.main.async {
             guard let screen = NSScreen.screens.first else { return }
@@ -412,20 +413,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else if self.hoverActive || !attention.isEmpty { state = "counts" }
             else { state = "idle" }
 
-            let h: CGFloat
-            switch state {
-            case "expanded": h = min(detailHeight + 16, screen.frame.height / 2)
-            case "flashStart", "flashDone": h = self.hFlash
-            case "counts": h = self.hSmall
-            default: h = self.hIdle
-            }
-
             // ── 每状态的子视图显式布局 (不依赖固定 frame 叠放) ──
-            self.bannerText.frame = NSRect(x: 10, y: (self.hSmall - 15) / 2, width: self.barW - 20, height: 15)
-            self.flashTitle.frame = NSRect(x: 10, y: self.hFlash - 20, width: self.barW - 20, height: 16)
-            self.flashBody.frame = NSRect(x: 10, y: 4, width: self.barW - 20, height: 15)
-            self.detailScroll.frame = NSRect(x: 10, y: 6, width: self.barW - 20, height: max(h - 12, 1))
-            self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
+            self.bannerText.frame = NSRect(x: 10, y: (self.hSmall - 17) / 2, width: self.barW - 20, height: 17)
+            self.flashTitle.frame = NSRect(x: 10, y: self.hFlash - 22, width: self.barW - 20, height: 18)
+            self.flashBody.frame = NSRect(x: 10, y: 4, width: self.barW - 20, height: 17)
+            self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: self.hFlash)
 
             self.bannerText.isHidden = state != "counts"
             self.flashTitle.isHidden = !(state == "flashStart" || state == "flashDone")
@@ -456,6 +448,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.detailText.layoutManager?.ensureLayout(for: self.detailText.textContainer!)
             let used = self.detailText.layoutManager!.usedRect(for: self.detailText.textContainer!).size
             self.detailText.frame.size.height = max(used.height + 8, 1)
+
+            // ── 高度: 展开态按实测排版高度 (长文本折行不再被截), 其余按状态 ──
+            var h: CGFloat
+            if state == "expanded" {
+                h = min(used.height + 26, screen.frame.height / 2)
+            } else if state == "flashStart" || state == "flashDone" {
+                h = self.hFlash
+            } else if state == "counts" {
+                h = self.hSmall
+            } else {
+                h = self.hIdle
+            }
+            self.detailScroll.frame = NSRect(x: 10, y: 6, width: self.barW - 20, height: max(h - 12, 1))
 
             // ── 背景色 (与状态一致) ──
             let bg: NSColor
