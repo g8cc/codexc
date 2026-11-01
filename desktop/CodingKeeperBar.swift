@@ -219,8 +219,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for proj in projects {
             let st = readStatus(proj)
             if st.parked {
-                events.append(("⏸ \(st.name) 已挂起", "加任务到 queue.md 或 rm loop.halt 复燃"))
-                attention.append((st.name, "已挂起"))
+                // parked 是监督器状态 (自动循环停机待复燃), 不是任务状态 —
+                // 文案与任务态 (▶️/✅/⛔) 明确区分
+                events.append(("⏸ \(st.name) 自动循环已暂停", "加任务到 queue.md 或 rm loop.halt 复燃"))
+                attention.append((st.name, "自动循环已暂停"))
             } else if st.task.hasPrefix("⛔") {
                 // 不可自动续跑的停止: 常驻警示到人处理为止
                 attention.append((st.name, String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
