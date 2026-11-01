@@ -611,7 +611,9 @@ import json, sys
 started_at = None
 prompt = ""
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-for line in reversed(lines[-400:]):
+# 不设窗口上限: 长回合(数小时)的 task_started 会沉到几千行之前, 固定窗口
+# 会漏判; 倒扫在首个 task_* 事件即停, 全文件成本可接受
+for line in reversed(lines):
     try: d = json.loads(line)
     except Exception: continue
     p = d.get("payload") if isinstance(d, dict) else None
