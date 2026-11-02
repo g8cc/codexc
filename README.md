@@ -49,6 +49,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `codexc -T claude` | drive **Claude Code** (loop, gate, reviews all work the same) |
 | `codexc -T opencode` | drive **opencode** (same pipeline; sessions read from opencode.db) |
 | `ck zcode run` | drive **ZCode's CLI** on the headless lane: one blocking turn per task via `zcode --prompt --mode yolo`, session continuity persisted to `.codingkeeper/zcode-session-id`. Queue/gate auto-scaffold on first run; needs Node >= 24 and the app's `zcode.cjs` (auto-detected) |
+| `zcodec` | product-name entry for the zcode night runner — bare = run, subcommands pass through (`zcodec init` / `status` / `selftest`). Same for **`dshc`** = `ck dsh run` |
 | `ck status` | **all-projects overview**: burning/parked/queue/last-acceptance for every registered project |
 | `ck fuel [tool]` | shorthand for `codexc fuel` |
 | `codexc -T pi` | drive **pi** (same pipeline; auto-continue keys off `stopReason: "error"`) |

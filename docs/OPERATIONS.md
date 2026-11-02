@@ -16,7 +16,7 @@ pi/opencode = TUI 通道;  zcode/dsh = headless 通道)
 
 - **TUI 通道**（`ck codex`/`ck claude`/`ck opencode`/`ck pi`）：tmux 会话 + 按键投喂，
   watcher 盯错误自动续命；适用于有终端界面的工具。
-- **headless 通道**（`ck zcode run`/`ck dsh run`，经 `codexc-headless`）：每任务一次阻塞子进程，
+- **headless 通道**（`ck zcode run`/`ck dsh run`，产品入口 `zcodec`/`dshc`，经 `codexc-headless`）：每任务一次阻塞子进程，
   worker 命令经 `CODEXC_HEADLESS_CMD` 注入；无界面、无弹窗、硬超时兜底。
 
 两条通道的项目文件完全一致（`.codingkeeper/queue.md`、`.codingkeeper/gate.sh`、

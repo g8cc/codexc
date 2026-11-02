@@ -39,6 +39,8 @@ link "$HERE/codexc-loop" "$CODEX_BIN_DIR/codexc-loop"
 link "$HERE/codexc-headless" "$CODEX_BIN_DIR/codexc-headless"
 link "$HERE/codexc-zcode-worker" "$CODEX_BIN_DIR/codexc-zcode-worker"
 link "$HERE/codexc-dsh-worker" "$CODEX_BIN_DIR/codexc-dsh-worker"
+link "$HERE/zcodec" "$CODEX_BIN_DIR/zcodec"   # 产品命名入口 (无参即 run)
+link "$HERE/dshc" "$CODEX_BIN_DIR/dshc"
 link "$HERE/codexc-daily" "$CODEX_BIN_DIR/codexc-daily"
 link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"
 

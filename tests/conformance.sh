@@ -42,6 +42,8 @@ ckge "headless 重试 3" "$(grep -c 'CODEXC_TURN_RETRIES:-3' codexc-headless)" 1
 
 echo "== 产品 CLI (ck) =="
 ck "ck 存在"        "$([ -x ck ] && echo OK)" "OK"
+ck "zcodec 入口"    "$([ -x zcodec ] && echo OK)" "OK"
+ck "dshc 入口"      "$([ -x dshc ] && echo OK)" "OK"
 ck "status 子命令"  "$([ "$(grep -c 'cmd_status' codexc-headless)" -ge 1 ] && echo OK)" "OK"
 
 echo "== 顶部横幅（banner_set 存在且调用） =="

@@ -6,8 +6,8 @@
 | claude | TUI | `ck claude`（或 `codexc -T claude`） | JSONL isApiErrorMessage | ~/.claude/settings.json env（eazydata 中转） | ⚠ 中转曾宕机, 恢复即闭环 |
 | opencode | TUI | `ck opencode`（或 `codexc -T opencode`） | opencode.db session_message 错误行 | ~/.local/share/opencode | ✅ 可用(真实E2E验收) |
 | pi | TUI | `ck pi`（或 `codexc -T pi`） | stopReason:"error" | ~/.pi/agent（provider key 已失效→需重新登录） | ⚠ 待凭证 |
-| zcode | headless | `ck zcode run` | 子进程 stdout/exit | 桌面应用共享登录 + zcode.cjs 自动探测 | ✅ 可用(会话接力实测) |
-| dsh | headless | `ck dsh run` | 子进程 stdout/exit | keydrop 动态注入（失效→去 keydrop 刷新） | ⚠ 待凭证 |
+| zcode | headless | `ck zcode run` / `zcodec` | 子进程 stdout/exit | 桌面应用共享登录 + zcode.cjs 自动探测 | ✅ 可用(会话接力实测) |
+| dsh | headless | `ck dsh run` / `dshc` | 子进程 stdout/exit | keydrop 动态注入（失效→去 keydrop 刷新） | ⚠ 待凭证 |
 
 ## 钥匙自检
 

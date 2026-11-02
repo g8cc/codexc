@@ -12,6 +12,8 @@
 - 通知: 完成绿闪+系统通知、不可续跑错误常驻警示 (stderr 尾带回), 全局弹窗
   间隔总闸 (CODEXC_NOTIFY_GAP)
 - 治理: 集成测试 /tmp 世界不再污染项目注册表; 交互会话注册补齐
+- 产品命名入口: `zcodec`/`dshc` (无参即 run, 子命令透传 codexc-headless;
+  `ck zcode`/`ck dsh` 无参同义), 补齐 `*c` 命名家族统一
 - 诊断: zcode worker 失败带回 stderr 尾; 门禁加 swift -typecheck
 
 ## v2.0.0 (unreleased)
