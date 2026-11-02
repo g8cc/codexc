@@ -192,7 +192,9 @@ run_runner() {
             log "turn timed out ($fail_streak/$CODEXC_TURN_RETRIES)"
             if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
                 park "循环挂起: 连续 $fail_streak 个回合超时 — 请检查 worker" "consecutive turn timeouts"
+                continue
             fi
+            sleep $((fail_streak * 5))   # 退避: 瞬时故障 (会话库锁等) 连发重试只会全撞同一窗口
             continue
         fi
         marker="$(result_marker "$outfile")"
@@ -201,7 +203,9 @@ run_runner() {
             log "turn produced no TASK_RESULT (empty/error stdout?) $fail_streak/$CODEXC_TURN_RETRIES (tail: $(LC_ALL=C tr -d '\000' < "$outfile" | tr '\n' ' ' | tail -c 150))"
             if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
                 park "循环挂起: 连续 $fail_streak 个回合无有效输出 (worker 认证/配置?)" "repeated empty turns"
+                continue
             fi
+            sleep $((fail_streak * 5))   # 同上: 失败退避, 不连发
             continue
         fi
         fail_streak=0
