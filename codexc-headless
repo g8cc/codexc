@@ -357,6 +357,9 @@ cmd_selftest() {
     printf 'no verdict\n' > "$d/r3"
     bugs="$(parse_bugs "$d/r3")"
     [ "$bugs" = "parse-fail" ] && echo "  ok: verdict-less -> parse-fail" || echo "  FAIL: got [$bugs]"
+    echo "== normalize_uint 溢出防护 =="
+    v="$(normalize_uint T 99999999999999999999 900 5 86400 2>/dev/null)"
+    [ "$v" = "900" ] && echo "  ok: 20 位数字回落 fallback (bash 64 位算术会回绕)" || { echo "  FAIL: got [$v]"; return 1; }
     echo "SELFTEST PASS"
     rm -rf "$d"
 }

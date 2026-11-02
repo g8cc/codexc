@@ -1045,6 +1045,16 @@ EOF
     assert_eq "empty ready -> nothing" "" "$(queue_next "$d/q2.md")"
     assert_eq "missing file -> nothing" "" "$(queue_next "$d/absent.md")"
 
+    echo "== queue_mark_done 原子写 =="
+    d="$(tmpd)"
+    printf '## ready\n- [ ] 任务T\n' > "$d/queue.md"
+    line="$(queue_next "$d/queue.md")"
+    queue_mark_done "$d/queue.md" "${line#*$TAB}" >/dev/null
+    grep -qx -- "- \[x\] 任务T" "$d/queue.md" && rc=0 || rc=1
+    assert_eq "atomic mark done content" "0" "$rc"
+    [ -e "$d/queue.md.codingkeeper-tmp" ] && rc=1 || rc=0
+    assert_eq "atomic mark done no tmp residue" "0" "$rc"
+
     echo "== result marker =="
     d="$(tmpd)"
     printf 'blah blah\nTASK_RESULT: DONE\n' > "$d/m1"

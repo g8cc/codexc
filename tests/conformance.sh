@@ -60,6 +60,11 @@ ckge "runner 锁"      "$(grep -c 'loop.pid' codexc-loop)" 3
 ckge "kill_tree (共享库)" "$(grep -c 'kill_tree' ck-common.sh)" 2
 ckge "三车道接库"     "$(grep -l '/ck-common.sh' codexc-loop codexc-headless codexc-daily 2>/dev/null | wc -l | tr -d ' ')" 3
 ckge "usage limit 永不续命" "$(grep -c 'usage limit' codexc)" 1
+
+echo "== 投喂消息单行化 (continue 未提交事故回归闸) =="
+ckge "codexc 剥离 CR/LF"   "$(grep -cF 'tr -d ' codexc)" 1
+ckge "codexc-daily 剥离 CR/LF" "$(grep -cF 'tr -d ' codexc-daily)" 1
+ck "CR/LF 剥离机制"   "$([ "$(printf 'a\r\nb' | tr -d '\r\n')" = "ab" ] && echo OK)" "OK"
 ck "ck 入口"           "$([ -x ck ] && echo OK)" "OK"
 ck "codexc 兼容"       "$([ -x codexc ] && echo OK)" "OK"
 ck "fuel 四工具"       "$([ "$(codexc fuel codex >/dev/null 2>&1; codexc fuel claude >/dev/null 2>&1; codexc fuel pi >/dev/null 2>&1; codexc fuel opencode >/dev/null 2>&1; echo $?)" = "0" ] && echo OK)" "OK"
