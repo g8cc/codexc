@@ -261,15 +261,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return f.string(from: Date(timeIntervalSince1970: ts))
     }
 
-    // 转圈图标: 8 帧弧线 (缺口旋转), 每帧惰性渲染一次
+    // 转圈图标: 8 帧弧线 (缺口旋转), 每帧惰性渲染一次。
+    // 画布 14x12 弧心居中 (x=7): 左右各 ~2.5px 对称留白, 图标不前贴后宽
     func spinnerAttach() -> NSAttributedString {
         if spinnerFrames.isEmpty {
             spinnerFrames = (0..<8).map { i in
-                let size = NSSize(width: 16, height: 12)
+                let size = NSSize(width: 14, height: 12)
                 return NSImage(size: size, flipped: false) { _ in
                     let a = CGFloat(i) / 8 * 360
                     let p = NSBezierPath()
-                    p.appendArc(withCenter: NSPoint(x: 6, y: 6), radius: 4.5,
+                    p.appendArc(withCenter: NSPoint(x: 7, y: 6), radius: 4.5,
                                 startAngle: a, endAngle: a + 300)
                     p.lineWidth = 2
                     NSColor.systemGreen.setStroke()
@@ -280,42 +281,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let att = NSTextAttachment()
         att.image = spinnerFrames[spinnerIdx % spinnerFrames.count]
-        att.bounds = NSRect(x: 0, y: -1, width: 16, height: 12)
+        att.bounds = NSRect(x: 0, y: -1, width: 14, height: 12)
         return NSAttributedString(attachment: att)
     }
     func pauseAttach() -> NSAttributedString {
         if pauseIcon == nil {
-            let size = NSSize(width: 16, height: 12)
+            let size = NSSize(width: 14, height: 12)
             pauseIcon = NSImage(size: size, flipped: false) { _ in
-                let p = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 12, height: 12), xRadius: 3, yRadius: 3)
+                let p = NSBezierPath(roundedRect: NSRect(x: 1.5, y: 0, width: 11, height: 12), xRadius: 3, yRadius: 3)
                 NSColor.systemOrange.setFill()
                 p.fill()
                 NSColor.white.setFill()
-                NSRect(x: 3.5, y: 3, width: 1.8, height: 6).fill()
-                NSRect(x: 6.7, y: 3, width: 1.8, height: 6).fill()
+                NSRect(x: 4.5, y: 3, width: 1.8, height: 6).fill()
+                NSRect(x: 7.7, y: 3, width: 1.8, height: 6).fill()
                 return true
             }
         }
         let att = NSTextAttachment()
         att.image = pauseIcon
-        att.bounds = NSRect(x: 0, y: -1, width: 16, height: 12)
+        att.bounds = NSRect(x: 0, y: -1, width: 14, height: 12)
         return NSAttributedString(attachment: att)
     }
 
-    // 计数横幅重建: [logo]tool [⟳N] [⏸N] — 转圈在数字前面
+    // 计数横幅重建: [logo]tool [⟳N] [⏸N] — 转圈在数字前面。
+    // 图标两侧用细空格对称留白: 此前左缘仅靠 icon 内边距 (~1.5px) 前贴后宽
     func rebuildCountsBanner() {
         let m = NSMutableAttributedString()
+        let thin = NSAttributedString(string: "\u{2009}")
         for (i, c) in lastCountsModel.enumerated() {
             if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
             m.append(toolChip(c.tool))
             m.append(NSAttributedString(string: " \(c.tool)", attributes: [.foregroundColor: NSColor.white]))
             if c.run > 0 {
+                m.append(thin)
                 m.append(spinnerAttach())
-                m.append(NSAttributedString(string: " \(c.run)", attributes: [.foregroundColor: NSColor.white]))
+                m.append(NSAttributedString(string: "\u{2009}\(c.run)", attributes: [.foregroundColor: NSColor.white]))
             }
             if c.pend > 0 {
+                m.append(thin)
                 m.append(pauseAttach())
-                m.append(NSAttributedString(string: " \(c.pend)", attributes: [.foregroundColor: NSColor.white]))
+                m.append(NSAttributedString(string: "\u{2009}\(c.pend)", attributes: [.foregroundColor: NSColor.white]))
             }
         }
         bannerText.attributedStringValue = m

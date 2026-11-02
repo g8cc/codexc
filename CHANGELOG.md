@@ -15,6 +15,9 @@
 - 产品命名入口: `zcodec`/`dshc` (无参即 run, 子命令透传 codexc-headless;
   `ck zcode`/`ck dsh` 无参同义), 补齐 `*c` 命名家族统一
 - 诊断: zcode worker 失败带回 stderr 尾; 门禁加 swift -typecheck
+- 修复: 投喂消息进程级单行化 (剥离 CR/LF) — 尾随换行被 send-keys -l 字面
+  打进 composer 会被 TUI 当作换行而非提交 ("continue 已输入未发送");
+  watcher 启动记录消息逐字节形态, 此类事故可直接对账
 
 ## v2.0.0 (unreleased)
 多工具运行时（CodingKeeper 首个完整版）:

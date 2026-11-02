@@ -39,6 +39,9 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
+# 单行化: 同 codexc — 尾随 CR/LF 会被 send-keys -l 字面打进 composer,
+# TUI 当作 composer 内换行而非提交; 运行时发送与 install 烤进 plist 都吃这里
+CODEXC_MESSAGE="$(printf '%s' "$CODEXC_MESSAGE" | tr -d '\r\n')"
 CODEXC_EXTRA_RE="${CODEXC_EXTRA_RE:-}"
 CODEXC_DAILY_IDLE="${CODEXC_DAILY_IDLE:-30}"
 normalize_decimal() {

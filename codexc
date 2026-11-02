@@ -93,6 +93,10 @@ set -u
 
 CODEXC_SESSION="${CODEXC_SESSION:-}"
 CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
+# 单行化: CR/LF 会被 send-keys -l 字面打进 composer, TUI 把尾随换行当作
+# composer 内换行而非提交 ("continue 已输入但没发送, 光标停在下一行" 的根因,
+# launchd plist 里曾固化了带 \n 的消息) — 进程级掐掉这类脏字节
+CODEXC_MESSAGE="$(printf '%s' "$CODEXC_MESSAGE" | tr -d '\r\n')"
 CODEXC_COOLDOWN="${CODEXC_COOLDOWN:-10}"
 CODEXC_MAX_CONTINUES="${CODEXC_MAX_CONTINUES:-30}"
 CODEXC_POLL="${CODEXC_POLL:-2}"
@@ -520,6 +524,8 @@ watch_and_run() {
     match_re="$TRANSIENT_RE"
     extra_re="$(load_extra_patterns)"
     [ -n "$extra_re" ] && match_re="$match_re|$extra_re"
+    # 诊断基线: 记录投喂消息的逐字节形态, "输入了但没发送"类事故可直接对账
+    echo "$(date '+%F %T') watcher: message bytes:$(printf '%s' "$CODEXC_MESSAGE" | od -An -c | tr '\n' ' ' | tr -s ' ' | head -c 100)" >> "$WATCHLOG"
 
     # error source: the session ROLLOUT's task_complete.error events. The
     # sqlite logs table does not carry model-availability errors ("Selected
