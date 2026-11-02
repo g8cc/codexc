@@ -208,7 +208,7 @@ ensure_retry_config() {
     [ -f "$cfg" ] || return 0
     grep -q "request_max_retries" "$cfg" && return 0
     python3 - "$cfg" <<'PYEOF'
-import sys
+import os, sys
 p = sys.argv[1]
 lines = open(p).read().split("\n")
 out, in_provider, inserted = [], False, False
@@ -225,7 +225,15 @@ if in_provider and not inserted:
     out += keys
     inserted = True
 if inserted:
-    open(p, "w").write("\n".join(out))
+    # 原子替换并保留原权限: config.toml 是 codex 的活配置, 半截写会让会话起不来
+    tmp = p + ".codingkeeper-tmp"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(out))
+    try:
+        os.chmod(tmp, os.stat(p).st_mode & 0o777)
+    except OSError:
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
     print(f"codexc: re-added retry keys to {p} (a config switcher had wiped them)", file=sys.stderr)
 PYEOF
     grep -q "request_max_retries" "$cfg" && \

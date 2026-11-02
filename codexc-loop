@@ -271,7 +271,8 @@ for current, dirs, files in os.walk(root):
             except OSError:
                 continue
 cands.sort(reverse=True)
-for _mtime, path in cands[:8]:
+# 窗口取 16: 按全局 mtime 排序, 活跃项目多时本项目 rollout 会被挤出过窄窗口
+for _mtime, path in cands[:16]:
     try:
         with open(path, "rb") as fh:
             for _ in range(5):
@@ -533,7 +534,7 @@ banner_set() {  # $1=横幅文本
     tmux set-option -p -t "$pane" pane-border-format " 🔥 $txt" 2>/dev/null
     local active=0
     case "$1" in 📋*|🔧*|🔍*|🔥*) active=1 ;; esac
-    status_write "$1" "${CODEXC_TOOL:-codex}" "$active" 0
+    status_write "$1" "${CODEXC_TOOL:-codex}" "$active" "${CK_TURN_TS:-0}"
     return 0
 }
 
@@ -603,6 +604,7 @@ run_driver() {  # $1=pane
 
         if [ "$mode" = "halt" ]; then
             if [ ! -e ".codingkeeper/loop.halt" ]; then
+                CK_TURN_TS=0   # 复燃横幅是 active 态, 不带上一任务的陈旧起点
                 banner_set "🔥 复燃: 继续燃烧"
                 log "resuming from halt"
                 mode="idle"; phase=""
@@ -643,6 +645,7 @@ run_driver() {  # $1=pane
                 fi
                 feed_size=$(terminal_count "$rollout")
                 head_at_feed=$(git rev-parse HEAD 2>/dev/null || echo none)
+                CK_TURN_TS=$(date +%s)
                 banner_set "🔥 空闲燃烧: 持续改进与收尾审查 (队列空)"
             log "idle prompt fed (burn): 持续改进/收尾审查"
                 continue
@@ -676,6 +679,7 @@ run_driver() {  # $1=pane
             feed_size=$(terminal_count "$rollout")
             ready_n="$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || true)"
             ready_n="${ready_n:-0}"   # grep -c 无匹配时打 0 但退出 1, 不能再 || echo 0 (会变成两行)
+            CK_TURN_TS=$(date +%s)
             banner_set "📋 $task ｜ 队列剩余 ${ready_n} │ 执行中"
             log "task fed: $task"
             continue
@@ -889,6 +893,7 @@ run_driver() {  # $1=pane
                     continue
                 fi
                 mode="idle"; phase=""
+                CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)
             fi
             # streak < PASS -> loop runs the next review on the following poll
         fi

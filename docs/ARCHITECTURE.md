@@ -6,8 +6,8 @@ CodingKeeper = 编码 Agent 的无人值守运行时。核心命题: **智能全
 
 | 通道 | 入口 | 驱动方式 | 适用 |
 |---|---|---|---|
-| TUI | codexc / claudec / opencodec / pic | tmux 会话 + 按键投喂 + 屏幕特征判忙闲 + watcher 错误续命 | 有终端 TUI 的工具 |
-| headless | zcodec / dshc（经 codexc-headless） | 每任务一次阻塞子进程（`CODEXC_HEADLESS_CMD`），stdin 进任务、stdout 出结论 | 只有程序化接口的工具 |
+| TUI | `ck codex` / `ck claude` / `ck opencode` / `ck pi` | tmux 会话 + 按键投喂 + 屏幕特征判忙闲 + watcher 错误续命 | 有终端 TUI 的工具 |
+| headless | `ck zcode run` / `ck dsh run`（经 codexc-headless） | 每任务一次阻塞子进程（`CODEXC_HEADLESS_CMD`），stdin 进任务、stdout 出结论 | 只有程序化接口的工具 |
 
 两条通道的项目文件与验收管线**完全一致**，可互换。
 

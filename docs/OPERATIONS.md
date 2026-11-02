@@ -14,9 +14,9 @@ worker(codex/claude/   └──────────────────
 pi/opencode = TUI 通道;  zcode/dsh = headless 通道)
 ```
 
-- **TUI 通道**（`codexc`/`claudec`/`opencodec`/`pic`）：tmux 会话 + 按键投喂，
+- **TUI 通道**（`ck codex`/`ck claude`/`ck opencode`/`ck pi`）：tmux 会话 + 按键投喂，
   watcher 盯错误自动续命；适用于有终端界面的工具。
-- **headless 通道**（`zcodec`/`dshc`，经 `codexc-headless`）：每任务一次阻塞子进程，
+- **headless 通道**（`ck zcode run`/`ck dsh run`，经 `codexc-headless`）：每任务一次阻塞子进程，
   worker 命令经 `CODEXC_HEADLESS_CMD` 注入；无界面、无弹窗、硬超时兜底。
 
 两条通道的项目文件完全一致（`.codingkeeper/queue.md`、`.codingkeeper/gate.sh`、
@@ -81,7 +81,7 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 | usage limit / 订阅额度类 | **永不续命**——等待窗口重置才是正解，可排 `codexc -t` 定时 |
 | 错误来源 | 每工具不同: codex=rollout 尾部 task_complete.error；claude=JSONL `isApiErrorMessage`(内置重试耗尽后)；pi=`stopReason:"error"`；opencode=opencode.db 错误 assistant 行 |
 | 连续续命 30 次仍错 | watcher 停止 + 通知（防 token 无底洞） |
-| 长跑会话的 watcher 版本旧 | watcher 随会话启动冻结——代码升级后需重启会话（exit codex → `codexc resume --last`） |
+| 长跑会话的 watcher 版本旧 | 重新 `codexc` attach 即自动补挂当前代码的 watcher（watcher 死亡/升级同理）；无需重启会话 |
 
 ### 运行器自身
 
@@ -139,16 +139,19 @@ runner 运行时在所在 tmux 窗格顶部常驻一行横幅，随状态机实�
 `📋 任务 ｜ 队列剩余 n │ 执行中` → `🔍 独立审查中` → `✅ 已验收` → `⛔ 已挂起`。
 关闭: `CODEXC_BANNER=0`。
 
-### 桌面通知（CodingKeeperBar，三态）
+### 桌面任务面板（CodingKeeperBar，单一状态机）
 
-屏幕顶部通知系统，类 Claude Code 任务面板，三态:
+屏幕顶边居中的任务面板，渲染状态按优先级: **展开 > 闪现 > (悬停∨待处理)=计数 > 空闲**:
 
-1. **隐藏** — 无燃烧项目时什么都不显示
-2. **细横幅** — 屏幕顶端居中一条半透明横条，实时显示每个燃烧项目的当前任务
-3. **通知面板** — 重要事件（验收完成/挂起/熄火）弹出较大面板（含任务名+结果），5 秒后自动收回
+1. **空闲** — 3px 绿色细线贴在菜单栏行（无文字，不干扰）
+2. **悬停/待处理** — 弹出状态计数（品牌 logo + 转圈运行数 + 暂停待处理数）
+3. **闪现** — 新任务蓝闪 4s / 完成绿闪 4s（同一事件 10s 去重），自动收回
+4. **待处理常驻** — ⛔ 停止 / ⏸ 循环挂起时琥珀色计数常驻，直到处理
+5. **点击展开** — 任务卡片表格（状态色点 + 工具·项目 + 时长/完成时刻 + 任务文本），封顶半屏滚动
 
 install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
-每 3 秒从各项目的 `status.json` 刷新。不占 Dock、不抢焦点、可点穿。
+每 2 秒从各项目的 `status.json` 与 `loop.pid` 刷新（活跃回合另有 30s 心跳保活）。
+不占 Dock、不抢焦点、空白区域可点穿。
 
 ## 八、排查入口
 
@@ -159,7 +162,7 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 | 队列/门禁/挂起状态 | `<项目>/.codingkeeper/`；`codexc fuel` 一屏汇总 |
 | 测试回归 | `codexc-loop selftest` / `selftest-integration <tool>` / `selftest-faultinjection` / `codexc-headless selftest[-integration]` |
 
-## 八、设计不变量（改代码前必读）
+## 九、设计不变量（改代码前必读）
 
 1. **验收只认真实证据**: gate 的退出码 + 独立审查的 BUGS 行；worker 自述永远不算数。
 2. **失败方向是 park**: 任何无法判定的情况挂起等人，绝不带病续跑或虚假验收。

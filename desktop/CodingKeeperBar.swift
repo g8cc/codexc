@@ -31,7 +31,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var flashBody: NSTextField!
     var detailScroll: NSScrollView!
     var detailText: NSTextView!
-    var timer: Timer?
     var collapseTimer: Timer?
     var userExpanded = false
     var flashUntil = Date.distantPast
@@ -194,8 +193,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func registry() -> [String] {
         let reg = NSHomeDirectory() + "/.codingkeeper/projects"
         guard let s = try? String(contentsOfFile: reg, encoding: .utf8) else { return [] }
-        return s.split(separator: "\n").map(String.init).filter {
-            FileManager.default.fileExists(atPath: $0) && !$0.hasPrefix("/tmp/")
+        // 与 ck-common register_project 的 /tmp 过滤对齐 (含 realpath 的 /private/tmp 与系统 TMPDIR)
+        let tmpPrefixes = ["/tmp/", "/private/tmp/", NSTemporaryDirectory()]
+        return s.split(separator: "\n").map(String.init).filter { path in
+            FileManager.default.fileExists(atPath: path) && !tmpPrefixes.contains { path.hasPrefix($0) }
         }
     }
 
@@ -261,19 +262,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // 转圈图标: 8 帧弧线 (缺口旋转), 每帧惰性渲染一次
-    func spinnerFrame(_ i: Int) -> NSImage {
-        let size = NSSize(width: 12, height: 12)
-        return NSImage(size: size, flipped: false) { _ in
-            let a = CGFloat(i) / 8 * 360
-            let p = NSBezierPath()
-            p.appendArc(withCenter: NSPoint(x: 6, y: 6), radius: 4.5,
-                        startAngle: a, endAngle: a + 300)
-            p.lineWidth = 2
-            NSColor.systemGreen.setStroke()
-            p.stroke()
-            return true
-        }
-    }
     func spinnerAttach() -> NSAttributedString {
         if spinnerFrames.isEmpty {
             spinnerFrames = (0..<8).map { i in
@@ -316,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 计数横幅重建: [logo]tool [⟳N] [⏸N] — 转圈在数字前面
     func rebuildCountsBanner() {
-        var m = NSMutableAttributedString()
+        let m = NSMutableAttributedString()
         for (i, c) in lastCountsModel.enumerated() {
             if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
             m.append(toolChip(c.tool))
@@ -577,10 +565,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // 触发闪现; 同一事件 10s 内不重复 (防状态高频变化导致大横幅常驻)
+        // 触发闪现; 同一事件 10s 内不重复 (防状态高频变化导致大横幅常驻)。
+        // key 含任务文本: 同项目 10s 内换新任务仍要闪, 只压同一任务的重复抖动
         if let c = flashCandidate {
             let now = Date().timeIntervalSince1970
-            let fkey = c.kind + "|" + c.title
+            let fkey = c.kind + "|" + c.title + "|" + c.body
             if now - (lastFlashAt[fkey] ?? 0) >= 10 {
                 lastFlashAt[fkey] = now
                 flashCandidateTitle = c.title

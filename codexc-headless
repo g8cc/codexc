@@ -73,15 +73,11 @@ esac
 
 # one headless turn: blocking subprocess with hard timeout; stdout carries the
 # worker's final message. Returns 0 and fills $2 (stdout file); rc 124 = timeout
+# (dry 模式在 run_runner 里就拦截返回, 不会走到这里)
 headless_turn() {  # $1=task text $2=outfile
     local outfile="$2" instrfile="$2.instr" rpid waited=0
     : > "$outfile"
     printf '%s' "$1" > "$instrfile"
-    if [ "$CODEXC_LOOP_DRY" = "1" ]; then
-        printf 'TASK_RESULT: DONE\n' > "$outfile"
-        rm -f "$instrfile"
-        return 0
-    fi
     ( eval "$CODEXC_HEADLESS_CMD" ) < "$instrfile" > "$outfile" 2>/dev/null &
     rpid=$!
     while kill -0 "$rpid" 2>/dev/null; do
@@ -117,7 +113,7 @@ banner_set() {  # $1=横幅文本
         tmux set-option -p -t "$TMUX_PANE" pane-border-status top 2>/dev/null
         tmux set-option -p -t "$TMUX_PANE" pane-border-format " ⚙️ $txt" 2>/dev/null
     fi
-    status_write "$1" "$tool" "$active" 0
+    status_write "$1" "$tool" "$active" "${CK_TURN_TS:-0}"
     return 0
 }
 
@@ -185,6 +181,7 @@ run_runner() {
             notify "dry 试跑完成, 未发送任何内容"
             return 0
         fi
+        CK_TURN_TS=$(date +%s)
         banner_set "📋 $task"
         log "turn started ($task_kind): $task"
         headless_turn "$prompt" "$outfile"
@@ -305,6 +302,7 @@ run_runner() {
             banner_set "✅ 已验收: $task ｜ 燃烧继续"
             log "task accepted: $task"
             mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0
+            CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)
             break
         done
         continue

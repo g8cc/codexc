@@ -2,12 +2,12 @@
 
 | 工具 | 通道 | 入口 | 错误续命源 | 凭证位置 | 当前状态 |
 |---|---|---|---|---|---|
-| codex | TUI | codexc | rollout 尾 task_complete.error | ~/.codex（cc-switch 中转 127.0.0.1:15721） | ✅ 可用 |
-| claude | TUI | claudec | JSONL isApiErrorMessage | ~/.claude/settings.json env（eazydata 中转） | ⚠ 中转曾宕机, 恢复即闭环 |
-| opencode | TUI | opencodec | opencode.db session_message 错误行 | ~/.local/share/opencode | ✅ 可用(真实E2E验收) |
-| pi | TUI | pic | stopReason:"error" | ~/.pi/agent（provider key 已失效→需重新登录） | ⚠ 待凭证 |
-| zcode | headless | zcodec | 子进程 stdout/exit | 桌面应用共享登录 + zcode.cjs 自动探测 | ✅ 可用(会话接力实测) |
-| dsh | headless | dshc | 子进程 stdout/exit | keydrop 动态注入（失效→去 keydrop 刷新） | ⚠ 待凭证 |
+| codex | TUI | `codexc` / `ck codex` | rollout 尾 task_complete.error | ~/.codex（cc-switch 中转 127.0.0.1:15721） | ✅ 可用 |
+| claude | TUI | `ck claude`（或 `codexc -T claude`） | JSONL isApiErrorMessage | ~/.claude/settings.json env（eazydata 中转） | ⚠ 中转曾宕机, 恢复即闭环 |
+| opencode | TUI | `ck opencode`（或 `codexc -T opencode`） | opencode.db session_message 错误行 | ~/.local/share/opencode | ✅ 可用(真实E2E验收) |
+| pi | TUI | `ck pi`（或 `codexc -T pi`） | stopReason:"error" | ~/.pi/agent（provider key 已失效→需重新登录） | ⚠ 待凭证 |
+| zcode | headless | `ck zcode run` | 子进程 stdout/exit | 桌面应用共享登录 + zcode.cjs 自动探测 | ✅ 可用(会话接力实测) |
+| dsh | headless | `ck dsh run` | 子进程 stdout/exit | keydrop 动态注入（失效→去 keydrop 刷新） | ⚠ 待凭证 |
 
 ## 钥匙自检
 

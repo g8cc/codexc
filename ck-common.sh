@@ -12,12 +12,15 @@
 #       queue_mark_done journal_append gate_run gate_tail parse_bugs
 #       review_run review_tail result_marker migrate_state_dir
 #       status_write register_project usage
-# 本文件定义的全局: CODEX_HOME_DIR WATCHLOG TAB LOOP_TMP_FILES
+# 本文件定义的全局: CODEX_HOME_DIR WATCHLOG TAB LOOP_TMP_FILES CK_TURN_TS
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
 TAB="$(printf '\t')"
 LOOP_TMP_FILES=""
+# 当前任务/回合的起始 epoch — runner 在投喂时设置, 验收或复燃时清零;
+# banner_set 经 status_write 写进 status.json, 桌面面板据此显示真实时长
+CK_TURN_TS=0
 : "${CK_LANE:=codexc}"
 CK_TAG="${CK_LANE#codexc-}"
 
@@ -109,7 +112,7 @@ PYEOF
 
 queue_mark_done() {  # $1=queue file $2=b64(task) -> prints "marked" or "not-found"
     python3 - "$1" "$2" <<'PYEOF'
-import base64, sys
+import base64, os, sys
 queue, b64 = sys.argv[1], sys.argv[2]
 task = base64.b64decode(b64).decode("utf-8", "replace")
 try:
@@ -127,7 +130,11 @@ for i, line in enumerate(lines):
         lines[i] = line.replace("- [ ]", "- [x]", 1)
         done_it = True
         break
-open(queue, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+# 原子替换: queue.md 是循环的任务源真相, 半截写会让任务行凭空消失
+tmp = queue + ".codingkeeper-tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+os.replace(tmp, queue)
 print("marked" if done_it else "not-found")
 PYEOF
 }

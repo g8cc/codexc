@@ -64,6 +64,7 @@ for s in $STAGES; do
 done
 
 echo "════════════════════════"
-printf '%s\n' "${RESULTS[@]}"
+# ${VAR[@]+"${VAR[@]}"}: set -u 下空数组在 bash 3.2 会报 unbound variable
+printf '%s\n' ${RESULTS[@]+"${RESULTS[@]}"}
 if [ "$FAILED" = "0" ]; then echo "ALL STAGES PASS"; exit 0; fi
 echo "FAILURES PRESENT"; exit 1
