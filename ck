@@ -6,8 +6,8 @@
 #   ck claude [args]      Claude Code TUI 会话
 #   ck pi [args]          pi TUI 会话
 #   ck opencode [args]    opencode TUI 会话
-#   ck zcode [run]        ZCode headless 夜间通道 (无参即 run; 同 zcodec)
-#   ck dsh [run]          dsh headless 夜间通道 (无参即 run; 同 dshc)
+#   ck zcode [args]       同 zcodec: 裸=唤起 ZCode 应用, run=夜间 runner
+#   ck dsh [args]         同 dshc: run=夜间 runner, 其余见 dshc 说明
 #   ck status             跨项目总览
 #   ck fuel [tool]        燃料表
 #   ck init [tool]        项目脚手架
@@ -27,14 +27,9 @@ case "${1:-help}" in
     opencode)
         shift; exec env CODEXC_TOOL=opencode "$REPO/codexc" "$@" ;;
     zcode)
-        shift; [ $# -gt 0 ] || set -- run   # 无参即 run, 与 zcodec 入口一致
-        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-zcode-worker}"
-        exec "$REPO/codexc-headless" "$@" ;;
+        shift; exec "$REPO/zcodec" "$@" ;;   # 语义单点在 zcodec: 裸=TUI, run=自动
     dsh)
-        shift; [ $# -gt 0 ] || set -- run   # 无参即 run, 与 dshc 入口一致
-        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
-        export DSH_DIR="${DSH_DIR:-$HOME/.dsh}"
-        exec "$REPO/codexc-headless" "$@" ;;
+        shift; exec "$REPO/dshc" "$@" ;;     # 语义单点在 dshc: 裸=说明, run=自动
     status)
         shift; exec "$REPO/codexc-headless" status "$@" ;;
     fuel)
@@ -46,7 +41,7 @@ case "${1:-help}" in
         case "${2:-codex}" in claude) TOOL=claude ;; *) TOOL=codex ;; esac
         exec env CODEXC_TOOL="$TOOL" "$REPO/codexc-loop" init ;;
     --help|-h|help)
-        sed -n '3,16p' "$0" | sed 's/^# \?//'
+        sed -n '3,16p' "$0" | sed -E 's/^# ?//'
         ;;
     *)
         echo "ck: unknown command '${1:-}'" >&2

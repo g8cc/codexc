@@ -1,19 +1,46 @@
 #!/bin/bash
-# zcodec — ZCode headless 夜间通道 (产品命名入口)
+# zcodec — ZCode 入口 (产品命名, 与 codexc 家族同构)
 #
-# 与 codexc 家族同构: codexc = codex 交互会话, zcodec = zcode 无人值守 runner。
-# 无参等价 run; 其余子命令原样转发 codexc-headless (init/status/selftest/help)。
-# 会话接力持久化在 .codingkeeper/zcode-session-id, 队列/门禁首次运行自动生成。
+#   zcodec                  非自动: 唤起 ZCode 桌面应用 (交互界面本体)
+#   zcodec <zcode 参数>      透传给 zcode.cjs (login/version/skills/...)
+#   zcodec run              自动: headless 夜间 runner (队列/gate/审查/burn)
+#   zcodec init             项目脚手架
+#   zcodec status           跨项目总览
+#   zcodec selftest         单元自测 (selftest-integration 同理)
+#
+# 仅 run/init/status/selftest* 是 CodingKeeper 保留动词; 裸命令绝不启动
+# 无人值守 runner。交互面在桌面应用 (cjs 裸跑解析不了 @zcode/tui)。
 #
 # Env:
-#   CODEXC_HEADLESS_CMD  覆盖 worker 命令 (默认本仓库 codexc-zcode-worker)
-#   其余 env 同 codexc-headless (CODEXC_TURN_RETRIES / CODEXC_LOOP_IDLE / ...)
+#   ZCODE_CJS              zcode.cjs 路径 (默认桌面应用自带)
+#   CODEXC_HEADLESS_CMD    覆盖 worker 命令 (默认本仓库 codexc-zcode-worker)
 
 set -u
 
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 REPO="$(dirname "$SELF")"
+ZCODE_CJS="${ZCODE_CJS:-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs}"
 
-[ $# -gt 0 ] || set -- run
-export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-zcode-worker}"
-exec "$REPO/codexc-headless" "$@"
+hl() {  # CodingKeeper headless 车道转发 (注入默认 worker)
+    export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-zcode-worker}"
+    exec "$REPO/codexc-headless" "$@"
+}
+
+case "${1:-}" in
+    run)
+        shift; hl run "$@" ;;
+    init|status|selftest|selftest-integration)
+        hl "$@" ;;
+    -h|--help|help)
+        sed -n '3,12p' "$0" | sed -E 's/^# ?//' ;;
+    *)
+        if [ $# -eq 0 ]; then
+            # 非自动入口: 唤起桌面应用 (交互界面本体)
+            if open -a ZCode 2>/dev/null; then exit 0; fi
+            sed -n '3,12p' "$0" | sed -E 's/^# ?//' >&2
+            exit 1
+        fi
+        [ -f "$ZCODE_CJS" ] || { echo "zcodec: zcode.cjs not found at $ZCODE_CJS (set ZCODE_CJS)" >&2; exit 1; }
+        command -v node >/dev/null || { echo "zcodec: node is required (>= 24)" >&2; exit 1; }
+        exec node "$ZCODE_CJS" "$@" ;;
+esac

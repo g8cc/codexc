@@ -1,22 +1,35 @@
 #!/bin/bash
-# dshc — dsh headless 夜间通道 (产品命名入口)
+# dshc — dsh 入口 (产品命名, 与 codexc 家族同构)
 #
-# 与 codexc 家族同构: codexc = codex 交互会话, dshc = dsh 无人值守 runner。
-# 无参等价 run; 其余子命令原样转发 codexc-headless (init/status/selftest/help)。
-# 会话接力持久化在 .codingkeeper/dsh-session-id; 密钥由 keydrop 轮换,
-# 认证失败先去 keydrop 刷新 (详见 docs/TOOLS.md)。
+#   dshc run                自动: headless 夜间 runner (队列/gate/审查/burn)
+#   dshc init               项目脚手架
+#   dshc status             跨项目总览
+#   dshc selftest           单元自测 (selftest-integration 同理)
+#   dshc <dsh 参数>          透传给 dsh CLI 本体 (--profile <name> ...)
+#
+# dsh 本体没有裸交互模式 (必须 --profile 启动), 所以裸 dshc 只打印本说明,
+# 绝不自动启动无人值守 runner。
 #
 # Env:
-#   CODEXC_HEADLESS_CMD  覆盖 worker 命令 (默认本仓库 codexc-dsh-worker)
-#   DSH_DIR              dsh 数据目录 (默认 ~/.dsh)
-#   其余 env 同 codexc-headless
+#   CODEXC_HEADLESS_CMD    覆盖 worker 命令 (默认本仓库 codexc-dsh-worker)
+#   DSH_DIR                dsh 数据目录 (默认 ~/.dsh)
 
 set -u
 
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 REPO="$(dirname "$SELF")"
 
-[ $# -gt 0 ] || set -- run
-export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
-export DSH_DIR="${DSH_DIR:-$HOME/.dsh}"
-exec "$REPO/codexc-headless" "$@"
+case "${1:-}" in
+    run)
+        shift
+        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
+        export DSH_DIR="${DSH_DIR:-$HOME/.dsh}"
+        exec "$REPO/codexc-headless" run "$@" ;;
+    init|status|selftest|selftest-integration)
+        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
+        exec "$REPO/codexc-headless" "$@" ;;
+    *)
+        sed -n '3,11p' "$0" | sed -E 's/^# ?//'
+        [ $# -gt 0 ] && { echo; echo "dshc: '$1' 不是 CodingKeeper 动词 — 如需透传 dsh 本体请直接运行 dsh" >&2; exit 1; }
+        exit 0 ;;
+esac
