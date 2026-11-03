@@ -75,7 +75,11 @@ esac
 # worker's final message. Returns 0 and fills $2 (stdout file); rc 124 = timeout
 # (dry 模式在 run_runner 里就拦截返回, 不会走到这里)
 headless_turn() {  # $1=task text $2=outfile
-    local outfile="$2" instrfile="$2.instr" rpid waited=0
+    local outfile="$2" instrfile="$2.instr" rpid waited=0 tool=headless
+    case "${CODEXC_HEADLESS_CMD:-}" in
+        *zcode-worker*) tool=zcode ;;
+        *dsh-worker*)   tool=dsh ;;
+    esac
     : > "$outfile"
     printf '%s' "$1" > "$instrfile"
     ( eval "$CODEXC_HEADLESS_CMD" ) < "$instrfile" > "$outfile" 2>/dev/null &
@@ -87,6 +91,11 @@ headless_turn() {  # $1=task text $2=outfile
             printf '\n[turn timed out after %ss]\n' "$CODEXC_HEADLESS_TIMEOUT" >> "$outfile"
             rm -f "$instrfile"
             return 124
+        fi
+        # 回合心跳 (每 30s): 子进程活着=真在烧, status.json 保活让面板显示真实
+        # 运行态 — 长回合此前只在回合首尾写, >120s 后面板误显"已停"
+        if [ "$waited" -gt 0 ] && [ $((waited % 30)) -eq 0 ]; then
+            status_write "▶️ $1" "$tool" 1 "${CK_TURN_TS:-$(date +%s)}"
         fi
         sleep 1
         waited=$((waited + 1))
