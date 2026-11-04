@@ -21,6 +21,15 @@ echo "== zcode =="
 note "bundle: $([ -f /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ] && echo ok || echo MISSING) | node: $(node --version 2>/dev/null || echo MISSING)"
 echo "== dsh =="
 note "CLI: $(command -v dsh >/dev/null && echo ok || echo MISSING) | 密钥由 keydrop 轮换 — 认证失败先刷 keydrop"
-probe=$(echo "Reply OK" | dsh --profile headless - 2>&1 | head -1)
-case "$probe" in *AUTH*|*invalid*) note "真回合: 钥匙失效 ($probe)" ;; "") note "真回合: 空响应" ;; *) note "真回合: ok ($probe)" ;; esac
+# 探测带 60s 上限: dsh 挂起时 keys.sh 不能跟着挂死
+dsh_out="$(mktemp "${TMPDIR:-/tmp}/keys-dsh.XXXXXX")"
+echo "Reply OK" | dsh --profile headless - > "$dsh_out" 2>&1 & dsh_pid=$!
+dsh_n=0
+while kill -0 "$dsh_pid" 2>/dev/null && [ "$dsh_n" -lt 60 ]; do sleep 1; dsh_n=$((dsh_n+1)); done
+kill "$dsh_pid" 2>/dev/null; wait "$dsh_pid" 2>/dev/null
+probe="$(head -1 "$dsh_out" 2>/dev/null)"; rm -f "$dsh_out"
+if [ "$dsh_n" -ge 60 ]; then note "真回合: 超时 (60s 无响应 — dsh 挂起?)"
+else
+    case "$probe" in *AUTH*|*invalid*) note "真回合: 钥匙失效 ($probe)" ;; "") note "真回合: 空响应" ;; *) note "真回合: ok ($probe)" ;; esac
+fi
 exit 0

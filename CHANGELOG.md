@@ -13,6 +13,7 @@
   间隔总闸 (CODEXC_NOTIFY_GAP)
 - 治理: 集成测试 /tmp 世界不再污染项目注册表; 交互会话注册补齐
 - 无人值守韧性: 瞬时 park 有界自愈 (10/20/30/40min 退避, CODEXC_AUTO_RESUME) +
+  worker 错误分类决策 + 回合心跳 + runner cwd 扫描锁 (双开竞态根治, 配合 tmux 脱管承载)
   worker 错误分类 (auth 即停/quota 等重置/transient 退避) + 回合心跳保活面板
 - 产品命名入口: `zcodec`/`dshc` — 与 codexc 家族同构 (裸命令 = 非自动:
   zcodec 唤起 ZCode 应用 / dshc 打印说明, 绝不自动跑; `run` = 夜间 runner;

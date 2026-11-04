@@ -223,15 +223,18 @@ result_marker() {  # $1=stdout file -> DONE / BLOCKED / none
 # one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
 # anything creates the new dir; if a fresh scaffold already exists, the old
 # authoritative files (journal/queue/halt/sessions) override it.
+# 运行时残渣 (loop.pid/.hl-*/.loop-*) 不迁: 旧目录的 pid 合并过来会被锁误读
 migrate_state_dir() {
     [ -d .codexc ] || return 0
     if [ ! -d .codingkeeper ]; then
         mv .codexc .codingkeeper 2>/dev/null
+        rm -f .codingkeeper/loop.pid .codingkeeper/.hl-* .codingkeeper/.loop-* 2>/dev/null
         log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
         return 0
     fi
     ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
     rmdir .codexc 2>/dev/null
+    rm -f .codingkeeper/loop.pid .codingkeeper/.hl-* .codingkeeper/.loop-* 2>/dev/null
     log "state dir merged: .codexc contents -> .codingkeeper"
 }
 
