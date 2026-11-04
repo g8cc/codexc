@@ -12,6 +12,8 @@
 - 通知: 完成绿闪+系统通知、不可续跑错误常驻警示 (stderr 尾带回), 全局弹窗
   间隔总闸 (CODEXC_NOTIFY_GAP)
 - 治理: 集成测试 /tmp 世界不再污染项目注册表; 交互会话注册补齐
+- 无人值守韧性: 瞬时 park 有界自愈 (10/20/30/40min 退避, CODEXC_AUTO_RESUME) +
+  worker 错误分类 (auth 即停/quota 等重置/transient 退避) + 回合心跳保活面板
 - 产品命名入口: `zcodec`/`dshc` — 与 codexc 家族同构 (裸命令 = 非自动:
   zcodec 唤起 ZCode 应用 / dshc 打印说明, 绝不自动跑; `run` = 夜间 runner;
   其余保留动词或 CLI 参数透传), 补齐 `*c` 命名家族统一
