@@ -54,6 +54,10 @@ ck "overlay 面板源码" "$([ -f desktop/CodingKeeperBar.swift ] && echo OK)" "
 ck "overlay 二进制" "$([ -x $HOME/.codingkeeper/bin/CodingKeeperBar ] && echo OK)" "OK"
 ckge "横幅调用点(headless)" "$(grep -c 'banner_set "' codexc-headless)" 3
 
+echo "== 路径形态不变量 (符号链接重复注册回归锁) =="
+ckge "注册物理路径归一" "$(grep -c 'pwd -P' ck-common.sh)" 1
+ck "看门狗入库且有自测" "$([ -x burn-watch.sh ] && grep -q 'cmd_selftest_watch' burn-watch.sh && echo OK)" "OK"
+
 echo "== 安全不变量 =="
 ckge "新鲜度令牌"     "$(grep -c '\.tok' codexc-loop)" 2
 ckge "runner 锁"      "$(grep -c 'loop.pid' codexc-loop)" 3

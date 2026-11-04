@@ -27,14 +27,14 @@ stage() {  # $1=名称 $2=命令...
 stage_syntax() {
     echo "════ [syntax] ════"
     local bad=0
-    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc ck-common.sh install.sh; do
+    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc burn-watch.sh ck-common.sh install.sh; do
         bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
     done
     # Swift 侧语法检查 (今天两个坏提交都是 swift 编译错误漏过 bash -n 门禁)
     if [ -f desktop/CodingKeeperBar.swift ]; then
         swiftc -typecheck desktop/CodingKeeperBar.swift >/dev/null 2>&1 || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
     fi
-    [ "$bad" = "0" ] && { echo "  ok: 11 files + swift"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
+    [ "$bad" = "0" ] && { echo "  ok: 12 files + swift"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
     echo
 }
 
@@ -49,11 +49,13 @@ stage_integration() {
 stage_faultinjection() { stage "faultinjection" ./codexc-loop selftest-faultinjection; }
 stage_conformance() { stage "conformance" ./tests/conformance.sh; }
 stage_keys() { stage "keys (报告性)" ./tests/keys.sh; }
+stage_watchdog() { stage "watchdog 自测" ./burn-watch.sh selftest; }
 
-STAGES="${*:-syntax unit integration faultinjection conformance keys}"
+STAGES="${*:-syntax watchdog unit integration faultinjection conformance keys}"
 for s in $STAGES; do
     case "$s" in
         syntax) stage_syntax ;;
+        watchdog) stage_watchdog ;;
         unit) stage_unit ;;
         integration) stage_integration ;;
         faultinjection) stage_faultinjection ;;

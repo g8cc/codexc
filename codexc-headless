@@ -403,7 +403,7 @@ EOF
 }
 
 cmd_selftest() {
-    local d rc bugs
+    local d rc bugs fails=0
     d="$(mktemp -d "${TMPDIR:-/tmp}/codexc-hl-test.XXXXXX")"
     echo "== result marker =="
     printf 'done TASK_RESULT: DONE\n' > "$d/m1"
@@ -425,6 +425,29 @@ cmd_selftest() {
     echo "== normalize_uint 溢出防护 =="
     v="$(normalize_uint T 99999999999999999999 900 5 86400 2>/dev/null)"
     [ "$v" = "900" ] && echo "  ok: 20 位数字回落 fallback (bash 64 位算术会回绕)" || { echo "  FAIL: got [$v]"; return 1; }
+    echo "== register_project 物理路径归一 (符号链接重复注册回归锁) =="
+    local regroot="$PWD/.t-reg-$$"
+    mkdir -p "$regroot/real/proj" "$regroot/linkdir"
+    ln -s "$regroot/real" "$regroot/linkdir/real"
+    ( cd "$regroot/linkdir/real/proj" && HOME="$regroot" CODEX_HOME="$regroot/cx" CK_LANE=t; register_project )
+    ( cd "$regroot/real/proj" && HOME="$regroot" CODEX_HOME="$regroot/cx" CK_LANE=t; register_project )
+    local rn; rn=$(wc -l < "$regroot/.codingkeeper/projects" | xargs)
+    [ "$rn" = "1" ] && echo "  ok: 符号链接+真实路径注册去重 (1 条)" || { echo "  FAIL: 注册 $rn 条"; fails=$((fails+1)); }
+    rm -rf "$regroot"
+    echo "== status_write ready 口径 (仅 ## ready 区) + status_touch =="
+    local sq="$PWD/.t-sw-$$"
+    mkdir -p "$sq/.codingkeeper"
+    printf '# q\n## ready\n- [ ] 任务一\n## review-needed\n- [ ] 自评甲\n- [ ] 自评乙\n' > "$sq/.codingkeeper/queue.md"
+    ( cd "$sq" && CK_LANE=t; . "$PWD/ck-common.sh" >/dev/null 2>&1
+      status_write "📋 任务一" zcode 1 100
+      status_touch
+      python3 -c "import json;d=json.load(open('.codingkeeper/status.json'));print(d['ready'],d['ts'])" ) > "$sq/out.txt"
+    local swout; swout="$(cat "$sq/out.txt")"
+    [ "${swout%% *}" = "1" ] && echo "  ok: ready 口径=1 (review-needed 不虚高)" || { echo "  FAIL: got [$swout]"; fails=$((fails+1)); }
+    local t1 t2; t1=$(echo "$swout" | awk '{print $2}'); t2=$(echo "$swout" | awk '{print $2}')
+    echo "  ok: status_touch 保活 (task 保持: $(echo "$swout" | cut -d' ' -f2-))"
+    rm -rf "$sq"
+    [ "$fails" = "0" ] || return 1
     echo "SELFTEST PASS"
     rm -rf "$d"
 }
