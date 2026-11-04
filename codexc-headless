@@ -61,6 +61,8 @@ CODEXC_REVIEW_ROUNDS="$(normalize_uint CODEXC_REVIEW_ROUNDS "${CODEXC_REVIEW_ROU
 CODEXC_IDLE_PARK="$(normalize_uint CODEXC_IDLE_PARK "${CODEXC_IDLE_PARK:-2}" 2 1 10)"
 CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1 60)"
 CODEXC_LOOP_DRY="$(normalize_uint CODEXC_LOOP_DRY "${CODEXC_LOOP_DRY:-0}" 0 0 1)"
+# 瞬时故障 park 后的自动复燃次数 (0=禁用): 网关/审查道抖动不再需要人拉起
+CODEXC_AUTO_RESUME="$(normalize_uint CODEXC_AUTO_RESUME "${CODEXC_AUTO_RESUME:-4}" 4 0 10)"
 
 
 IDLE_PROMPT_DEFAULT='[codexc-headless] 持续改进: 审查当前代码的正确性/安全/性能/可靠/鲁棒/可维护/测试/依赖/可观测/文档, 发现问题修复并 commit, 无事可做以 TASK_RESULT: DONE (idle) 结尾'
@@ -130,6 +132,13 @@ park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_ru
     notify "$1"
     log "parked: $2"
     mode="halt"; touch ".codingkeeper/loop.halt"
+    park_halt_ts="$(stat -f '%m' ".codingkeeper/loop.halt" 2>/dev/null || echo 0)"
+    # 瞬时类 park 标记 (供 run_runner 尾部决定是否自动复燃): 网关抖动/回合与审查超时
+    # 属基础设施故障, 有界自愈; BLOCKED/gate 耗尽/审查不可解析/队列失配 = 真问题, 留给人
+    case "$2" in
+        *timeouts*|*"timed out"*|*"empty turns"*) park_transient=1 ;;
+        *) park_transient=0 ;;
+    esac
     return 0
 }
 
@@ -161,13 +170,16 @@ run_runner() {
 
     # mode is "idle" (pick work / burn) or "halt" (parked). Every park path
     # touches .codingkeeper/loop.halt and continues, so the while condition
-    # is the single exit gate: the runner always EXITS on park — resuming
-    # means re-running `codexc-headless run`.
+    # is the single exit gate. 瞬时类 park (网关抖动/超时) 在外层自动复燃:
+    # 10min 起步逐次翻倍, 有界 CODEXC_AUTO_RESUME 次 — 无人值守整夜不再因
+    # 一次网关故障全停; 真问题类 park (BLOCKED/gate 耗尽) 仍然退出等人。
     local mode="idle" idle_count=0 task_kind="" task="" task_b64=""
     local gate_rounds=0 review_rounds=0 zero_streak=0 fail_streak=0 empty_logged=0
     local head_at_feed="" line dirty head_now prompt marker rc bugs marked
+    local park_transient=0 auto_resume=0 resume_wait=0 park_halt_ts=""
 
-    while [ ! -e ".codingkeeper/loop.halt" ]; do
+    while :; do
+      while [ ! -e ".codingkeeper/loop.halt" ]; do
         # ---- pick the next turn: queue task first, else burn (or wait) ----
         line="$(queue_next ".codingkeeper/queue.md")"
         if [ -z "$line" ]; then
@@ -218,6 +230,7 @@ run_runner() {
             continue
         fi
         fail_streak=0
+        park_transient=0; auto_resume=0   # 成功回合重置自愈预算 — 新故障重新享受完整退避序列
         if [ "$marker" = "BLOCKED" ]; then
             park "循环挂起: worker 报告 BLOCKED — $task" "worker reported BLOCKED"
             continue
@@ -319,6 +332,26 @@ run_runner() {
             break
         done
         continue
+      done
+      # ---- 内层 while 退出 = halt 在场。瞬时类 park 走有界自愈, 其余退出等人 ----
+      if [ "$park_transient" = "1" ] && [ "$auto_resume" -lt "$CODEXC_AUTO_RESUME" ]; then
+          resume_wait=$((600 * (auto_resume + 1)))   # 10min, 20min, 30min, 40min
+          notify "瞬时故障挂起, ${resume_wait}s 后自动复燃 ($((auto_resume + 1))/$CODEXC_AUTO_RESUME)"
+          log "transient park — auto-resume #$((auto_resume + 1))/$CODEXC_AUTO_RESUME in ${resume_wait}s"
+          sleep "$resume_wait"
+          [ -e ".codingkeeper/loop.halt" ] || { mode="idle"; continue; }   # 期间被手动清 → 正常续跑
+          # halt 被人二次触碰 (mtime 变新) = 用户手动叫停, 优先级高于机器自愈
+          if [ "$(stat -f '%m' ".codingkeeper/loop.halt" 2>/dev/null || echo 0)" != "$park_halt_ts" ]; then
+              log "halt re-touched during auto-resume wait — treating as manual stop, exiting"
+              break
+          fi
+          rm -f ".codingkeeper/loop.halt"
+          auto_resume=$((auto_resume + 1))
+          mode="idle"; park_transient=0
+          log "auto-resumed (attempt $auto_resume/$CODEXC_AUTO_RESUME)"
+          continue
+      fi
+      break
     done
     banner_set "⛔ 已挂起: rm .codingkeeper/loop.halt 复燃"
     log "halt file present, headless runner exiting"
