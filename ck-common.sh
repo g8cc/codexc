@@ -300,9 +300,13 @@ status_touch() {
 register_project() {
     # /tmp 下的测试世界不注册 — 集成测试会污染真实注册表 (悬浮条/ck status)
     case "$PWD" in /tmp/*|/private/tmp/*|"$TMPDIR"*) return 0 ;; esac
+    # 物理路径归一: 符号链接路径 (~/Documents/ai → .../AIworkspace) 会把同一
+    # 物理目录注册两次, 悬浮条重复计数 (实测 zcode 3 = 2 真实 + 1 幽灵)
+    local real
+    real="$(cd "$PWD" 2>/dev/null && pwd -P)" || real="$PWD"
     mkdir -p "$HOME/.codingkeeper" 2>/dev/null
     local reg="$HOME/.codingkeeper/projects"
-    grep -qxF "$PWD" "$reg" 2>/dev/null || printf '%s\n' "$PWD" >> "$reg"
+    grep -qxF "$real" "$reg" 2>/dev/null || printf '%s\n' "$real" >> "$reg"
     return 0
 }
 

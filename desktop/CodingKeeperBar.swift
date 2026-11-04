@@ -193,11 +193,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func registry() -> [String] {
         let reg = NSHomeDirectory() + "/.codingkeeper/projects"
         guard let s = try? String(contentsOfFile: reg, encoding: .utf8) else { return [] }
-        // 与 ck-common register_project 的 /tmp 过滤对齐 (含 realpath 的 /private/tmp 与系统 TMPDIR)
+        // 与 ck-common register_project 的 /tmp 过滤对齐 (含 realpath 的 /private/tmp 与系统 TMPDIR);
+        // 物理路径归一去重: 符号链接路径与真实路径指向同一目录时, status.json 会被读两次 → 计数翻倍
         let tmpPrefixes = ["/tmp/", "/private/tmp/", NSTemporaryDirectory()]
-        return s.split(separator: "\n").map(String.init).filter { path in
-            FileManager.default.fileExists(atPath: path) && !tmpPrefixes.contains { path.hasPrefix($0) }
+        var seen = Set<String>()
+        var out: [String] = []
+        for line in s.split(separator: "\n").map(String.init) {
+            let real = URL(fileURLWithPath: line).resolvingSymlinksInPath().path
+            guard FileManager.default.fileExists(atPath: real),
+                  !tmpPrefixes.contains(where: { real.hasPrefix($0) }),
+                  !seen.contains(real) else { continue }
+            seen.insert(real)
+            out.append(real)
         }
+        return out
     }
 
     struct ProjStatus {
