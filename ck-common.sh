@@ -43,7 +43,19 @@ normalize_uint() {
     printf '%s' "$number"
 }
 
+# watch log 自裁剪: >5MB 时原 inode 截断保留最近 2000 行 (tail>tmp, cat>file —
+# 追加方持有的 fd 不失效); 直接 echo >> 追加的调用点同样受益 (同一 inode)
+trim_watchlog() {
+    [ -f "$WATCHLOG" ] || return 0
+    [ "$(stat -f '%z' "$WATCHLOG" 2>/dev/null || echo 0)" -lt 5242880 ] && return 0
+    tail -n 2000 "$WATCHLOG" > "$WATCHLOG.tmp" 2>/dev/null \
+        && cat "$WATCHLOG.tmp" > "$WATCHLOG" 2>/dev/null
+    rm -f "$WATCHLOG.tmp" 2>/dev/null
+    return 0
+}
+
 log() {
+    trim_watchlog
     (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
     echo "$(date '+%F %T') $CK_TAG: $*" >> "$WATCHLOG"
 }
