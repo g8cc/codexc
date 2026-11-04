@@ -171,6 +171,8 @@ gate_run() {  # $1=outfile; 0=pass
             printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
             return 124
         fi
+        # 阶段心跳: gate 最长 900s, 无心跳横幅会误显"已停"
+        [ $((waited % 30)) -eq 29 ] && status_touch
         sleep 1
         waited=$((waited + 1))
     done
@@ -211,6 +213,8 @@ review_run() {  # $1=task text $2=outfile -> bug count / "parse-fail" / "timeout
             printf 'timeout'
             return 0
         fi
+        # 阶段心跳: 审查最长 1800s, 无心跳横幅会误显"已停"
+        [ $((waited % 30)) -eq 29 ] && status_touch
         sleep 1
         waited=$((waited + 1))
     done
@@ -252,6 +256,8 @@ migrate_state_dir() {
 
 status_write() {  # $1=状态文本 $2=工具名 $3=active(1/0) $4=started_at epoch(0=未知)
     local pdir=".codingkeeper"
+    # 记录最近载荷供 status_touch 心跳复用 (gate/review 阶段保活)
+    _ST_TASK="$1"; _ST_TOOL="${2:-}"; _ST_ACTIVE="${3:-0}"; _ST_STARTED="${4:-0}"
     python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" <<'PYEOF'
 import json, os, sys
 pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -260,9 +266,20 @@ if len(task) > 32:
     task = task[:30].rstrip() + "…"
 tool, active, started_at = sys.argv[4], sys.argv[5] == "1", int(sys.argv[6] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
+# ready 计数口径 = 仅 ## ready 区 (review-needed 的自评任务不计入)
+ready = 0
+if os.path.exists(os.path.join(pdir, "queue.md")):
+    sec = ""
+    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8"):
+        s = line.strip()
+        if s.startswith("##"):
+            sec = s.lstrip("#").strip().lower()
+            continue
+        if sec == "ready" and s.startswith("- [ ]"):
+            ready += 1
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
-        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ready": ready,
         "ts": int(__import__("time").time())}
 # 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
 tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")
@@ -271,6 +288,13 @@ with open(tmp, "w", encoding="utf-8") as fh:
 os.replace(tmp, os.path.join(pdir, "status.json"))
 PYEOF
     return 0
+}
+
+# 心跳: 用最近一次 status_write 的载荷刷新 ts (gate/review 同步阻塞期间保活,
+# 横幅的 running 判定依赖 ts 新鲜度 — 阻塞阶段无心跳会被误显"已停")
+status_touch() {
+    [ -n "${_ST_TASK:-}" ] || return 0
+    status_write "$_ST_TASK" "$_ST_TOOL" "$_ST_ACTIVE" "$_ST_STARTED"
 }
 
 register_project() {

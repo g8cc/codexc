@@ -770,9 +770,20 @@ if len(task) > 32:
     task = task[:30].rstrip() + "…"
 tool, active, started_at = sys.argv[3], sys.argv[4] == "1", int(sys.argv[5] or 0)
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
+# ready 口径 = 仅 ## ready 区 (与 ck-common status_write 一致)
+ready = 0
+if os.path.exists(os.path.join(pdir, "queue.md")):
+    sec = ""
+    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8"):
+        s = line.strip()
+        if s.startswith("##"):
+            sec = s.lstrip("#").strip().lower()
+            continue
+        if sec == "ready" and s.startswith("- [ ]"):
+            ready += 1
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
-        "ready": sum(1 for l in open(os.path.join(pdir, "queue.md"), encoding="utf-8") if l.startswith("- [ ]")) if os.path.exists(os.path.join(pdir, "queue.md")) else 0,
+        "ready": ready,
         "ts": int(time.time())}
 # 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
 tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")

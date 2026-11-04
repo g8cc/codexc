@@ -223,17 +223,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             st.startedAt = obj["started_at"] as? TimeInterval ?? 0
             st.ts = obj["ts"] as? TimeInterval ?? 0
         }
-        let pidAlive = pidAlive(kd + "/loop.pid")
+        // running 判定只认 status.json 心跳新鲜度: runner 对 work/gate/review
+        // 三阶段均有 30s 心跳, fresh 精确反映"真在烧"。不再用 pidAlive (kill -0):
+        // PID 被系统复用/僵尸进程时会有假阳性, runner 退出后 120s fresh 自然过期
         let fresh = Date().timeIntervalSince1970 - st.ts < freshWindow
         st.parked = FileManager.default.fileExists(atPath: kd + "/loop.halt")
-        st.running = st.active && !st.parked && (pidAlive || fresh)
+        st.running = st.active && !st.parked && fresh
         return st
-    }
-
-    func pidAlive(_ f: String) -> Bool {
-        guard let s = try? String(contentsOfFile: f, encoding: .utf8),
-              let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
-        return kill(pid, 0) == 0
     }
 
     // 任务文本剥掉状态前缀 — 状态由卡片色点表达, 不重复
