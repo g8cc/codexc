@@ -160,6 +160,16 @@ run_runner() {
         log "another runner (pid $(cat ".codingkeeper/loop.pid")) is already running for this project — giving up"
         return 1
     fi
+    # pid 文件可能已被先前退出者 rm 掉 (EXIT trap) 而别处仍有活体 — 按 cwd 扫描兜底,
+    # 杜绝"重启时 rm pid 而旧 runner 未死透"造成的双开竞态
+    for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
+        [ "$rpid" = "$$" ] && continue
+        rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+        if [ "$rcwd" = "$(pwd)" ]; then
+            log "another runner (pid $rpid, cwd scan) is already running for this project — giving up"
+            return 1
+        fi
+    done
     printf '%s\n' "$$" > ".codingkeeper/loop.pid"
     rm -f ".codingkeeper"/.hl-out.* ".codingkeeper"/.hl-in.* ".codingkeeper"/.hl-gate.* ".codingkeeper"/.hl-review.* 2>/dev/null
     local outfile=".codingkeeper/.hl-out.$$" gate_out=".codingkeeper/.hl-gate.$$" review_out=".codingkeeper/.hl-review.$$"
@@ -483,6 +493,8 @@ cmd_selftest_integration() {
     ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_TURN_RETRIES=2 \
       "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
     it_wait_file "parked after empty turns" "$root/proj/.codingkeeper/loop.halt" 60
+    # 收割真身: auto-resume 让 runner 在 park 后休眠不退, kill 子壳杀不到它
+    kill "$(cat "$root/proj/.codingkeeper/loop.pid" 2>/dev/null)" 2>/dev/null
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
 
     echo "== HL-3: burn mode — idle work accepted then no-op park =="
@@ -505,6 +517,7 @@ cmd_selftest_integration() {
       "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
     it_wait_file "parked after turn timeout" "$root/proj/.codingkeeper/loop.halt" 60
     pgrep -f "$root/worker" >/dev/null 2>&1 && { echo "  FAIL: worker tree survived"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: worker tree reaped"
+    kill "$(cat "$root/proj/.codingkeeper/loop.pid" 2>/dev/null)" 2>/dev/null
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
 
     echo "== HL-5: auth failure -> immediate park, runner exits for human =="
