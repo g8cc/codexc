@@ -133,6 +133,7 @@ The config also makes tmux distinguish `Shift+Enter` from `Enter` (newline vs se
 | `CODEXC_EXTRA_RE` | extra auto-continue regex (OR-ed with built-ins) | — |
 | `CODEXC_AUTO_YES` | `1` full auto / `2` sandboxed / `0` off | `1` |
 | `CODEXC_DAILY_IDLE` | daily-job idle threshold in minutes, `0` disables (range `0`–`10080`) | `30` |
+| `CODEXC_AUTO_RESUME` | transient-park auto-resume count (10/20/30/40min backoff; `0` disables) — headless lane | `4` |
 
 ## How it works
 

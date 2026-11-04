@@ -136,7 +136,7 @@ park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_ru
     # 瞬时类 park 标记 (供 run_runner 尾部决定是否自动复燃): 网关抖动/回合与审查超时
     # 属基础设施故障, 有界自愈; BLOCKED/gate 耗尽/审查不可解析/队列失配 = 真问题, 留给人
     case "$2" in
-        *timeouts*|*"timed out"*|*"empty turns"*) park_transient=1 ;;
+        *timeouts*|*"timed out"*|*"empty turns"*|*quota*) park_transient=1 ;;
         *) park_transient=0 ;;
     esac
     return 0
@@ -220,6 +220,15 @@ run_runner() {
         fi
         marker="$(result_marker "$outfile")"
         if [ "$marker" = "none" ]; then
+            # worker 错误分类 (CK_ERROR_CLASS 行, zcode worker 输出): 按类决策
+            if grep -q '^CK_ERROR_CLASS: auth' "$outfile" 2>/dev/null; then
+                park "循环挂起: worker 凭证失效 (auth) — 请人工处理" "worker auth failure"
+                continue
+            fi
+            if grep -q '^CK_ERROR_CLASS: quota' "$outfile" 2>/dev/null; then
+                park "循环挂起: 模型配额/限流 — 等窗口重置后自动复燃" "model quota exhausted"
+                continue
+            fi
             fail_streak=$((fail_streak + 1))
             log "turn produced no TASK_RESULT (empty/error stdout?) $fail_streak/$CODEXC_TURN_RETRIES (tail: $(LC_ALL=C tr -d '\000' < "$outfile" | tr '\n' ' ' | tail -c 150))"
             if [ "$fail_streak" -ge "$CODEXC_TURN_RETRIES" ]; then
@@ -440,6 +449,8 @@ cmd_selftest_integration() {
           echo '  EMPTY) exit 0 ;;'
           echo '  SLEEP) sleep 120 ;;'
           echo '  "IDLE-DONE") echo "无事可做 TASK_RESULT: DONE (idle)" ;;'
+          echo '  AUTHFAIL) echo "zcode turn failed (rc=1, class=auth): 该令牌已过期"; echo "CK_ERROR_CLASS: auth"; exit 1 ;;'
+          echo '  QUOTAFAIL) echo "zcode turn failed (rc=1, class=quota): 429 rate limit"; echo "CK_ERROR_CLASS: quota"; exit 1 ;;'
           echo '  *) echo "did work. TASK_RESULT: $resp" ;;'
           echo 'esac'
         } > "$script"
@@ -494,6 +505,29 @@ cmd_selftest_integration() {
       "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
     it_wait_file "parked after turn timeout" "$root/proj/.codingkeeper/loop.halt" 60
     pgrep -f "$root/worker" >/dev/null 2>&1 && { echo "  FAIL: worker tree survived"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: worker tree reaped"
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-5: auth failure -> immediate park, runner exits for human =="
+    root="$base-hl5"; it_world "$root"
+    fake_worker "$root/worker" AUTHFAIL
+    printf '# q\n## ready\n- [ ] 任务A\n' > "$root/proj/.codingkeeper/queue.md"
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 CODEXC_AUTO_RESUME=0 \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait_file "auth park halt (first failure, no 3-strike)" "$root/proj/.codingkeeper/loop.halt" 40
+    sleep 2
+    kill -0 "$driver_pid" 2>/dev/null && { echo "  FAIL: runner should exit on auth park"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: runner exited (auth = human)"
+    grep -q 'worker auth failure' "$root/proj/.codingkeeper/"*.log "$root/driver.log" 2>/dev/null || grep -q 'worker auth failure' ~/.codex/codexc-watch.log && echo "  ok: auth classified" || echo "  (log check skipped)"
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-6: quota failure -> transient park (auto-resume class) =="
+    root="$base-hl6"; it_world "$root"
+    fake_worker "$root/worker" QUOTAFAIL
+    printf '# q\n## ready\n- [ ] 任务A\n' > "$root/proj/.codingkeeper/queue.md"
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 CODEXC_AUTO_RESUME=0 \
+      "$SELF" run > "$root/driver.log" 2>&1 ) & driver_pid=$!
+    it_wait_file "quota park halt" "$root/proj/.codingkeeper/loop.halt" 40
+    sleep 2
+    kill -0 "$driver_pid" 2>/dev/null && { echo "  FAIL: runner should exit (AUTO_RESUME=0)"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: runner exited (AUTO_RESUME=0)"
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
 
     rm -rf "/tmp/codexc-hl-it.$$" 2>/dev/null

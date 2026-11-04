@@ -48,11 +48,29 @@ wait "$node_pid"; rc=$?
 raw="$(cat "$turn_out" 2>/dev/null)"
 err="$(cat "$turn_err" 2>/dev/null)"
 rm -f "$turn_out" "$turn_err"
+# 错误分类: runner 据此决策 — auth 立即停等人 / quota park 等窗口重置 /
+# transient 退避重试 / unknown 走既有 3 发路径。分类依据 = zcode CLI 的
+# 结构化错误输出 (stdout/stderr 原文), 判定顺序: auth → quota → transient。
+classify_error() {  # $1=raw stdout $2=raw stderr -> auth|quota|transient|unknown
+    local both="$1 $2"
+    case "$both" in
+        *401*|*403*|*[Uu]nauthorized*|*令牌已过期*|*令牌过期*|*INVALID_API_KEY*|*API\ key*)
+            printf 'auth'; return ;;
+        *429*|*rate?limit*|*usage?limit*|*quota*|*配额*|*额度*)
+            printf 'quota'; return ;;
+        *gateway.ai.error*|*ECONNRESET*|*fetch?failed*|*socket*|*timed?out*|*timeout*|*Bad?Gateway*|*Service?Unavailable*|*overloaded*|*at?capacity*|*network*|*connection*)
+            printf 'transient'; return ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
 # 失败时把实际输出尾带回给 runner (stdout 落到 runner 的 outfile, 重试耗尽
 # park 时作为 tail 展示; stderr 会被 headless_turn 丢弃 — 所以失败信息里
-# 同时带 stderr 尾, 真实死因不再不可见)
+# 同时带 stderr 尾, 真实死因不再不可见); CK_ERROR_CLASS 行供 runner 按类决策
 if [ "$rc" != "0" ]; then
-    echo "zcode turn failed (rc=$rc): $(printf '%s' "$raw" | tail -c 120 | tr '\n' ' ') [stderr: $(printf '%s' "$err" | tail -c 160 | tr '\n' ' ')]"
+    cls="$(classify_error "$raw" "$err")"
+    echo "zcode turn failed (rc=$rc, class=$cls): $(printf '%s' "$raw" | tail -c 120 | tr '\n' ' ') [stderr: $(printf '%s' "$err" | tail -c 160 | tr '\n' ' ')]"
+    echo "CK_ERROR_CLASS: $cls"
     exit 1
 fi
 
@@ -96,3 +114,9 @@ if sid:
         pass
 sys.stdout.write(resp)
 PYEOF
+pyrc=$?
+if [ "$pyrc" != "0" ]; then
+    # CLI rc=0 但响应为空/不可解析 — 显式 unknown, 不让 runner 猜
+    echo "CK_ERROR_CLASS: unknown"
+    exit 1
+fi
