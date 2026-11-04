@@ -162,10 +162,12 @@ run_runner() {
     fi
     # pid 文件可能已被先前退出者 rm 掉 (EXIT trap) 而别处仍有活体 — 按 cwd 扫描兜底,
     # 杜绝"重启时 rm pid 而旧 runner 未死透"造成的双开竞态
+    mycwd="$(cd "$(pwd)" && pwd -P)"   # 物理路径: lsof 报 /private/tmp 形态, /tmp 字面比较永不匹配 (HL-7 实证)
     for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
         [ "$rpid" = "$$" ] && continue
         rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
-        if [ "$rcwd" = "$(pwd)" ]; then
+        rcwd="$(cd "$rcwd" 2>/dev/null && pwd -P)" || true
+        if [ "$rcwd" = "$mycwd" ]; then
             log "another runner (pid $rpid, cwd scan) is already running for this project — giving up"
             return 1
         fi
@@ -565,6 +567,34 @@ cmd_selftest_integration() {
     sleep 2
     kill -0 "$driver_pid" 2>/dev/null && { echo "  FAIL: runner should exit (AUTO_RESUME=0)"; IT_FAILURES=$((IT_FAILURES+1)); } || echo "  ok: runner exited (AUTO_RESUME=0)"
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+
+    echo "== HL-7: 双开锁 — 第二 runner 必须被拒 (pid 文件 + cwd 扫描双场景) =="
+    root="$base-hl7"; it_world "$root"
+    fake_worker "$root/worker" DONE
+    it_fake_review_sh "$root/review.sh" 0 0
+    printf '# q\n## ready\n- [ ] 任务A\n' > "$root/proj/.codingkeeper/queue.md"
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_LOOP_IDLE=0 CODEXC_AUTO_RESUME=0 \
+      "$SELF" run > "$root/driver1.log" 2>&1 ) & driver1=$!
+    it_wait "A 领叶" "$root/proj/.codingkeeper/loop.pid" '.' 20
+    pidA="$(cat "$root/proj/.codingkeeper/loop.pid" 2>/dev/null)"
+    # 拒绝信息走 log() → 全局 watch log; 断言 = B 静默退出(rc=1) + watch log 增量
+    wl="$HOME/.codex/codexc-watch.log"
+    base_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 \
+      "$SELF" run > "$root/driver2.log" 2>&1 ; echo "rc=$?" > "$root/rc2" ) & driver2=$!
+    sleep 8; kill "$driver2" 2>/dev/null; wait "$driver2" 2>/dev/null
+    now_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    if [ "$now_n" -gt "$base_n" ]; then echo "  ok: B 被 pid 锁拒绝 (watch log +$((now_n-base_n)))"; else echo "  FAIL: B 未被 pid 锁拒绝"; IT_FAILURES=$((IT_FAILURES+1)); fi
+    # 事故场景精确复现: pid 文件被 rm (重启竞态) 但 A 仍活着 → cwd 扫描必须兜底
+    rm -f "$root/proj/.codingkeeper/loop.pid"
+    base_n=$now_n
+    ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 \
+      "$SELF" run > "$root/driver3.log" 2>&1 ; echo "rc=$?" > "$root/rc3" ) & driver3=$!
+    sleep 8; kill "$driver3" 2>/dev/null; wait "$driver3" 2>/dev/null
+    now_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    if [ "$now_n" -gt "$base_n" ]; then echo "  ok: B2 被 cwd 扫描锁拒绝 (rm pid 兜底)"; else echo "  FAIL: cwd 扫描锁失效"; IT_FAILURES=$((IT_FAILURES+1)); fi
+    kill "$pidA" "$driver1" 2>/dev/null
+    wait "$driver1" 2>/dev/null
 
     rm -rf "/tmp/codexc-hl-it.$$" 2>/dev/null
     if [ "$IT_FAILURES" -eq 0 ]; then echo "HEADLESS INTEGRATION PASS"; return 0; fi

@@ -1067,6 +1067,9 @@ if [ -n "${TMUX:-}" ]; then
     # spawn_watcher 的结果走文件中转, 不用 $() 捕获: 后台 watcher 子壳可能继承
     # 替换管道的写端 (重定向前的 fork 时序), $() 会等管道 EOF 永久挂起 —
     # 实测 pane 卡死在 bash 内 (2026-11-04)。文件写入永不阻塞。
+    # 全新项目 .codingkeeper 可能尚不存在 — 重定向目标必须先有目录,
+    # 否则 spawn_watcher 静默不启动 (首次进入 watcher 缺失回归, 2026-11-05)
+    mkdir -p ".codingkeeper"
     spawn_watcher "$$" "$PANE" > ".codingkeeper/.watcher-launch.$$" 2>/dev/null
     watcher="$(cat ".codingkeeper/.watcher-launch.$$" 2>/dev/null)"
     rm -f ".codingkeeper/.watcher-launch.$$"

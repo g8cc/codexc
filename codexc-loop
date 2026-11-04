@@ -1117,6 +1117,14 @@ TASK_RESULT: DONE" "$(cat "$d/msg1")"
     printf '%s\n' '{"payload":{"type":"task_started"}}' > "$d/rollout3.jsonl"
     assert_eq "no task_complete yet" "none" "$(turn_status "$d/rollout3.jsonl" "$d/msg3")"
 
+    echo "== trim_watchlog 自裁剪 (5MB 阈值回归锁) =="
+    local wt="$d/watch.log"
+    for i in $(seq 1 3000); do printf 'x %2000s\n' "$i" >> "$wt"; done
+    WATCHLOG="$wt" trim_watchlog; WATCHLOG="$wt" trim_watchlog
+    local tln; tln=$(wc -l < "$wt" | xargs)
+    assert_eq "trim 裁剪至 2000 行 (幂等)" "2000" "$tln"
+    rm -f "$wt"
+
     echo "== burn env parsing =="
         parse_idle() {
         case "$1" in

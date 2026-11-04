@@ -8,6 +8,19 @@ DAY="$(date +%D)"
 GREP=/usr/bin/grep
 ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
 
+proj_alive() {  # $1=project dir — pid 文件或 cwd 扫描 (双侧物理路径归一), 0=活
+    local d="$1" pid rpid rcwd dreal
+    pid="$(cat "$d/.codingkeeper/loop.pid" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+    dreal="$(cd "$d" 2>/dev/null && pwd -P)" || dreal="$d"
+    for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
+        rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+        rcwd="$(cd "$rcwd" 2>/dev/null && pwd -P)" || rcwd="$rcwd"
+        [ "$rcwd" = "$dreal" ] && return 0
+    done
+    return 1
+}
+
 rotate_log() {  # $1=文件 $2=保留行数 — >1MB 或 >2000 行时归档旧内容 (gz, 90 天)
     local f="$1" keep="$2" total old
     [ -f "$f" ] || return 0
@@ -60,17 +73,8 @@ patrol_once() {
     for proj in fingerprint sale; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
-        pid="$(cat "$d/.codingkeeper/loop.pid" 2>/dev/null)"
-        alive=0; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
-        # pid 文件可能失真 (竞态写入/残留) — cwd 扫描兜底: 该目录有活 runner 即活着
-        if [ "$alive" = 0 ]; then
-            for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
-                rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
-                [ "$rcwd" = "$d" ] && { alive=1; break; }
-            done
-        fi
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
-        [ "$alive" = 1 ] && continue            # 燃烧中或 auto-resume 休眠中 — 健康
+        proj_alive "$d" && continue             # 燃烧中或 auto-resume 休眠中 — 健康
         reason="$($GREP -a 'parked:' "$LOG" 2>/dev/null | tail -1 | sed 's/.*parked: //')"
         case "$reason" in
             *"idle exhaustion"*)
@@ -126,6 +130,15 @@ cmd_selftest_watch() {
     local rn; rn=$(wc -l < "$big" | xargs)
     [ "$rn" = "1000" ] && echo "  ok: 裁剪至 1000 行" || { echo "  FAIL: 裁剪后 $rn 行"; fails=$((fails+1)); }
     ls "${big%.txt}"-*.txt.gz >/dev/null 2>&1 && echo "  ok: 归档存在" || { echo "  FAIL: 无归档"; fails=$((fails+1)); }
+    echo "== proj_alive 判活 (cwd 扫描 + 物理归一回归锁) =="
+    local fdir="$T/fakerun"
+    mkdir -p "$fdir"
+    ( cd "$fdir" && exec -a "codexc-headless run selftest-fake" sleep 300 ) &
+    local fakepid=$!
+    sleep 1
+    if proj_alive "$fdir"; then echo "  ok: 活 runner 被 cwd 扫描识别"; else echo "  FAIL: 活 runner 未识别"; fails=$((fails+1)); fi
+    kill "$fakepid" 2>/dev/null
+    if proj_alive "$T/emptydir"; then echo "  FAIL: 空目录误判为活"; fails=$((fails+1)); else echo "  ok: 空目录不误判"; fi
     rm -rf "$T"
     if [ "$fails" = "0" ]; then echo "WATCHDOG SELFTEST PASS"; return 0; fi
     echo "WATCHDOG SELFTEST FAILED ($fails)"; return 1

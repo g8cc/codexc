@@ -58,6 +58,22 @@ echo "== 路径形态不变量 (符号链接重复注册回归锁) =="
 ckge "注册物理路径归一" "$(grep -c 'pwd -P' ck-common.sh)" 1
 ck "看门狗入库且有自测" "$([ -x burn-watch.sh ] && grep -q 'cmd_selftest_watch' burn-watch.sh && echo OK)" "OK"
 
+echo "== keeper 自身回归 (2026-11-04/05 事故锁) =="
+ck "tmux 全局环境无 CODEXC_TOOL 污染" "$([ -z "$(tmux show-environment -g 2>/dev/null | sed -n 's/^CODEXC_TOOL=//p')" ] && echo OK)" "OK"
+echo "== spawn_watcher 互锁回归锁 (pane 卡死事故) =="
+swd="cw-spawn-$$"
+tmux kill-session -t "$swd" 2>/dev/null
+mkdir -p "/tmp/$swd"
+tmux new-session -d -s "$swd" -c "/tmp/$swd" "cd /tmp/$swd && '$self_dir/codexc' >/dev/null 2>&1"
+swok=0
+for i in $(seq 1 15); do
+  [ -f "/tmp/$swd/.codingkeeper/watcher.pid" ] && { swok=1; break; }
+  sleep 1
+done
+ck "watcher 15s 内挂载 (无 \$() 互锁挂起)" "$([ "$swok" = "1" ] && echo OK)" "OK"
+tmux kill-session -t "$swd" 2>/dev/null
+rm -rf "/tmp/$swd"
+
 echo "== 安全不变量 =="
 ckge "新鲜度令牌"     "$(grep -c '\.tok' codexc-loop)" 2
 ckge "runner 锁"      "$(grep -c 'loop.pid' codexc-loop)" 3
