@@ -99,7 +99,7 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
 patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
-    for proj in fingerprint sale soul2soul; do
+    for proj in fingerprint sale soul2soul wechatflow; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
@@ -130,7 +130,8 @@ patrol_once() {
     fp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/fingerprint/.codingkeeper/journal" 2>/dev/null | xargs)"
     sp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/sale/.codingkeeper/journal" 2>/dev/null | xargs)"
     s2_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/soul2soul/.codingkeeper/journal" 2>/dev/null | xargs)"
-    echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | s2_journal=$s2_j | 今日token=$tok" >> "$ACCOUNT"
+    wf_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/wechatflow/.codingkeeper/journal" 2>/dev/null | xargs)"
+    echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | s2_journal=$s2_j | wf_journal=$wf_j | 今日token=$tok" >> "$ACCOUNT"
 }
 
 # A kernel lock survives script crashes without a stale mkdir/PID race. The
