@@ -1,9 +1,11 @@
 #!/bin/bash
-# burn-watch.sh — 无 LLM 烧炉看守 v2 (纯 bash 3.2 兼容, 5 分钟一轮, nohup 常驻)
-# 职责: 双炉存活/瞬时 park 复燃/真问题告警/token 记账/日志轮转。真问题绝不强推。
+# burn-watch.sh — 无 LLM 烧炉看守 (纯 bash 3.2 兼容, 5 分钟一轮)
+# 部署: ~/.codingkeeper/burn-watch.sh -> 本文件 (symlink); 改本文件前必须先杀运行实例
+# 职责: 三炉存活/瞬时 park 有界复燃/真问题告警/token 记账/日志轮转
 LOG="$HOME/.codex/codexc-watch.log"
 ALERT="$HOME/.codingkeeper/burn-ALERTS.txt"
 ACCOUNT="$HOME/.codingkeeper/burn-log.txt"
+LOCKDIR="$HOME/.codingkeeper/watchdog.lock"
 DAY="$(date +%D)"
 GREP=/usr/bin/grep
 ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
@@ -32,22 +34,22 @@ rotate_log() {  # $1=文件 $2=保留行数 — >1MB 或 >2000 行时归档旧�
     find "$(dirname "$f")" -name "$(basename "${f%.txt}")-*.txt.gz" -mtime +90 -delete 2>/dev/null
 }
 
-alert() {  # $1=proj $2=text — 同因当日去重 (bash 3.2 兼容, 动态变量)
+alert() {  # $1=proj $2=text — 同因当日去重 (动态变量, bash 3.2 兼容)
     local var last
     var="seen_$(echo "$1" | tr -c 'a-zA-Z0-9' '_')"
     eval "last=\${$var:-}"
     [ "$last" = "$DAY" ] && return 0
     eval "$var=\$DAY"
     echo "$(date '+%F %T') | $1 | $2" >> "$ALERT"
-    osascript -e "display notification \"$1: $2\" with title \"burn-watch\"" 2>/dev/null
+    if [ "${BURN_WATCH_NOTIFY:-1}" = "1" ]; then
+        osascript -e "display notification \"$1: $2\" with title \"burn-watch\"" 2>/dev/null
+    fi
     return 0
 }
 
-# zcode CLI 探测: 输出含 "response" = 凭证/网关活着
-cli_alive() {
+cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"凭证真死"
     local out try ok
     out="$(mktemp "${TMPDIR:-/tmp}/watch-probe.XXXXXX")"
-    # 两次探测 (间隔 5s): 单发会撞网关抖动窗口误判"凭证真死"
     ok=0
     for try in 1 2; do
         "$ZCJS" --prompt replyOK --json --no-color > "$out" 2>/dev/null
@@ -55,8 +57,7 @@ cli_alive() {
         sleep 5
     done
     rm -f "$out"
-    # bash 约定 return 0=成功: ok=1(活) 必须映射为 return 0 — 此前语义反转,
-    # 探测成功却被调用者判为"凭证真死" (所有 auth 误报的唯一根因)
+    # bash 约定 return 0=成功 — ok=1(活) 必须映射为 return 0 (语义反转回归锁)
     [ "$ok" = "1" ] && return 0
     return 1
 }
@@ -69,43 +70,52 @@ revive() {  # $1=proj — 清 halt + nohup 复燃 (与 tmux server 生命周期�
 }
 
 patrol_once() {
-    local proj d pid alive halted reason
-    for proj in fingerprint sale; do
+    local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
+    for proj in fingerprint sale soul2soul; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
-        proj_alive "$d" && continue             # 燃烧中或 auto-resume 休眠中 — 健康
+        if [ "$halted" = 0 ]; then
+            proj_alive "$d" && continue           # 燃烧中 / auto-resume 休眠中 — 健康
+        fi
         reason="$($GREP -a 'parked:' "$LOG" 2>/dev/null | tail -1 | sed 's/.*parked: //')"
         case "$reason" in
             *"idle exhaustion"*)
                 alert "$proj" "诚实熄火(队列空/burn无活) — 加任务或 rm loop.halt 复燃"
                 continue ;;
             *"auth failure"*)
-                if cli_alive; then
-                    alert "$proj" "CLI 探测恢复 — 按瞬时复燃"
-                else
-                    # 不定性"真死": 每轮低频探测, 网关恢复即自动复燃 (对账可查 ALERTS)
-                    echo "$(date '+%F %T') | $proj | auth park, CLI 探测仍失败 — 继续等待" >> "$ALERT"
+                if ! cli_alive; then
+                    alert "$proj" "CLI 凭证真死 — 请 zcode login; park 保留待人"
                     continue
-                fi ;;
-            *"BLOCKED"*|*"gate 连续"*|*"审查轮次超过"*|*"无法解析"*|*"not found in queue"*)
+                fi
+                alert "$proj" "auth failure 但 CLI 探测已恢复 — 复燃" ;;
+            *"BLOCKED"*|*"gate 连续"*|*"审查轮次超过"*|*"not found in queue"*)
                 alert "$proj" "真问题 park: $reason — 不强推, 待人 (诊断: $d/.codingkeeper/.hl-*)"
                 continue ;;
         esac
+        # 统一有界复燃: 每项目每日 2 次 (不依赖全局日志归因, 对一切 park 类生效);
+        # 超限 = 同一问题反复出现, 真问题留档待人, 防坏叶无限烧
+        rcount=$($GREP -c "$DAY.*复燃#$proj" "$ALERT" 2>/dev/null)
+        rcount=${rcount:-0}
+        if [ "$rcount" -ge 2 ]; then
+            alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"
+            continue
+        fi
         revive "$proj"
-        alert "$proj" "复燃 (${reason:-runner进程消失})"
+        echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
     done
-    local tok fp_j sp_j
-    tok="$(sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=strftime('%s','now','start of day')*1000" 2>/dev/null)"
+    local day0
+    day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
+    tok="$(sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
     fp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/fingerprint/.codingkeeper/journal" 2>/dev/null | xargs)"
     sp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/sale/.codingkeeper/journal" 2>/dev/null | xargs)"
-    ghost=$(sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "SELECT count(*) FROM session WHERE time_updated > (strftime('%s','now')-86400)*1000" 2>/dev/null)
-    echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | 今日token=$tok | 近24h活跃zcode会话=$ghost" >> "$ACCOUNT"
+    s2_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/soul2soul/.codingkeeper/journal" 2>/dev/null | xargs)"
+    echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | s2_journal=$s2_j | 今日token=$tok" >> "$ACCOUNT"
 }
-
 
 cmd_selftest_watch() {
     local fails=0 T
+    BURN_WATCH_NOTIFY=0   # selftest 不触发真实通知 (osascript 可能阻塞在权限交互)
     T="$(mktemp -d "${TMPDIR:-/tmp}/watch-selftest.XXXXXX")"
     echo "== cli_alive 成功语义 (2026-11-04 auth 误报回归锁: return 0=真) =="
     local ZCJS="$T/fake-zcjs" GREP=/usr/bin/grep
@@ -120,7 +130,7 @@ cmd_selftest_watch() {
     ALERT="$T/alerts.txt"
     alert fp "测试告警A"
     alert fp "测试告警A"
-    local n; n=$($GREP -c "测试告警A" "$ALERT" 2>/dev/null || echo 0)
+    local n; n=$($GREP -c "测试告警A" "$ALERT" 2>/dev/null || true)
     [ "$n" = "1" ] && echo "  ok: 同因去重 (1 条)" || { echo "  FAIL: 重复告警 ($n 条)"; fails=$((fails+1)); }
     ALERT="$ALERT_BAK"
     echo "== rotate_log 裁剪 =="
@@ -149,6 +159,16 @@ case "${1:-}" in
     run|"") ;;
     *) echo "usage: burn-watch.sh [run|selftest]" >&2; exit 1 ;;
 esac
+
+# 自锁: 防多实例并发巡逻 (重复复燃/错位执行的元凶)
+if mkdir "$LOCKDIR" 2>/dev/null; then
+    echo $$ > "$LOCKDIR/pid"
+    trap 'rm -rf "$LOCKDIR"' EXIT
+else
+    opid="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+    kill -0 "$opid" 2>/dev/null && { echo "watchdog 已在运行 (pid $opid) — 退出"; exit 0; }
+    rm -rf "$LOCKDIR"; echo $$ > "$LOCKDIR/pid"; trap 'rm -rf "$LOCKDIR"' EXIT
+fi
 
 while :; do
     patrol_once >> "$ALERT" 2>&1

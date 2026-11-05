@@ -579,11 +579,11 @@ cmd_selftest_integration() {
     pidA="$(cat "$root/proj/.codingkeeper/loop.pid" 2>/dev/null)"
     # 拒绝信息走 log() → 全局 watch log; 断言 = B 静默退出(rc=1) + watch log 增量
     wl="$HOME/.codex/codexc-watch.log"
-    base_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    base_n=$(grep -c "another runner" "$wl" 2>/dev/null); base_n=${base_n:-0}
     ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 \
       "$SELF" run > "$root/driver2.log" 2>&1 ; echo "rc=$?" > "$root/rc2" ) & driver2=$!
     sleep 8; kill "$driver2" 2>/dev/null; wait "$driver2" 2>/dev/null
-    now_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    now_n=$(grep -c "another runner" "$wl" 2>/dev/null); now_n=${now_n:-0}
     if [ "$now_n" -gt "$base_n" ]; then echo "  ok: B 被 pid 锁拒绝 (watch log +$((now_n-base_n)))"; else echo "  FAIL: B 未被 pid 锁拒绝"; IT_FAILURES=$((IT_FAILURES+1)); fi
     # 事故场景精确复现: pid 文件被 rm (重启竞态) 但 A 仍活着 → cwd 扫描必须兜底
     rm -f "$root/proj/.codingkeeper/loop.pid"
@@ -591,7 +591,7 @@ cmd_selftest_integration() {
     ( cd "$root/proj" && env CODEXC_HEADLESS_CMD="$root/worker" CODEXC_LOOP_IDLE=0 \
       "$SELF" run > "$root/driver3.log" 2>&1 ; echo "rc=$?" > "$root/rc3" ) & driver3=$!
     sleep 8; kill "$driver3" 2>/dev/null; wait "$driver3" 2>/dev/null
-    now_n=$(grep -c "another runner" "$wl" 2>/dev/null || echo 0)
+    now_n=$(grep -c "another runner" "$wl" 2>/dev/null); now_n=${now_n:-0}
     if [ "$now_n" -gt "$base_n" ]; then echo "  ok: B2 被 cwd 扫描锁拒绝 (rm pid 兜底)"; else echo "  FAIL: cwd 扫描锁失效"; IT_FAILURES=$((IT_FAILURES+1)); fi
     kill "$pidA" "$driver1" 2>/dev/null
     wait "$driver1" 2>/dev/null
