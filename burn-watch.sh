@@ -6,9 +6,26 @@ LOG="$HOME/.codex/codexc-watch.log"
 ALERT="$HOME/.codingkeeper/burn-ALERTS.txt"
 ACCOUNT="$HOME/.codingkeeper/burn-log.txt"
 LOCKDIR="$HOME/.codingkeeper/watchdog.lock"
-DAY="$(date +%D)"
+DAY="$(date +%F)"
 GREP=/usr/bin/grep
 ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+# This watchdog serves ZCode only. Empty/unset configuration must retain its
+# nighttime policy even when the invoking shell has no project environment.
+CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-23:00-09:00}"
+CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
+WATCH_DIR="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]:-$0}" 2>/dev/null)"
+
+watch_window_open() {
+    local result allowed deadline next_open reason extra
+    [ -n "$WATCH_DIR" ] && [ -f "$WATCH_DIR/ck-window.py" ] || return 125
+    result="$(CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
+        python3 "$WATCH_DIR/ck-window.py" --format tsv 2>/dev/null)" || return 125
+    IFS=$'\t' read -r allowed deadline next_open reason extra <<< "$result"
+    [ "$allowed" = 1 ] && [ "$reason" = allowed ] && [ -z "$extra" ] || return 125
+    case "$deadline:$next_open" in *[!0-9:]*|:*) return 125 ;; esac
+    [ "$deadline" -gt 0 ] 2>/dev/null || return 125
+    return 0
+}
 
 proj_alive() {  # $1=project dir — pid 文件或 cwd 扫描 (双侧物理路径归一), 0=活
     local d="$1" pid rpid rcwd dreal
@@ -35,26 +52,31 @@ rotate_log() {  # $1=文件 $2=保留行数 — >1MB 或 >2000 行时归档旧�
 }
 
 alert() {  # $1=proj $2=text — 同因当日去重 (动态变量, bash 3.2 兼容)
-    local var last
+    local var last text esc
     var="seen_$(echo "$1" | tr -c 'a-zA-Z0-9' '_')"
     eval "last=\${$var:-}"
     [ "$last" = "$DAY" ] && return 0
     eval "$var=\$DAY"
     echo "$(date '+%F %T') | $1 | $2" >> "$ALERT"
     if [ "${BURN_WATCH_NOTIFY:-1}" = "1" ]; then
-        osascript -e "display notification \"$1: $2\" with title \"burn-watch\"" 2>/dev/null
+        text="$1: $2"
+        esc="${text//\\/\\\\}"; esc="${esc//\"/\\\"}"
+        osascript -e "display notification \"$esc\" with title \"burn-watch\"" 2>/dev/null
     fi
     return 0
 }
 
 cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"凭证真死"
     local out try ok
-    out="$(mktemp "${TMPDIR:-/tmp}/watch-probe.XXXXXX")"
+    watch_window_open || return 125
+    out="$(mktemp "${TMPDIR:-/tmp}/watch-probe.XXXXXX")" || return 1
     ok=0
     for try in 1 2; do
-        "$ZCJS" --prompt replyOK --json --no-color > "$out" 2>/dev/null
+        # Retry sleep may cross 09:00. Recheck immediately before every probe.
+        watch_window_open || { rm -f "$out"; return 125; }
+        "$ZCJS" --prompt replyOK --cwd "$HOME/.codingkeeper/probe-cwd" --json --no-color > "$out" 2>/dev/null
         $GREP -q response "$out" && { ok=1; break; }
-        sleep 5
+        [ "$try" = 2 ] || sleep 5
     done
     rm -f "$out"
     # bash 约定 return 0=成功 — ok=1(活) 必须映射为 return 0 (语义反转回归锁)
@@ -62,55 +84,102 @@ cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"
     return 1
 }
 
-revive() {  # $1=proj — 清 halt + nohup 复燃 (与 tmux server 生命周期解耦)
+revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
     local d="$HOME/Documents/work/code/AI/AIworkspace/$1"
-    rm -f "$d/.codingkeeper/loop.halt"
-    ( cd "$d" && CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" \
-      nohup zcodec run >> "$LOG" 2>&1 & )
+    watch_window_open || return 125
+    # A halt belongs to this project/operator; never clear it from global logs.
+    [ ! -e "$d/.codingkeeper/loop.halt" ] || return 1
+    [ -d "$d" ] || return 1
+    ( cd "$d" || exit 1
+      # The resumed runner enforces the same policy for the full child lifetime.
+      CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
+      CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 & )
 }
 
 patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
+    DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     for proj in fingerprint sale soul2soul; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
-        if [ "$halted" = 0 ]; then
-            proj_alive "$d" && continue           # 燃烧中 / auto-resume 休眠中 — 健康
+        if [ "$halted" = 1 ]; then
+            alert "$proj" "项目已暂停 — 保留 loop.halt，等待 runner 有界恢复或人工处理"
+            continue
         fi
-        reason="$($GREP -a 'parked:' "$LOG" 2>/dev/null | tail -1 | sed 's/.*parked: //')"
-        case "$reason" in
-            *"idle exhaustion"*)
-                alert "$proj" "诚实熄火(队列空/burn无活) — 加任务或 rm loop.halt 复燃"
-                continue ;;
-            *"auth failure"*)
-                if ! cli_alive; then
-                    alert "$proj" "CLI 凭证真死 — 请 zcode login; park 保留待人"
-                    continue
-                fi
-                alert "$proj" "auth failure 但 CLI 探测已恢复 — 复燃" ;;
-            *"BLOCKED"*|*"gate 连续"*|*"审查轮次超过"*|*"not found in queue"*)
-                alert "$proj" "真问题 park: $reason — 不强推, 待人 (诊断: $d/.codingkeeper/.hl-*)"
-                continue ;;
-        esac
+        # Check each project, not only each five-minute patrol: a previous
+        # project can finish just as the permitted interval closes.
+        watch_window_open || continue
+        proj_alive "$d" && continue
+        reason="runner exited without a halt"
         # 统一有界复燃: 每项目每日 2 次 (不依赖全局日志归因, 对一切 park 类生效);
         # 超限 = 同一问题反复出现, 真问题留档待人, 防坏叶无限烧
-        rcount=$($GREP -c "$DAY.*复燃#$proj" "$ALERT" 2>/dev/null)
+        rcount="$(awk -v day="$DAY" -v key="复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
         rcount=${rcount:-0}
         if [ "$rcount" -ge 2 ]; then
             alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"
             continue
         fi
-        revive "$proj"
-        echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
+        if revive "$proj"; then
+            echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
+        fi
     done
     local day0
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
-    tok="$(sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
+    tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
     fp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/fingerprint/.codingkeeper/journal" 2>/dev/null | xargs)"
     sp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/sale/.codingkeeper/journal" 2>/dev/null | xargs)"
     s2_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/soul2soul/.codingkeeper/journal" 2>/dev/null | xargs)"
     echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | s2_journal=$s2_j | 今日token=$tok" >> "$ACCOUNT"
+}
+
+# A kernel lock survives script crashes without a stale mkdir/PID race. The
+# lock inode is never removed. Descriptor 9 belongs only to the watchdog;
+# patrol/rotation/sleep close it for their child commands (notably nohup).
+watchdog_lock_exec() {
+    exec python3 - "${LOCKDIR}.flock" "$1" <<'PYLOCK'
+import fcntl, os, sys
+path, script = sys.argv[1:]
+try:
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("watchdog 已在运行 — 退出", file=sys.stderr)
+        raise SystemExit(1)
+    os.fchmod(fd, 0o600)
+    os.ftruncate(fd, 0)
+    os.write(fd, (str(os.getpid()) + "\n").encode())
+    if fd != 9:
+        os.dup2(fd, 9)
+        os.close(fd)
+    os.set_inheritable(9, True)
+    os.execv("/bin/bash", ["/bin/bash", os.path.realpath(script), "__locked-run"])
+except OSError as exc:
+    print("watchdog: cannot acquire lock: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PYLOCK
+}
+
+watchdog_lock_valid() {
+    # macOS /dev/fd exposes a synthetic st_dev, so shell `-ef` compares it
+    # incorrectly even when fd 9 is the inherited, locked regular file.
+    # fstat checks the real descriptor; flock also rejects a supplied unlocked
+    # descriptor when a different watchdog owns this inode.
+    python3 - "${LOCKDIR}.flock" <<'PYLOCKCHECK'
+import fcntl, os, stat, sys
+try:
+    inherited = os.fstat(9)
+    current = os.lstat(sys.argv[1])
+    if (not stat.S_ISREG(inherited.st_mode) or not stat.S_ISREG(current.st_mode)
+            or inherited.st_uid != os.geteuid()
+            or (inherited.st_dev, inherited.st_ino) != (current.st_dev, current.st_ino)):
+        raise ValueError("wrong lock descriptor")
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PYLOCKCHECK
 }
 
 cmd_selftest_watch() {
@@ -156,23 +225,21 @@ cmd_selftest_watch() {
 
 case "${1:-}" in
     selftest) cmd_selftest_watch; exit $? ;;
-    run|"") ;;
+    run|"") watchdog_lock_exec "$0" ;;
+    __locked-run)
+        watchdog_lock_valid || { echo "watchdog: missing lock" >&2; exit 1; } ;;
     *) echo "usage: burn-watch.sh [run|selftest]" >&2; exit 1 ;;
 esac
 
-# 自锁: 防多实例并发巡逻 (重复复燃/错位执行的元凶)
-if mkdir "$LOCKDIR" 2>/dev/null; then
-    echo $$ > "$LOCKDIR/pid"
-    trap 'rm -rf "$LOCKDIR"' EXIT
-else
-    opid="$(cat "$LOCKDIR/pid" 2>/dev/null)"
-    kill -0 "$opid" 2>/dev/null && { echo "watchdog 已在运行 (pid $opid) — 退出"; exit 0; }
-    rm -rf "$LOCKDIR"; echo $$ > "$LOCKDIR/pid"; trap 'rm -rf "$LOCKDIR"' EXIT
-fi
-
+sleeper=""
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null' EXIT
 while :; do
-    patrol_once >> "$ALERT" 2>&1
-    rotate_log "$ACCOUNT" 1000
-    rotate_log "$ALERT" 300
-    sleep 300
+    patrol_once 9>&- >> "$ALERT" 2>&1
+    rotate_log "$ACCOUNT" 1000 9>&-
+    rotate_log "$ALERT" 300 9>&-
+    sleep 300 9>&- & sleeper=$!
+    wait "$sleeper"
+    sleeper=""
 done
