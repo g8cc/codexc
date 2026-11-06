@@ -1,0 +1,17 @@
+# Fingerprint <- quality-framework mapping; audited 2026-11-05
+# queue.md is the runnable source; this table does not generate new tasks.
+# Original mapping and queue preserved in audit/leaf-2026-11-05/.
+ENG-04/SEC-BE-01/02/03/05/SEC-FE-02/BUG-BE-03/04/06/EDGE-BE-01/04/05/STAB-BE-04/05/ENG-02/05/07/08	HISTORICAL	Keep original acceptance scope and commits; see leaf-audit-2026-11-05.md, not a new full verification.
+XPROJ-01	PARTIAL	Web/desktop have coverage; iOS compile/routing defects are FP-IOS-CONTRACT, not covered by npm tests.
+STAB-BE-02	BLOCKED	FP-IOS-RETRY follows iOS contract; new authentication signature per attempt, same business idempotency key.
+STAB-BE-01	REVIEW	FP-SQLITE-BOUND proves maximum lock wait; elapsed>=250ms alone is insufficient.
+STAB-BE-06	REVIEW	FP-REVIEW-CONCURRENCY validates existing a41dadb; no duplicate implementation.
+PERF-BE-01/02	REVIEW	FP-REVIEW-PERF checks 1428854 and invalid historical shared-key baseline; do not invent additional budgets.
+EDGE-BE-02	ARCHIVED	Actual API is not a batch collection; do not add 0/1/2 payload APIs to satisfy a template.
+EDGE-BE-06	COVERED	Existing EDGE-BE-04/BUG-BE-06 overlap; no new client_time business field.
+OBS-01	COVERED	ENG-08 already parses structured logs; no duplicate source scanner.
+SEC-BE-06	COVERED-SCOPE	Object authorization belongs to prior SEC-BE-02 and subsequent tenant fixes; re-open only for a concrete uncovered path.
+SEC-BE-04/PERF-BE-03..06/PERF-DB-*/ENG-01/XPROJ-02..10	CANDIDATE-ONLY	Require applicable consumer/load, current gap, deduplication, user value and behavioral acceptance before a new leaf.
+EDGE-FE-*/STAB-FE-*/PERF-FE-*/A11Y-*	NOT-APPLICABLE	No rendered UI in this SDK/service repository; SDK network failures still require their own contracts.
+BUG-MW-*/SEC-MW-*	NOT-APPLICABLE	No separately identified gateway; actual HTTP/auth boundaries remain in service tests.
+ENG-03/09/10/OBS-02..05	REASSESS-IF-NEEDED	No blanket task generation or assumed no-gap; use concrete existing tooling/metrics and current user needs.

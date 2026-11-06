@@ -14,7 +14,7 @@ echo "== 按键（TUI 会话内五件套） =="
 # server 未运行(无会话)时先起临时会话让 server 存活, 检查完清理。
 tmux ls >/dev/null 2>&1 || { tmux new-session -d -s ck-probe -c /tmp 'sleep 30' 2>/dev/null; CK_PROBE=1; }
 if [ -z "$(tmux list-keys -T prefix2 2>/dev/null | grep ' -T prefix2 d ')" ]; then
-    [ -x "$HOME/.codex/bin/sync-prefix2.sh" ] && "$HOME/.codex/bin/sync-prefix2.sh"
+    "$self_dir/sync-prefix2.sh"
     echo "  debug: sync rc=$? prefix2_lines=$(tmux list-keys -T prefix2 2>/dev/null | wc -l | tr -d ' ')"
 fi
 ck "C-a d"        "$([ -n "$(tmux list-keys -T prefix 2>/dev/null | grep ' -T prefix d ')" ] && echo OK)" "OK"
@@ -51,7 +51,7 @@ ckge "banner_set 定义(TUI)" "$(grep -c 'banner_set()' codexc-loop)" 1
 ckge "banner_set 定义(headless)" "$(grep -c 'banner_set()' codexc-headless)" 1
 ckge "横幅调用点(TUI)" "$(grep -c 'banner_set "' codexc-loop)" 5
 ck "overlay 面板源码" "$([ -f desktop/CodingKeeperBar.swift ] && echo OK)" "OK"
-ck "overlay 二进制" "$([ -x $HOME/.codingkeeper/bin/CodingKeeperBar ] && echo OK)" "OK"
+ck "overlay 编译由 syntax 阶段覆盖" "$([ -f desktop/CodingKeeperBar.swift ] && echo OK)" "OK"
 ckge "横幅调用点(headless)" "$(grep -c 'banner_set "' codexc-headless)" 3
 
 echo "== 路径形态不变量 (符号链接重复注册回归锁) =="
@@ -60,23 +60,12 @@ ck "看门狗入库且有自测" "$([ -x burn-watch.sh ] && grep -q 'cmd_selftes
 
 echo "== keeper 自身回归 (2026-11-04/05 事故锁) =="
 ck "tmux 全局环境无 CODEXC_TOOL 污染" "$([ -z "$(tmux show-environment -g 2>/dev/null | sed -n 's/^CODEXC_TOOL=//p')" ] && echo OK)" "OK"
-echo "== spawn_watcher 互锁回归锁 (pane 卡死事故) =="
-swd="cw-spawn-$$"
-tmux kill-session -t "$swd" 2>/dev/null
-mkdir -p "/tmp/$swd"
-tmux new-session -d -s "$swd" -c "/tmp/$swd" "cd /tmp/$swd && '$self_dir/codexc' >/dev/null 2>&1"
-swok=0
-for i in $(seq 1 15); do
-  [ -f "/tmp/$swd/.codingkeeper/watcher.pid" ] && { swok=1; break; }
-  sleep 1
-done
-ck "watcher 15s 内挂载 (无 \$() 互锁挂起)" "$([ "$swok" = "1" ] && echo OK)" "OK"
-tmux kill-session -t "$swd" 2>/dev/null
-rm -rf "/tmp/$swd"
+echo "== 启动链路由 audit startup 的真实 tmux 假 worker 验证 =="
+ck "启动回归套件" "$([ -f tests/startup-audit.py ] && echo OK)" "OK"
 
 echo "== 安全不变量 =="
 ckge "新鲜度令牌"     "$(grep -c '\.tok' codexc-loop)" 2
-ckge "runner 锁"      "$(grep -c 'loop.pid' codexc-loop)" 3
+ckge "runner 锁"      "$(grep -c 'runner_lock_acquire' codexc-loop)" 1
 ckge "kill_tree (共享库)" "$(grep -c 'kill_tree' ck-common.sh)" 2
 ckge "三车道接库"     "$(grep -l '/ck-common.sh' codexc-loop codexc-headless codexc-daily 2>/dev/null | wc -l | tr -d ' ')" 3
 ckge "usage limit 永不续命" "$(grep -c 'usage limit' codexc)" 1

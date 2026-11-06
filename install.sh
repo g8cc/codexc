@@ -26,18 +26,31 @@ link() {  # link <src> <dest>
         cp -p "$dest" "$backup"
         echo "  backed up existing: $backup"
     fi
-    ln -sf "$src" "$dest"
+    if [ -d "$dest" ] && [ ! -L "$dest" ]; then
+        echo "install: refusing to replace directory: $dest" >&2
+        return 1
+    fi
+    # -n replaces a symlink to a directory instead of linking inside its target.
+    ln -sfn "$src" "$dest"
     echo "  $dest -> $src"
 }
 
 echo "==== scripts ===="
 link "$HERE/ck" "$CODEX_BIN_DIR/ck"
 link "$HERE/ck-common.sh" "$CODEX_BIN_DIR/ck-common.sh"   # 三车道共享底层 (被 source)
+link "$HERE/ck-config.py" "$CODEX_BIN_DIR/ck-config.py"
+link "$HERE/ck-window.py" "$CODEX_BIN_DIR/ck-window.py"
+link "$HERE/ck-leaf.py" "$CODEX_BIN_DIR/ck-leaf.py"
+link "$HERE/ck-leaves.py" "$CODEX_BIN_DIR/ck-leaves.py"
+link "$HERE/ck-review-process.py" "$CODEX_BIN_DIR/ck-review-process.py"
+link "$HERE/ck-watch-tools.sh" "$CODEX_BIN_DIR/ck-watch-tools.sh"
+link "$HERE/ck-watcher.py" "$CODEX_BIN_DIR/ck-watcher.py"
 link "$HERE/codexc" "$CODEX_BIN_DIR/codexc"   # backward compat
 # 内部实现脚本（ck 通过绝对路径调用）
 link "$HERE/codexc-loop" "$CODEX_BIN_DIR/codexc-loop"
 link "$HERE/codexc-headless" "$CODEX_BIN_DIR/codexc-headless"
 link "$HERE/codexc-zcode-worker" "$CODEX_BIN_DIR/codexc-zcode-worker"
+link "$HERE/codexc-review-leaf" "$CODEX_BIN_DIR/codexc-review-leaf"
 link "$HERE/codexc-dsh-worker" "$CODEX_BIN_DIR/codexc-dsh-worker"
 link "$HERE/zcodec" "$CODEX_BIN_DIR/zcodec"   # 产品命名入口 (无参即 run)
 link "$HERE/dshc" "$CODEX_BIN_DIR/dshc"

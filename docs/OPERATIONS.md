@@ -8,7 +8,7 @@
 ```
                        ┌──────────── 验收管线（共用） ────────────┐
 队列 .codingkeeper/queue.md  │  worker 回合 → gate.sh(真实退出码)        │
-   │ 逐条投喂           │  → 独立审查(codex exec, 跨模型, 双零收敛) │
+   │ 逐条投喂           │  → 独立审查(codex exec, 独立上下文, 双零收敛) │
    ▼                   │  → journal 落账 → 队列勾选               │
 worker(codex/claude/   └──────────────────────────────────────────┘
 pi/opencode = TUI 通道;  zcode/dsh = headless 通道)
@@ -67,11 +67,11 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 | 情况 | 处理 |
 |---|---|
 | 审查发现 bug | bug 清单回灌修复，**收敛计数清零重来** |
-| 连续 `CODEXC_REVIEW_PASS`(2) 轮 0 bug | 验收 |
+| 连续 `CODEXC_REVIEW_PASS`(2) 份成功且 0 bug 的独立报告 | 验收 |
 | 审查轮次超 `CODEXC_REVIEW_ROUNDS`(6) | park + 通知 |
 | 审查输出无 `BUGS: <n>` 行 | park（安全方向，不瞎猜） |
 | 审查器挂起 | `CODEXC_REVIEW_TIMEOUT`(1800s) 整树 kill → park |
-| 审查器与实现者 | 永远是 codex（跨模型），worker 是谁都不变 |
+| 审查器与实现者 | 审查使用独立 Codex 上下文；底层模型不保证与 worker 不同 |
 
 ### 错误续命（watcher，仅 TUI 通道）
 
@@ -81,14 +81,14 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 | usage limit / 订阅额度类 | **永不续命**——等待窗口重置才是正解，可排 `codexc -t` 定时 |
 | 错误来源 | 每工具不同: codex=rollout 尾部 task_complete.error；claude=JSONL `isApiErrorMessage`(内置重试耗尽后)；pi=`stopReason:"error"`；opencode=opencode.db 错误 assistant 行 |
 | 连续续命 30 次仍错 | watcher 停止 + 通知（防 token 无底洞） |
-| 长跑会话的 watcher 版本旧 | 重新 `codexc` attach 即自动补挂当前代码的 watcher（watcher 死亡/升级同理）；无需重启会话 |
+| 长跑会话的 watcher 版本旧 | attach 复用已验证活跃的 watcher，缺失时补挂；升级旧 watcher 需重新启动会话 |
 
 ### 运行器自身
 
 | 情况 | 处理 |
 |---|---|
 | 同项目启动第二个 runner | 锁（`.codingkeeper/loop.pid`）拒绝 |
-| runner 被 kill -9 | 临时文件/pid 残留由下一个驱动清扫接管 |
+| runner 被 kill -9 | 下个驱动在共享锁内确认旧 PID 已死后接管；无效元数据需检查 |
 | worker 会话/进程死亡 | 驱动自回收（无孤儿、无虚假验收） |
 | 用户想暂停 | `touch .codingkeeper/loop.halt`；复燃 `rm .codingkeeper/loop.halt` |
 | dry 试跑 | `CODEXC_LOOP_DRY=1`（TUI 通道跑完首条即停；headless 只记录不执行） |
@@ -169,3 +169,29 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 3. **完成事件一次性消费**: 水位 + 活动门 + 新鲜度令牌三层防陈旧误收。
 4. **每层都有上限**: 续命 30 / gate 3 / 审查 6 / 空转 2 / 回合超时 3600s——无界循环不存在。
 5. **外环零智能**: bash + tmux + 退出码；智能全部在 Agent 内，机械全部可审查。
+
+## 本轮审计补充
+
+- 安全配置编辑要求 Python 3.11+；损坏的 TOML/JSON 保留原文件并报错。inline projects 无法安全扩展时仅跳过自动预信任。
+- headless 可用 `CODEXC_REVIEW_PARALLEL=1` 同批运行独立审查（默认开启）；每个审查仍计入 `CODEXC_REVIEW_ROUNDS` 总预算，全部成功且零 bug 才验收。`0` 恢复串行。
+- watcher.pid 是兼容状态文件；新版按 pane 保存 watcher 元数据，不按未经验证的 PID 杀进程。
+- 定时发送绑定 owner/项目/tool，每次提交前复验；`-t` 与 loop 同时使用会报错。
+- 详细修复与测试结果：[深度审计](AUDIT-2026-11-05.md)。
+
+## ZCode 夜间套餐
+
+`zcodec run` 默认运行窗口是 Asia/Shanghai 的 `[23:00, 次日09:00)`。到期停止受管子进程，队列只有完整验收后才修改；等待期间 runner 保持存活，但 `active=false`，不是正在执行模型任务。
+
+配额耗尽时 `.codingkeeper/quota-until` 持久化下一次开放的 epoch；复开服务不会清除此标记。`loop.halt` 仍为人工/不可恢复错误暂停，优先于自动时段。无效时段、时区或配额标记会停止执行；排查后才清理对应状态。`burn-watch` 同样遵守窗口并保留项目 halt；它不负责清除人工暂停。
+
+ZCode 的窗口不改变 `codexc-daily`（该入口仅负责 Codex）的调度。原有 `CODEXC_AUTO_RESUME=0` 会让配额失败停靠，需人工恢复。
+
+## 叶子队列审计与恢复
+
+- `ck leaves --registry`：离线结构检查。错误返回非零，质量提示需要结合源码判断；不会跑 gate/worker。
+- `zcodec run`：默认没有 idle burn，空队列等待；占位 gate 直接挂起。正式 gate 的业务覆盖仍由项目维护者负责，不能从任意 shell 代码自动证明。
+- 续行必须缩进；待依赖的任务放 `## blocked`，已实现但缺验收的任务放 `## review-needed`。runner 不自动把依赖当完成。
+- `.codingkeeper/acceptance.pending.json` 是未提交完的验收事务。恢复会核对队列前/后内容并幂等补齐 journal/receipt；队列已被外部修改则停住供核对。不要随意删除它或手工勾选以绕过失败。
+- `.codingkeeper/evidence/<id>/` 保留任务基线、候选、输出与 receipt；blobs 按内容去重复用。默认源文件上限 16 MiB/文件、128 MiB/快照、50,000 路径，超出会明确停止；大型仓库应先界定可信验证范围，不能静默忽略文件。
+- ZCode `review-lane=auto` 现在直接选择 Codex；不会 ping 模型或自动换渠道。`zcode` 与 `codex` 明确选择车道。审查失败/空响应不算 BUGS: 0。
+- gate 输出中的 SKIP 不是 PASS，设备与真实浏览器结果必须独立记录。队列归档前核对 gate 是否依赖勾选数量；本次已解除 sale 的此类耦合。

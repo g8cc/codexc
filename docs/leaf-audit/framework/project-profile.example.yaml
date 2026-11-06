@@ -1,0 +1,110 @@
+# Optional project facts, schema v2. This example is not executable configuration.
+# Copy only when useful; infer facts from the repository and record their sources.
+# null/[] means unknown or not recorded, never automatically not-applicable or PASS.
+# Existing runners must explicitly support v2 before using it; do not feed it to v1.
+schema_version: 2
+project:
+  root: null
+  source_revision_or_snapshot: null
+  source_of_facts: []
+  user_outcomes: []
+  runtime_and_versions: []
+  deployment_scope: null  # e.g. one process / multiple instances, real store/backend
+
+paths:
+  frontend: []
+  native_or_desktop: []
+  sdk_or_client: []
+  backend: []
+  middleware: []
+  database: []
+  tests: []
+
+capabilities:
+  # Each entry records state: present / absent / unknown, plus evidence.
+  # Inspect actual behavior and consumers, not merely directory names.
+  ui: {state: unknown, evidence: []}
+  public_or_authenticated_api: {state: unknown, evidence: []}
+  persistent_store: {state: unknown, evidence: []}
+  network_dependencies: {state: unknown, evidence: []}
+  asynchronous_delivery: {state: unknown, evidence: []}
+
+supported_environments:
+  browsers_and_versions: []
+  operating_systems: []
+  devices_and_viewports: []
+  assistive_technologies: []
+  input_methods_and_languages: []
+  network_conditions: []
+  evidence_sources: []
+
+# Includes in-repo SDKs, shipped apps, external services and compatibility fixtures.
+# A fixture must name the real consumer/version it represents and its limitations.
+consumers: []
+# - name: mobile-client
+#   kind: in_repo_sdk
+#   path_or_contract: sdk/
+#   supported_versions: []
+#   evidence: []
+peers: []  # Optional external-peer inventory; empty does not disable XPROJ.
+
+commands:
+  # Record only commands actually present in this project; null is not a shell command.
+  unit: {command: null, cwd: null, evidence: [], prerequisites: []}
+  integration: {command: null, cwd: null, evidence: [], prerequisites: []}
+  lint: {command: null, cwd: null, evidence: [], prerequisites: []}
+  typecheck: {command: null, cwd: null, evidence: [], prerequisites: []}
+  build_by_platform: []
+  ci_gate: {command: null, cwd: null, evidence: [], prerequisites: []}
+  performance: []
+  browser_or_device_checks: []
+
+validation:
+  # Each job selects relevant required checks and the platform/layer they prove.
+  # Actual outcomes are PASS / FAIL / BLOCKED / SKIP with current SHA or diff.
+  known_baseline_failures: []
+  unavailable_environments: []
+  artifact_location: null
+  required_review_policy_source: null
+  source_text_is_runtime_evidence: false
+  skipped_required_check_is_pass: false
+
+budgets:
+  # Never copy thresholds.yaml references into enforced targets without a project contract.
+  # A target needs: source/user outcome, supported environment, workload/data scale,
+  # measurement boundary, samples/repetitions, correctness checks and acceptable tradeoffs.
+  accepted_targets: []
+  measurement_context:
+    operation: null
+    device_network_and_runtime: null
+    deployment_and_store: null
+    data_scale: null
+    concurrency_and_arrival_pattern: null
+    cache_and_warmup: null
+    boundary_and_percentile: null
+    sample_size_and_repetitions: null
+    correctness_and_error_budget: null
+
+scheduling:
+  source: evidence_backed_project_problems
+  queue_path: null
+  max_priority: null  # Optional user execution boundary; no default march to P5.
+  time_or_resource_limit: null
+  default_next_request_scope: one_complete_problem
+  batch_scope_source: current_user_authorization
+  empty_queue_action: stop
+  repeated_failure_action: retain_problem_and_severity_then_reassess_strategy
+  # Records need catalog_ids, reason/evidence, scope, duplicate_of when relevant,
+  # and recheck trigger. They are decisions, never a flat retry-generated skip list.
+  applicability_and_disposition: []
+
+workspace:
+  preserve_existing_changes: true
+  ownership_record: null
+  isolation_strategy: null
+  whole_file_reset_for_failed_experiment: false
+
+actions:
+  authorization_source: current_and_prior_user_instructions_and_project_rules
+  pass_automatically_authorizes_commit_push_or_deploy: false
+  # This file supplies no new authority, model endpoint, credentials or spending permission.

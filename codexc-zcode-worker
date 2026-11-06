@@ -25,6 +25,7 @@ ZCODE_MODE="${ZCODE_MODE:-yolo}"
 
 [ -f "$ZCODE_CJS" ] || { echo "codexc-zcode-worker: zcode.cjs not found at $ZCODE_CJS (set ZCODE_CJS)" >&2; exit 1; }
 command -v node >/dev/null || { echo "codexc-zcode-worker: node is required (>= 24)" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "codexc-zcode-worker: python3 is required" >&2; exit 1; }
 
 task="$(cat)"
 [ -n "$task" ] || { echo "codexc-zcode-worker: empty task" >&2; exit 1; }
@@ -40,23 +41,42 @@ fi
 # capture via TEMP FILE, never $(...): zcode spawns background children
 # (MCP servers etc.) that inherit stdout and would hold a pipe open forever,
 # blocking command substitution after the turn itself has finished
-turn_out="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-out.XXXXXX")"
-turn_err="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-err.XXXXXX")"
+turn_out="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-out.XXXXXX")" || exit 1
+turn_err=""
+trap 'rm -f "$turn_out" "${turn_err:-}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+turn_err="$(mktemp "${TMPDIR:-/tmp}/codexc-zcode-err.XXXXXX")" || exit 1
 node "$ZCODE_CJS" "${args[@]}" > "$turn_out" 2> "$turn_err" &
 node_pid=$!
 wait "$node_pid"; rc=$?
-raw="$(cat "$turn_out" 2>/dev/null)"
-err="$(cat "$turn_err" 2>/dev/null)"
-rm -f "$turn_out" "$turn_err"
+# Only the small failure tails enter shell variables. Parse successful output
+# from its file: a large final response can exceed the OS argv size limit.
+raw="$(tail -c 4096 "$turn_out" 2>/dev/null)"
+err="$(tail -c 4096 "$turn_err" 2>/dev/null)"
 # 错误分类: runner 据此决策 — auth 立即停等人 / quota park 等窗口重置 /
 # transient 退避重试 / unknown 走既有 3 发路径。分类依据 = zcode CLI 的
 # 结构化错误输出 (stdout/stderr 原文), 判定顺序: auth → quota → transient。
 classify_error() {  # $1=raw stdout $2=raw stderr -> auth|quota|transient|unknown
-    local both="$1 $2"
+    local both="$1 $2" provider_class
+    # Provider codes take precedence over prose: the permanent model-coverage
+    # error 1006 also mentions remaining quota. Bare numbers in logs are not
+    # codes; accept only an explicit code/error_code field from a failed CLI.
+    provider_class="$(python3 - "$both" <<'PYCLASS'
+import re, sys
+codes = set(re.findall(r'''(?<![\w])['"]?(?:error_?code|code)['"]?\s*[:=]\s*['"]?(1005|1006)(?![0-9])''',
+                       sys.argv[1], flags=re.I))
+if '1006' in codes:
+    print('auth')
+elif '1005' in codes:
+    print('quota')
+PYCLASS
+)"
+    if [ -n "$provider_class" ]; then printf '%s' "$provider_class"; return; fi
     case "$both" in
         *401*|*403*|*[Uu]nauthorized*|*令牌已过期*|*令牌过期*|*INVALID_API_KEY*|*API\ key*)
             printf 'auth'; return ;;
-        *429*|*rate?limit*|*usage?limit*|*quota*|*配额*|*额度*)
+        *429*|*rate?limit*|*usage?limit*|*quota*|*配额*|*额度*|*套餐有效期*|*未到生效时间*|*套餐尚未生效*|*套餐未生效*)
             printf 'quota'; return ;;
         *gateway.ai.error*|*ECONNRESET*|*fetch?failed*|*socket*|*timed?out*|*timeout*|*Bad?Gateway*|*Service?Unavailable*|*overloaded*|*at?capacity*|*network*|*connection*)
             printf 'transient'; return ;;
@@ -74,47 +94,74 @@ if [ "$rc" != "0" ]; then
     exit 1
 fi
 
-python3 - "$raw" "$ZCODE_SESSION_FILE" <<'PYEOF'
-import json, os, sys
-raw, sess_file = sys.argv[1], sys.argv[2]
+python3 - "$turn_out" "$ZCODE_SESSION_FILE" <<'PYEOF'
+import json, os, re, sys, tempfile
+out_file, sess_file = sys.argv[1], sys.argv[2]
 try:
-    d = json.loads(raw)
-except Exception:
-    # NDJSON fallback: 最终响应在流末尾 — 倒序找第一条带非空 response 的行,
-    # 找不到再退回任何带 sessionId 的行 (供会话接力, 下一轮重试)
-    d = {}
-    fallback = {}
-    for line in reversed(raw.splitlines()):
-        try:
-            cand = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(cand, dict):
-            continue
-        r = cand.get("response")
-        if not d and isinstance(r, str) and r.strip():
-            d = cand
-            continue
-        if not fallback and "sessionId" in cand:
-            fallback = cand
-    if not d:
-        d = fallback
-if not isinstance(d, dict):
-    raise SystemExit(1)
-resp = d.get("response")
-if not isinstance(resp, str) or not resp.strip():
-    raise SystemExit(1)
-sid = d.get("sessionId", "")
-if sid:
+    with open(out_file, "rb") as fh:
+        raw = fh.read(16 * 1024 * 1024 + 1)
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("response exceeds 16 MiB")
+    raw = raw.decode("utf-8")
     try:
-        os.makedirs(os.path.dirname(sess_file) or ".", exist_ok=True)
-        with open(sess_file, "w", encoding="utf-8") as fh:
-            fh.write(sid + "\n")
-    except OSError:
-        pass
-sys.stdout.write(resp)
+        records = [json.loads(raw)]
+    except json.JSONDecodeError:
+        records = []
+        for line in raw.splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    # Some CLI versions emit session metadata separately from the final
+    # response. Keep the last response event, including an empty/invalid one:
+    # falling back to an earlier DONE would turn a failed turn into success.
+    resp, sid = None, None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if "response" in record:
+            resp = record["response"]
+        if "sessionId" in record:
+            sid = record["sessionId"]
+    if not isinstance(resp, str) or not resp.strip():
+        raise ValueError("missing final response")
+    # The local gateway converts upstream 1005 into an HTTP-200 assistant
+    # notice before the package becomes active. Recognize that exact complete
+    # notice, not ordinary task text discussing quota or quoting an example.
+    notice = (r"额度已领到（[0-9]+(?:,[0-9]{3})* token），"
+              r"[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} 起生效，"
+              r"还有约 [0-9]+ 分钟。\s*"
+              r"这是套餐的生效规则，不是报错；到点直接用即可，不用重试。")
+    if re.fullmatch(notice, resp.strip()):
+        print("zcode turn deferred: package quota is not active yet")
+        print("CK_ERROR_CLASS: quota")
+        # Do not replace the last useful session with a gateway notice.
+        raise SystemExit(75)
+    if sid is not None and (not isinstance(sid, str) or
+                            not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,200}", sid)):
+        raise ValueError("invalid sessionId")
+    if sid:
+        parent = os.path.dirname(sess_file) or "."
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".zcode-session-", dir=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(sid + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, sess_file)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    sys.stdout.write(resp)
+except (OSError, ValueError) as exc:
+    print("codexc-zcode-worker: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
 PYEOF
 pyrc=$?
+if [ "$pyrc" = "75" ]; then
+    exit 1
+fi
 if [ "$pyrc" != "0" ]; then
     # CLI rc=0 但响应为空/不可解析 — 显式 unknown, 不让 runner 猜
     echo "CK_ERROR_CLASS: unknown"

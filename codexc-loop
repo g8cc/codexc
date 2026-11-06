@@ -93,6 +93,7 @@ CODEXC_REVIEW_ROUNDS="$(normalize_uint CODEXC_REVIEW_ROUNDS "${CODEXC_REVIEW_ROU
 CODEXC_REVIEW_PASS="$(normalize_uint CODEXC_REVIEW_PASS "${CODEXC_REVIEW_PASS:-2}" 2 1 10)"
 CODEXC_REVIEW_TIMEOUT="$(normalize_uint CODEXC_REVIEW_TIMEOUT "${CODEXC_REVIEW_TIMEOUT:-1800}" 1800 5 86400)"
 CODEXC_LOOP_STALL="$(normalize_uint CODEXC_LOOP_STALL "${CODEXC_LOOP_STALL:-300}" 300 5 86400)"
+CODEXC_TURN_TIMEOUT="$(normalize_uint CODEXC_TURN_TIMEOUT "${CODEXC_TURN_TIMEOUT:-3600}" 3600 5 86400)"
 # burn mode (default ON): when the queue runs dry, feed a standing
 # "keep improving" prompt so the boiler keeps burning on the worker's own
 # plan plus a professional hardening checklist. "0/off" restores silent
@@ -212,24 +213,34 @@ find_rollout_opencode() {  # $1=pane -> active session id (used as rollout key)
     [ -n "$sid" ] && printf '%s' "$sid"
 }
 
-# terminal-event count = the freshness baseline for file-based tools (same
-# counter the parsers emit as tokens); opencode uses its message count
-terminal_count() {  # $1=rollout
-    case "$CODEXC_TOOL" in
-        codex)  grep -acE '"type": ?"task_complete"' "$1" 2>/dev/null || echo 0 ;;
-        claude) grep -acE '"type": ?"assistant"' "$1" 2>/dev/null || echo 0 ;;
-        pi)     grep -acE '"stopReason": ?"stop"' "$1" 2>/dev/null || echo 0 ;;
-        *)      rollout_size "$1" ;;
-    esac
+# Freshness baseline: byte offset for JSONL, message sequence for SQLite.
+# No full-file scan, and an empty rollout produces exactly one numeric zero.
+terminal_count() {
+    if [ "$CODEXC_TOOL" = "opencode" ]; then
+        local esc="${1//\'/''}"
+        sqlite3 -readonly "$OPENCODE_DIR/opencode.db" "SELECT coalesce(max(seq),0) FROM session_message WHERE session_id='$esc'" 2>/dev/null || printf '0\n'
+    else
+        stat -f '%z' "$1" 2>/dev/null || printf '0\n'
+    fi
 }
 
 # rollout "size" feeds the driver's activity/watermark logic; opencode keeps
 # everything in sqlite, so its size is the session's message count
 rollout_size() {  # $1=rollout path-or-sid
     case "$CODEXC_TOOL" in
-        opencode) local esc="${1//\'/''}"
-                  sqlite3 -readonly "$OPENCODE_DIR/opencode.db" "SELECT count(*) FROM session_message WHERE session_id='$esc'" 2>/dev/null || echo 0 ;;
-        *)        stat -f '%z' "$1" 2>/dev/null || echo 0 ;;
+        opencode)
+            python3 - "$OPENCODE_DIR/opencode.db" "$1" <<'PYEOF'
+import hashlib, sqlite3, sys
+from pathlib import Path
+try:
+    with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        row = conn.execute("SELECT seq,data FROM session_message WHERE session_id=? ORDER BY seq DESC LIMIT 1", (sys.argv[2],)).fetchone()
+    print(hashlib.sha256(repr(row).encode()).hexdigest())
+except (OSError, sqlite3.Error):
+    print("0")
+PYEOF
+            ;;
+        *) stat -f '%z' "$1" 2>/dev/null || printf '0\n' ;;
     esac
 }
 
@@ -271,8 +282,9 @@ for current, dirs, files in os.walk(root):
             except OSError:
                 continue
 cands.sort(reverse=True)
-# 窗口取 16: 按全局 mtime 排序, 活跃项目多时本项目 rollout 会被挤出过窄窗口
-for _mtime, path in cands[:16]:
+# Match project ownership before deciding which candidate wins. A global
+# candidate cap silently blinds older projects when many sessions are active.
+for _mtime, path in cands:
     try:
         with open(path, "rb") as fh:
             for _ in range(5):
@@ -293,128 +305,110 @@ for _mtime, path in cands[:16]:
 PYEOF
 }
 
-# Status of the worker's last turn from the rollout tail. Prints "none",
-# "error" or "clean" and writes the task_complete event's last_agent_message
-# (decoded) to $2 when present. A turn that ended in a provider error carries
-# error=1 and last_agent_message=null (the watcher decides about retrying it).
-# claude profile: the LAST non-sidechain assistant line governs. An
-# isApiErrorMessage:true line means claude's own 10-retry cycle was exhausted
-# (turn failed); anything else with text is a clean turn end.
-turn_status_claude() {  # $1=rollout $2=msg_out_file
-    python3 - "$1" "$2" <<'PYEOF'
+# Read only a bounded tail and use the actual event byte offset as its token.
+# Counting all terminal events each poll was O(total history), and counting
+# sidechain/tool-use messages falsely refreshed an older completion.
+turn_status_file() {  # $1=tool $2=rollout $3=message output
+    python3 - "$1" "$2" "$3" <<'PYEOF'
 import json, os, sys
-rollout, msg_out = sys.argv[1], sys.argv[2]
-status = "none"
+tool, rollout, msg_out = sys.argv[1:]
+status, message, token = "none", "", 0
 try:
     with open(rollout, "rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        position = fh.tell()
-        chunks = []
-        lines_needed = 400
-        while position > 0 and lines_needed > 0:
-            size = min(65536, position)
-            position -= size
-            fh.seek(position)
+        end = fh.seek(0, os.SEEK_END)
+        start, chunks, lines = end, [], 0
+        while start > 0 and lines < 400 and end - start < 4 * 1024 * 1024:
+            size = min(65536, start)
+            start -= size
+            fh.seek(start)
             chunk = fh.read(size)
-            lines_needed -= chunk.count(b"\n")
             chunks.append(chunk)
-        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
-        fh.seek(0)
-        import re as _re
-        pat = _re.compile(rb'"type":\s*"assistant"')
-        total = sum(1 for line in fh if pat.search(line))
-    last_text = ""
-    for line in reversed(tail):
+            lines += chunk.count(b"\n")
+        data = b"".join(reversed(chunks))
+        if start:
+            boundary = data.find(b"\n") + 1
+            start += boundary
+            data = data[boundary:]  # discard a potentially partial first record
+    records = []
+    offset = start
+    for line in data.splitlines(keepends=True):
+        offset += len(line)
         try:
-            d = json.loads(line)
-        except Exception:
-            continue   # tolerate partial/corrupt lines mid-stream
-        if not isinstance(d, dict) or d.get("type") != "assistant" or d.get("isSidechain"):
+            item = json.loads(line)
+        except (ValueError, UnicodeError):
             continue
-        m = d.get("message") or {}
-        content = m.get("content") or []
-        text = ""
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text += block.get("text", "")
-        if d.get("isApiErrorMessage"):
-            status = "error"
-            break
-        if not text:
-            continue   # tool-use-only assistant line; keep walking back
-        status = "clean"
-        last_text = text
-        with open(msg_out + ".tok", "w") as tok:
-            tok.write(str(total))
+        if isinstance(item, dict):
+            records.append((item, offset))
+    for item, event_end in reversed(records):
+        if tool == "codex":
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get("type")
+            if kind in ("turn_aborted", "task_aborted", "error"):
+                status = "error"
+                break
+            if kind in ("task_started", "turn_started", "user_message") or (item.get("type") == "response_item" and payload.get("role") == "user"):
+                break
+            if kind != "task_complete":
+                continue
+            status = "error" if payload.get("error") else "clean"
+            message = payload.get("last_agent_message")
+        elif tool == "claude":
+            if item.get("isSidechain"):
+                continue
+            if item.get("type") == "user":
+                break
+            if item.get("type") != "assistant":
+                continue
+            payload = item.get("message")
+            if not isinstance(payload, dict):
+                break
+            if item.get("isApiErrorMessage"):
+                status = "error"
+                break
+            content = payload.get("content")
+            if not isinstance(content, list):
+                break
+            if payload.get("stop_reason") not in ("end_turn", "stop_sequence") or any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content):
+                break
+            message = "".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+            status = "clean"
+        else:
+            if item.get("type") != "message":
+                continue
+            payload = item.get("message")
+            if not isinstance(payload, dict):
+                break
+            if payload.get("role") == "user":
+                break
+            if payload.get("role") != "assistant":
+                continue
+            reason = payload.get("stopReason")
+            if reason in ("error", "aborted", "length"):
+                status = "error"
+                break
+            if reason != "stop":
+                break  # toolUse belongs to an unfinished turn
+            content = payload.get("content")
+            content = content if isinstance(content, list) else []
+            message = "".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+            status = "clean"
+        token = event_end
         break
     if status == "clean":
-        with open(msg_out, "wb") as out:
-            out.write(last_text.encode("utf-8", "replace"))
+        with open(msg_out, "w", encoding="utf-8") as out:
+            out.write(message if isinstance(message, str) else "")
+        with open(msg_out + ".tok", "w") as out:
+            out.write(str(token))
 except OSError:
     status = "none"
 print(status)
 PYEOF
 }
 
-# pi profile: last assistant message governs — stopReason "stop" ends a turn
-# cleanly; "error" is a failed turn; "toolUse" is mid-turn (wait)
-turn_status_pi() {  # $1=rollout $2=msg_out_file
-    python3 - "$1" "$2" <<'PYEOF'
-import json, os, sys
-rollout, msg_out = sys.argv[1], sys.argv[2]
-status = "none"
-try:
-    with open(rollout, "rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        position = fh.tell()
-        chunks = []
-        lines_needed = 400
-        while position > 0 and lines_needed > 0:
-            size = min(65536, position)
-            position -= size
-            fh.seek(position)
-            chunk = fh.read(size)
-            lines_needed -= chunk.count(b"\n")
-            chunks.append(chunk)
-        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
-        fh.seek(0)
-        import re as _re
-        pat = _re.compile(rb'"stopReason":\s*"stop"')
-        total = sum(1 for line in fh if pat.search(line))
-    for line in reversed(tail):
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(d, dict) or d.get("type") != "message":
-            continue
-        m = d.get("message") or {}
-        if m.get("role") != "assistant":
-            continue
-        sr = m.get("stopReason")
-        # pi enum (dist-verified): stop | toolUse | error | aborted | length.
-        # Only "stop" is a clean completion; error/aborted/length are terminal
-        # failures (truncated or interrupted output must not be accepted);
-        # toolUse is mid-turn — keep walking back for the turn's final line.
-        if sr in ("error", "aborted", "length"):
-            status = "error"
-            break
-        if sr != "stop":
-            continue
-        text = "".join(b.get("text", "") for b in (m.get("content") or [])
-                       if isinstance(b, dict) and b.get("type") == "text")
-        status = "clean"
-        with open(msg_out, "wb") as out:
-            out.write(text.encode("utf-8", "replace"))
-        with open(msg_out + ".tok", "w") as tok:
-            tok.write(str(total))
-        break
-except OSError:
-    status = "none"
-print(status)
-PYEOF
-}
+turn_status_claude() { turn_status_file claude "$@"; }
+turn_status_pi() { turn_status_file pi "$@"; }
 
 # opencode profile: rollout is the session's message DIR; the newest assistant
 # msg json decides — error{...} means failed turn, time.finish means done;
@@ -427,24 +421,25 @@ status = "none"
 try:
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     row = conn.execute(
-        "SELECT data FROM session_message WHERE session_id=? AND type='assistant' "
+        "SELECT data, seq FROM session_message WHERE session_id=? AND type='assistant' "
         "ORDER BY seq DESC LIMIT 1", (sid,)).fetchone()
     if row:
         d = json.loads(row[0])
+        if not isinstance(d, dict):
+            print("none")
+            raise SystemExit(0)
         if d.get("error") or d.get("finish") == "error":
             status = "error"
         elif d.get("finish") == "stop":
-            text = "".join(b.get("text", "") for b in (d.get("content") or [])
-                           if isinstance(b, dict) and b.get("type") == "text")
+            content = d.get("content")
+            content = content if isinstance(content, list) else []
+            text = "".join(b["text"] for b in content
+                           if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
             status = "clean"
             with open(msg_out, "wb") as out:
                 out.write(text.encode("utf-8", "replace"))
-            seq_row = conn.execute(
-                "SELECT seq FROM session_message WHERE session_id=? AND type='assistant' "
-                "ORDER BY seq DESC LIMIT 1", (sid,)).fetchone()
-            if seq_row:
-                with open(msg_out + ".tok", "w") as tok:
-                    tok.write(str(seq_row[0]))
+            with open(msg_out + ".tok", "w") as tok:
+                tok.write(str(row[1]))
         # finish=None -> still streaming -> none
 except (sqlite3.Error, OSError, json.JSONDecodeError):
     status = "none"
@@ -458,54 +453,7 @@ turn_status() {  # $1=rollout $2=msg_out_file
         pi)       turn_status_pi "$@"; return ;;
         opencode) turn_status_opencode "$@"; return ;;
     esac
-    python3 - "$1" "$2" <<'PYEOF'
-import base64, json, os, sys
-rollout, msg_out = sys.argv[1], sys.argv[2]
-status = "none"
-try:
-    with open(rollout, "rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        position = fh.tell()
-        chunks = []
-        lines_needed = 400
-        while position > 0 and lines_needed > 0:
-            size = min(65536, position)
-            position -= size
-            fh.seek(position)
-            chunk = fh.read(size)
-            lines_needed -= chunk.count(b"\n")
-            chunks.append(chunk)
-        tail = b"".join(reversed(chunks)).decode("utf-8", "replace").splitlines()
-        # freshness counter: total terminal events in the whole file —
-        # monotonic across turns; a stale completion can never exceed the
-        # count taken at feed time
-        fh.seek(0)
-        import re as _re
-        pat = _re.compile(rb'"type":\s*"task_complete"')
-        total = sum(1 for line in fh if pat.search(line))
-    for line in reversed(tail):
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue
-        payload = d.get("payload") if isinstance(d, dict) else None
-        if not isinstance(payload, dict) or payload.get("type") != "task_complete":
-            continue
-        if payload.get("error"):
-            status = "error"
-            break
-        status = "clean"
-        msg = payload.get("last_agent_message")
-        msg = msg if isinstance(msg, str) else ""
-        with open(msg_out, "wb") as out:
-            out.write(msg.encode("utf-8", "replace"))
-        with open(msg_out + ".tok", "w") as tok:
-            tok.write(str(total))
-        break
-except OSError:
-    status = "none"
-print(status)
-PYEOF
+    turn_status_file codex "$@"
 }
 
 # ---- queue ------------------------------------------------------------------
@@ -538,6 +486,22 @@ banner_set() {  # $1=横幅文本
     return 0
 }
 
+# Snapshot BEFORE every feed, including feedback. A worker may finish before
+# send-keys returns; taking the baseline afterwards loses that completion.
+feed_turn() {
+    ck_run_check || return 125
+    require_gate_check || return 1
+    rollout="$(find_rollout "$pane")"
+    feed_path="$rollout"
+    feed_size="$(terminal_count "$rollout")"
+    last_path="$rollout"
+    last_size="$(rollout_size "$rollout")"
+    busy_path="$last_path"; busy_size="$last_size"
+    feed_started=$(date +%s)
+    last_progress_ts=$feed_started
+    feed_msg "$pane" "$1"
+}
+
 # 状态快照: 桌面面板(menu bar app)的数据源, 每次状态变化即覆盖写
 # 项目登记表: 桌面面板发现项目的机制
 run_driver() {  # $1=pane
@@ -558,25 +522,25 @@ run_driver() {  # $1=pane
     # message seq) is strictly newer than the rollout state at feed time —
     # otherwise a previous task's stale completion could be accepted when a
     # fed turn dies without emitting its own terminal event
-    local feed_size=0
+    local feed_size=0 feed_path="" feed_started=0 busy_path="" busy_size=0
     # turn_status 结果缓存: rollout 只追加不改写, (路径,大小) 相同则状态必然
     # 相同 — 跳过整文件重扫 (长会话 rollout 可达数十 MB, 此前每个轮询全量读)
     local sts_path="" sts_size=-1 sts_val=""
-    local gate_out review_out rc bugs cur_size
+    local gate_out review_out rc bugs cur_size changed
 
+    mkdir -p ".codingkeeper" 2>/dev/null || return 1
+    runner_lock_acquire || return 1
+    trap loop_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
     migrate_state_dir
     register_project
-    mkdir -p ".codingkeeper" 2>/dev/null
-    if [ ! -d ".codingkeeper" ]; then
-        log "cannot create .codingkeeper in $(pwd) — giving up"
+    review_groups_prepare || return 1
+    if ! leaf_recover || ! require_gate_check; then
+        touch .codingkeeper/loop.halt
+        log "parked: acceptance recovery or required gate failed"
         return 1
     fi
-    # two drivers on one pane would interleave feeds into the composer
-    if [ -f ".codingkeeper/loop.pid" ] && kill -0 "$(cat ".codingkeeper/loop.pid" 2>/dev/null)" 2>/dev/null; then
-        log "another driver (pid $(cat ".codingkeeper/loop.pid")) is already running for this project — giving up"
-        return 1
-    fi
-    printf '%s\n' "$$" > ".codingkeeper/loop.pid"
     # sweep temp files left by kill -9'd drivers (the EXIT trap cannot run then)
     rm -f ".codingkeeper"/.loop-msg.* ".codingkeeper"/.loop-gate.* ".codingkeeper"/.loop-review.* 2>/dev/null
     msgfile=".codingkeeper/.loop-msg.$$"
@@ -612,12 +576,31 @@ run_driver() {  # $1=pane
             continue
         fi
 
+        if [ "$mode" = "task" ] && [ "$phase" = "work" ] && [ "$feed_started" -gt 0 ] && [ $(( $(date +%s) - feed_started )) -ge "$CODEXC_TURN_TIMEOUT" ]; then
+            log "parked: worker turn exceeded ${CODEXC_TURN_TIMEOUT}s"
+            notify "循环挂起: 回合超过 ${CODEXC_TURN_TIMEOUT}s — $task"
+            mode="halt"; phase=""
+            touch ".codingkeeper/loop.halt"
+            continue
+        fi
         if ! pane_idle "$pane"; then
+            if [ "$mode" = "task" ]; then
+                rollout="$(find_rollout "$pane")"
+                cur_size="$(rollout_size "$rollout")"
+                if [ "$rollout" != "$busy_path" ] || [ "$cur_size" != "$busy_size" ]; then
+                    last_progress_ts=$(date +%s)
+                    busy_path="$rollout"; busy_size="$cur_size"
+                fi
+            fi
             continue
         fi
 
         if [ "$mode" = "idle" ]; then
-            line="$(queue_next ".codingkeeper/queue.md")"
+            if ! line="$(queue_next ".codingkeeper/queue.md")"; then
+                log "parked: queue read failed"
+                mode="halt"; touch .codingkeeper/loop.halt
+                continue
+            fi
             if [ -z "$line" ]; then
                 if [ -z "$IDLE_PROMPT" ]; then
                     if [ "$empty_logged" = "0" ]; then
@@ -627,23 +610,19 @@ run_driver() {  # $1=pane
                     continue
                 fi
                 # burn mode: feed the standing prompt instead of idling
-                task_kind="idle"; task="(idle 持续改进)"
-                if ! feed_msg "$pane" "$IDLE_PROMPT"; then
+                task_kind="idle"; task="(idle 持续改进)"; task_b64=""
+                if ! leaf_begin ""; then
+                    log "parked: leaf baseline failed"
+                    mode="halt"; touch .codingkeeper/loop.halt
+                    continue
+                fi
+                if ! feed_turn "$IDLE_PROMPT"; then
                     log "failed to feed idle prompt, retrying next poll"
                     continue
                 fi
                 mode="task"; phase="work"
                 gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
                 done_path=""; done_size=0
-                last_progress_ts=$(date +%s)
-                rollout="$(find_rollout "$pane")"
-                if [ -n "$rollout" ]; then
-                    last_path="$rollout"
-                    last_size=$(rollout_size "$rollout")
-                else
-                    last_path=""; last_size=0
-                fi
-                feed_size=$(terminal_count "$rollout")
                 head_at_feed=$(git rev-parse HEAD 2>/dev/null || echo none)
                 CK_TURN_TS=$(date +%s)
                 banner_set "🔥 空闲燃烧: 持续改进与收尾审查 (队列空)"
@@ -659,24 +638,18 @@ run_driver() {  # $1=pane
                 notify "dry 试跑完成, 未发送任何内容"
                 return 0
             fi
-            if ! feed_msg "$pane" "[codexc-loop] 队列任务: $task —— 完成后若有代码改动请 git commit, 最后一条消息以 TASK_RESULT: DONE 结尾 (受阻则 TASK_RESULT: BLOCKED: 原因)"; then
+            if ! leaf_begin "$task_b64"; then
+                log "parked: leaf baseline failed"
+                mode="halt"; touch .codingkeeper/loop.halt
+                continue
+            fi
+            if ! feed_turn "[codexc-loop] 队列任务: $task —— 完成后若有代码改动请 git commit, 最后一条消息以 TASK_RESULT: DONE 结尾 (受阻则 TASK_RESULT: BLOCKED: 原因)"; then
                 log "failed to feed task, retrying next poll"
                 continue
             fi
             mode="task"; phase="work"
             gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
             done_path=""; done_size=0
-            last_progress_ts=$(date +%s)
-            # seed with the rollout as it exists NOW (including the previous
-            # task's tail), so only post-feed growth counts as activity
-            rollout="$(find_rollout "$pane")"
-            if [ -n "$rollout" ]; then
-                last_path="$rollout"
-                last_size=$(rollout_size "$rollout")
-            else
-                last_path=""; last_size=0
-            fi
-            feed_size=$(terminal_count "$rollout")
             ready_n="$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || true)"
             ready_n="${ready_n:-0}"   # grep -c 无匹配时打 0 但退出 1, 不能再 || echo 0 (会变成两行)
             CK_TURN_TS=$(date +%s)
@@ -685,28 +658,31 @@ run_driver() {  # $1=pane
             continue
         fi
 
-        # mode == task, pane idle -> the turn ended; read its outcome.
-        # stall check FIRST (before find_rollout): a fed task with zero rollout
-        # progress for STALL seconds means the pane is stuck on a modal
-        # (trust/login gates) which may not even have a rollout yet
-        if [ $(( $(date +%s) - last_progress_ts )) -ge "$CODEXC_LOOP_STALL" ]; then
-            notify "循环挂起: 投喂后 ${CODEXC_LOOP_STALL}s 无进展 — 请查看 TUI 是否停在信任门/登录等界面 ($task)"
-            log "parked: no rollout progress for ${CODEXC_LOOP_STALL}s after feed (modal blocking?)"
-            mode="halt"; phase=""
-            touch ".codingkeeper/loop.halt"
-            continue
-        fi
+        # Inspect progress before applying the stall timeout: a long turn may
+        # have finished while the TUI was busy for more than LOOP_STALL.
         rollout="$(find_rollout "$pane")"
-        if [ -z "$rollout" ]; then
-            log "no rollout found for pane $pane; waiting"
-            continue
-        fi
         cur_size=$(rollout_size "$rollout")
         if [ "$rollout" != "$last_path" ] || [ "$cur_size" != "$last_size" ]; then
             activity=1
             last_progress_ts=$(date +%s)
         else
             activity=0
+        fi
+        if [ $(( $(date +%s) - last_progress_ts )) -ge "$CODEXC_LOOP_STALL" ]; then
+            notify "循环挂起: 投喂后 ${CODEXC_LOOP_STALL}s 无进展 — 请检查 TUI ($task)"
+            log "parked: no rollout progress for ${CODEXC_LOOP_STALL}s after feed"
+            mode="halt"; phase=""
+            touch ".codingkeeper/loop.halt"
+            continue
+        fi
+        if [ -z "$rollout" ]; then
+            continue
+        fi
+        if [ -n "$feed_path" ] && [ "$rollout" != "$feed_path" ]; then
+            log "parked: rollout changed during task; refusing another session's completion"
+            mode="halt"; phase=""
+            touch ".codingkeeper/loop.halt"
+            continue
         fi
         last_path="$rollout"; last_size="$cur_size"
         if [ "$rollout" = "$sts_path" ] && [ "$cur_size" = "$sts_size" ] && [ -n "$sts_val" ]; then
@@ -750,8 +726,11 @@ run_driver() {  # $1=pane
             if [ "$activity" != "1" ]; then
                 continue   # nothing new since the feed; waiting for the turn
             fi
-            if [ "$rollout" = "$done_path" ] && [ "$cur_size" -le "$done_size" ]; then
-                continue   # completion already consumed; waiting for the next turn
+            token="$(cat "$msgfile.tok" 2>/dev/null || echo 0)"
+            case "$token" in ''|*[!0-9]*) token=0 ;; esac
+            if [ "$token" -le "$feed_size" ]; then
+                log "stale completion ignored (token $token <= feed baseline $feed_size)"
+                continue
             fi
             done_path="$rollout"; done_size=$cur_size
         fi
@@ -760,12 +739,12 @@ run_driver() {  # $1=pane
         case "$marker" in
             DONE)
                 if [ "$task_kind" = "idle" ]; then
-                    head_now="$(git rev-parse HEAD 2>/dev/null || echo none)"
-                    # exclude the loop's own runtime dir: loop.pid etc. would
-                    # otherwise make the tree permanently "dirty" and the idle
-                    # corroboration would never pass in git projects
-                    dirty="$(git status --porcelain -- . ':(exclude).codingkeeper' 2>/dev/null | head -1)"
-                    if grep -q '(idle)' "$msgfile" 2>/dev/null && [ "$head_now" = "$head_at_feed" ] && [ -z "$dirty" ]; then
+                    changed="$(leaf_changed)" || {
+                        log "parked: leaf snapshot failed"
+                        mode="halt"; touch .codingkeeper/loop.halt
+                        continue
+                    }
+                    if [ "$changed" = 0 ]; then
                         # genuinely nothing to do: corroborated by the worker's
                         # idle claim AND a clean tree at the same commit
                         idle_count=$((idle_count + 1))
@@ -802,9 +781,15 @@ run_driver() {  # $1=pane
 
         if [ "$phase" = "work" ]; then
             phase="gate"
-            gate_run "$gate_out"
+            leaf_gate_run "$gate_out"
             rc=$?
             last_progress_ts=$(date +%s)
+            [ "$rc" != 125 ] || { phase="work"; continue; }
+            if [ "$rc" = 126 ]; then
+                log "parked: gate candidate changed or evidence failed"
+                mode="halt"; touch .codingkeeper/loop.halt
+                continue
+            fi
             if [ "$rc" -ne 0 ]; then
                 gate_rounds=$((gate_rounds + 1))
                 if [ "$gate_rounds" -gt "$CODEXC_GATE_RETRIES" ]; then
@@ -816,7 +801,7 @@ run_driver() {  # $1=pane
                 fi
                 banner_set "🔧 gate 修复中 (第 $gate_rounds/$CODEXC_GATE_RETRIES 轮) — $task"
                 log "gate failed (round $gate_rounds/$CODEXC_GATE_RETRIES) rc=$rc"
-                if feed_msg "$pane" "[codexc-loop] gate 未通过(第 $gate_rounds 次): $(gate_tail "$gate_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
+                if feed_turn "[codexc-loop] gate 未通过(第 $gate_rounds 次): $(gate_tail "$gate_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
                     last_progress_ts=$(date +%s)
                 else
                     log "gate feedback deferred (pane busy?) — will retry when the rollout grows"
@@ -838,7 +823,8 @@ run_driver() {  # $1=pane
                 touch ".codingkeeper/loop.halt"
                 continue
             fi
-            bugs="$(review_run "$task" "$review_out")"
+            review_collect "$task" "$review_out"
+            bugs="$REVIEW_RESULT"
             last_progress_ts=$(date +%s)
             if [ "$bugs" = "timeout" ]; then
                 notify "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task"
@@ -847,17 +833,23 @@ run_driver() {  # $1=pane
                 touch ".codingkeeper/loop.halt"
                 continue
             fi
-            if [ "$bugs" = "parse-fail" ]; then
+            case "$bugs" in ''|*[!0-9]*) review_valid=0 ;; *) review_valid=1 ;; esac
+            if [ "$review_valid" = "0" ]; then
                 notify "循环挂起: 审查输出无法解析 (无 BUGS: 行) — $task"
                 log "parked: review output unparseable (tail: $(review_tail "$review_out"))"
                 mode="halt"; phase=""
                 touch ".codingkeeper/loop.halt"
                 continue
             fi
+            if ! leaf_verify; then
+                log "parked: review changed candidate"
+                mode="halt"; touch .codingkeeper/loop.halt
+                continue
+            fi
             if [ "$bugs" -gt 0 ]; then
                 zero_streak=0
                 log "review round $review_rounds found $bugs bug(s)"
-                if feed_msg "$pane" "[codexc-loop] 独立审查发现 $bugs 个 bug: $(review_tail "$review_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
+                if feed_turn "[codexc-loop] 独立审查发现 $bugs 个 bug: $(review_tail "$review_out") —— 请修复后以 TASK_RESULT: DONE 结尾"; then
                     last_progress_ts=$(date +%s)
                 else
                     log "review feedback deferred (pane busy?) — will retry when the rollout grows"
@@ -876,22 +868,16 @@ run_driver() {  # $1=pane
                     phase="work"   # re-run the gate when the real completion lands
                     continue
                 fi
-                if [ "$task_kind" = "idle" ]; then
-                    marked="marked"   # no queue line to check off
-                else
-                    marked="$(queue_mark_done ".codingkeeper/queue.md" "$task_b64")"
+                if ! leaf_accept "$task_b64" "accepted after $review_rounds review round(s), gate retries $gate_rounds"; then
+                    notify "验收事务无法提交，任务保留待处理"
+                    log "parked: acceptance transaction failed"
+                    mode="halt"; phase=""
+                    touch .codingkeeper/loop.halt
+                    continue
                 fi
-                journal_append "$task" "accepted after $review_rounds review round(s), gate retries $gate_rounds"
                 notify "任务通过验收: $task"
                 banner_set "✅ 已验收: $task ｜ 燃烧继续"
             log "task accepted: $task (queue line: ${marked:-not-found})"
-                if [ "$marked" != "marked" ]; then
-                    notify "循环挂起: 队列里找不到已验收的任务行（可能被改写）— 请人工核对 queue.md"
-                    log "parked: accepted task line not found in queue.md"
-                    mode="halt"; phase=""
-                    touch ".codingkeeper/loop.halt"
-                    continue
-                fi
                 mode="idle"; phase=""
                 CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)
             fi
@@ -938,7 +924,7 @@ cmd_init() {
     local agents_file="AGENTS.md"
     [ "$CODEXC_TOOL" = "claude" ] && agents_file="CLAUDE.md"
     if [ ! -f ".codingkeeper/.gitignore" ]; then
-        printf '.loop-*\nloop.pid\n' > ".codingkeeper/.gitignore"
+        printf '.loop-*\nloop.pid\nrunner.lock\nrunner.owner\n.status-*\n.queue-*\n.runner-*\n' > ".codingkeeper/.gitignore"
         echo "  created .codingkeeper/.gitignore (transient driver files stay out of git)"
     fi
     if [ ! -f ".codingkeeper/queue.md" ]; then
@@ -978,6 +964,7 @@ EOF
         else
             cat > ".codingkeeper/gate.sh" <<'EOF'
 #!/bin/bash
+# CK_GATE_PLACEHOLDER=1
 # 未探测到测试命令 — 把本项目的真实测试放进来; 外环只认退出码。
 # 示例: set -e; pytest -q --cov-fail-under=80
 echo "(gate placeholder: 未探测到测试命令 — 请编辑本文件)"
@@ -1302,6 +1289,34 @@ it_fake_review() {  # $1=script path $2..=sequence of bug counts
     printf '%s\n' "$*" > "$script.counts"
 }
 
+it_hanging_fixture() {  # $1=script $2=own PID record $3=gate|review
+    {
+        printf '#!/bin/bash\n'
+        printf 'pidfile=%q\n' "$2"
+        [ "$3" != "review" ] || printf 'cat > /dev/null\n'
+        cat <<'SHFIXTURE'
+sleep 120 &
+child=$!
+printf '%s\n%s\n' "$$" "$child" > "$pidfile"
+wait "$child"
+SHFIXTURE
+        [ "$3" != "review" ] || printf 'echo "BUGS: 0"\n'
+    } > "$1"
+    chmod +x "$1"
+}
+
+it_assert_fixture_exited() {  # $1=label $2=this scenario's parent/child PID file
+    local helper
+    helper="$(dirname "$(readlink -f "$SELF" 2>/dev/null || printf '%s' "$SELF")")/tests/fixture_processes.py"
+    if python3 "$helper" "$2"; then
+        echo "  ok: $1 child tree terminated (own parent + child PIDs)"
+    else
+        echo "  FAIL: $1 child survived kill_tree or PID evidence missing"
+        IT_FAILURES=$((IT_FAILURES + 1))
+        return 1
+    fi
+}
+
 it_append_complete() {  # $1=rollout(path or message-dir) $2=marker-message text
     if [ "${IT_TOOL:-codex}" = "opencode" ]; then
         python3 - "$2" "${OPENCODE_DATA_DIR:?opencode harness needs OPENCODE_DATA_DIR}" <<'PYEOF'
@@ -1497,7 +1512,7 @@ cmd_selftest_integration() {
     echo "== scenario 8: hanging gate -> timeout + tree kill =="
     root="$(it_world "$base-s8")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s8-$$"
     printf '# q\n## ready\n- [ ] 任务H\n' > "$root/proj/.codingkeeper/queue.md"
-    printf '#!/bin/bash\nsleep 120 #fi-gate-marker\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    it_hanging_fixture "$root/proj/.codingkeeper/gate.sh" "$root/gate.pids" gate
     it_fake_review "$root/review.sh" 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
     ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
@@ -1509,7 +1524,7 @@ cmd_selftest_integration() {
     it_append_complete "$rolloc" "TASK_RESULT: DONE"
     it_wait "gate timeout fed back" "$root/fed.log" 'gate timed out after 5s' 40
     sleep 1
-    pgrep -f 'gate.sh' >/dev/null 2>&1 && { echo "  FAIL: gate child survived kill_tree"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: gate child tree reaped"
+    it_assert_fixture_exited gate "$root/gate.pids"
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
     tmux kill-session -t "$sess" 2>/dev/null
 
@@ -1517,18 +1532,19 @@ cmd_selftest_integration() {
     root="$(it_world "$base-s9")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s9-$$"
     printf '# q\n## ready\n- [ ] 任务I\n' > "$root/proj/.codingkeeper/queue.md"
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
-    { echo '#!/bin/bash'; echo 'cat > /dev/null'; echo 'sleep 120 #fi-review-marker'; echo 'echo "BUGS: 0"'; } > "$root/review.sh"
-    chmod +x "$root/review.sh"; printf '1\n' > "$root/review.sh.counts"
+    it_hanging_fixture "$root/review.sh" "$root/review.pids" review
+    # Four concurrent harnesses also start the Python group supervisor. Give
+    # startup headroom; the fixture must still record both PIDs and time out.
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
     ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
-      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_TIMEOUT=5 \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_TIMEOUT=15 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
     it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
     sleep 2
     it_append_complete "$rolloc" "TASK_RESULT: DONE"
     it_wait_file "halt file (review timeout park)" "$root/proj/.codingkeeper/loop.halt" 40
-    pgrep -f 'review.sh' >/dev/null 2>&1 && { echo "  FAIL: reviewer child survived kill_tree"; IT_FAILURES=$((IT_FAILURES + 1)); } || echo "  ok: reviewer child tree reaped"
+    it_assert_fixture_exited reviewer "$root/review.pids"
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
     tmux kill-session -t "$sess" 2>/dev/null
 
@@ -1586,6 +1602,7 @@ EOF
             rolloc="ses_scratch"; export OPENCODE_DATA_DIR="$root/home/oc"
             worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"
         else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi
+    ( cd "$root/proj" && git init -q && printf 'baseline\n' > README.md && git add README.md && git commit -qm baseline )
     printf '# q\n## ready\n(空 — burn 模式应投喂持续改进指令)\n' > "$root/proj/.codingkeeper/queue.md"
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
@@ -1608,6 +1625,7 @@ EOF
     [ "$bs" = "top" ] && echo "  ok: 顶部横幅已启用" || { echo "  FAIL: 顶部横幅未启用 ($bs)"; IT_FAILURES=$((IT_FAILURES+1)); }
     case "$bf" in *空闲燃烧*) echo "  ok: 横幅内容正确" ;; *) echo "  FAIL: 横幅内容 ($bf)"; IT_FAILURES=$((IT_FAILURES+1)); ;; esac
     sleep 2
+    printf 'actual boundary fixture change\n' >> "$root/proj/README.md"
     it_append_complete "$rolloc" "修好了一个边界问题 TASK_RESULT: DONE"
     it_wait "idle work accepted into journal" "$root/proj/.codingkeeper/journal" 'idle 持续改进' 60
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
@@ -1799,6 +1817,11 @@ PYEOF
 }
 
 # ---- dispatch ---------------------------------------------------------------
+
+# Internal library entry for the watcher; no driver/CLI side effects.
+if [ "${CODEXC_LOOP_LIB_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
     init)    shift; cmd_init ;;

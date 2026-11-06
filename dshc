@@ -22,14 +22,15 @@ REPO="$(dirname "$SELF")"
 case "${1:-}" in
     run)
         shift
-        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
+        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$(printf '%q' "$REPO/codexc-dsh-worker")}"
         export DSH_DIR="${DSH_DIR:-$HOME/.dsh}"
         exec "$REPO/codexc-headless" run "$@" ;;
     init|status|selftest|selftest-integration)
-        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-dsh-worker}"
+        export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$(printf '%q' "$REPO/codexc-dsh-worker")}"
         exec "$REPO/codexc-headless" "$@" ;;
-    *)
+    -h|--help|help|"")
         sed -n '3,11p' "$0" | sed -E 's/^# ?//'
-        [ $# -gt 0 ] && { echo; echo "dshc: '$1' 不是 CodingKeeper 动词 — 如需透传 dsh 本体请直接运行 dsh" >&2; exit 1; }
         exit 0 ;;
+    *)
+        exec "${DSH_BIN:-dsh}" "$@" ;;
 esac

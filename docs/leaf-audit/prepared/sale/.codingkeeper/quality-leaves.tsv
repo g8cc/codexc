@@ -1,0 +1,20 @@
+# quality-framework -> sale mapping, audited 2026-11-05
+# Status is descriptive; queue.md alone is runnable. Old mapping archived.
+# ID<TAB>status<TAB>evidence / successor
+ENG-04/SEC-BE-03/SEC-FE-01/SEC-FE-02/BUG-FE-01/BUG-FE-04	HISTORICAL	v1 scope and limitations in leaf-audit-2026-11-05.md; not full v2/browser acceptance
+BUG-FE-06	REVIEW	BUG-FE-06-RECONCILE; current 4 behavior tests pass
+EDGE-FE-01/ENG-02/ENG-01/ENG-07/PERF-FE-05/PERF-FE-01	BASELINE	existing tests/source/measurements sufficient for current stated scope; do not create duplicate test leaves
+STAB-FE-01	READY	clipboard failure and visible retry behavior
+EDGE-FE-03/A11Y-01/A11Y-04	MERGED	A11Y-KEYBOARD
+ENG-05	BLOCKED	M4-START, actual copied commands and v2 delivery
+EDGE-FE-02	REVIEW	M4-ACCEPT, real browser viewport/use flow
+A11Y-02	BLOCKED	A11Y-CONTRAST after dependent views exist
+BUG-BE-*/EDGE-BE-*/SEC-BE-01/02/05/06/STAB-BE-*	REASSESS	v2 now has loopback server and model bridge; old no-backend skip invalid; use concrete M2C-BOUNDARY/M2C-ACCEPT evidence first, not auto-create all leaves
+STAB-FE-02/PERF-FE-08	REASSESS	v2 generation is async/networked; timeout/retry behavior belongs to generation acceptance
+PERF-FE-02/03/04	MEASURE-IF-NEEDED	browser observations require target load/device; no automatic metric scaffolding
+PERF-BE-*/PERF-DB-*/PERF-MW-*	MEASURE-IF-NEEDED	require actual bottleneck and project load; IndexedDB is not relational server DB
+SEC-MW-01/02	REASSESS	loopback HTTP request boundary, not general public gateway; inspect concrete origins/routes
+OBS-*	SCOPE	local-only privacy, no blanket telemetry pipeline; failures must be visible and logs redacted
+XPROJ-*	SCOPE	browser/server/ZCode CLI contracts count even in one repo; do not infer no contracts from peers=[]
+ENG-03/ENG-09/ENG-10	NOT-APPLICABLE	no existing linter/SQL migrations/npm dependencies; re-evaluate if architecture changes
+BUG-FE-02/05/PERF-FE-06/07/A11Y-03	NOT-APPLICABLE	no route/page-list/image requirement currently established; recorder/media accessibility evaluated in its own flow

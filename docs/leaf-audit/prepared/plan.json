@@ -1,0 +1,219 @@
+[
+  {
+    "project": "sale",
+    "relative": ".codingkeeper/queue.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/.codingkeeper/queue.md",
+    "before": "7d9512da020d8219e81a7b5f2148c24e456e2ec1142a63358316e9844df06eb3",
+    "after": "898bc49eeb68875210b7c81a7678cd230d5ea853e634f467ed8c659535ae5e67"
+  },
+  {
+    "project": "sale",
+    "relative": ".codingkeeper/leaf-audit-2026-11-05.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/.codingkeeper/leaf-audit-2026-11-05.md",
+    "before": null,
+    "after": "31e7037b3cee870aa1451d805c4d0888a3b08f25651867efff5758d87aedf4e3"
+  },
+  {
+    "project": "sale",
+    "relative": ".codingkeeper/review-leaf.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/.codingkeeper/review-leaf.sh",
+    "before": "1176736a74cd33f071a2aaa33c1f1d840aa241cc259a8ff65f2d5b7d18cec76e",
+    "after": "a2a3a6169a127df9337d3f12ecc15afc296ee8c05dc4d02f6ba35e7d6c769a35"
+  },
+  {
+    "project": "sale",
+    "relative": "AGENTS.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/AGENTS.md",
+    "before": "ae62a2a59a82fc07b22c627fa46b60b5223ae0ba84ec7cdf0d9839c60b0af3bb",
+    "after": "350f75a030c14698ee4becfb6c879c211b2e0cd39a5ad3869383fa382eaa5db5"
+  },
+  {
+    "project": "soul2soul",
+    "relative": ".codingkeeper/queue.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/soul2soul/.codingkeeper/queue.md",
+    "before": "74088a98753e402b8def0f1c8f99f7cff887c0230fd27e75ce37fcf64c4f9d26",
+    "after": "12f5684bdc9bddb1dce32768909753e3acc6e3323c97c416c48a196a2d17497b"
+  },
+  {
+    "project": "soul2soul",
+    "relative": ".codingkeeper/leaf-audit-2026-11-05.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/soul2soul/.codingkeeper/leaf-audit-2026-11-05.md",
+    "before": null,
+    "after": "d7aa7ed8912b227157c8812d08d21c112ca2badbaaf0b9b8ba0b500a361c1091"
+  },
+  {
+    "project": "soul2soul",
+    "relative": ".codingkeeper/review-leaf.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/soul2soul/.codingkeeper/review-leaf.sh",
+    "before": "1176736a74cd33f071a2aaa33c1f1d840aa241cc259a8ff65f2d5b7d18cec76e",
+    "after": "a2a3a6169a127df9337d3f12ecc15afc296ee8c05dc4d02f6ba35e7d6c769a35"
+  },
+  {
+    "project": "soul2soul",
+    "relative": "AGENTS.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/soul2soul/AGENTS.md",
+    "before": "4c8900c52d91a1bc8a60f9c1acd46c13baf281cbd7472f60c4e3de61b072c87e",
+    "after": "b60f86886322deb4af4f048c8b5656b62018528a34ea37dc72afea04b17c4c60"
+  },
+  {
+    "project": "fingerprint",
+    "relative": ".codingkeeper/queue.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/fingerprint/.codingkeeper/queue.md",
+    "before": "8e15a3f793611754e81ea6dc035eaacaa775ff6440fc81f3e1c1b71ee3f117ad",
+    "after": "ef3c2eb76c5df8bbf8fe2d9439d547fefc81c25b8f1de69bab7beaf38924034a"
+  },
+  {
+    "project": "fingerprint",
+    "relative": ".codingkeeper/leaf-audit-2026-11-05.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/fingerprint/.codingkeeper/leaf-audit-2026-11-05.md",
+    "before": null,
+    "after": "827c4f8dd8327a8bb4f5006c246a560431e18e4b1a23f2beb06cfa4bd210eaa5"
+  },
+  {
+    "project": "fingerprint",
+    "relative": ".codingkeeper/review-leaf.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/fingerprint/.codingkeeper/review-leaf.sh",
+    "before": "1176736a74cd33f071a2aaa33c1f1d840aa241cc259a8ff65f2d5b7d18cec76e",
+    "after": "a2a3a6169a127df9337d3f12ecc15afc296ee8c05dc4d02f6ba35e7d6c769a35"
+  },
+  {
+    "project": "fingerprint",
+    "relative": "AGENTS.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/fingerprint/AGENTS.md",
+    "before": "f623add71689585b627fd7164b4333839f6311bd5fa200838b69e439a6420bca",
+    "after": "b1f173636b7ce91437cbb49ee766d739e461830834e89c31748d2c7cf350d59d"
+  },
+  {
+    "project": "test",
+    "relative": ".codingkeeper/queue.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/test/.codingkeeper/queue.md",
+    "before": "4886b752cee9847abd165615a2d4946161523533dd9a17fc638d5d6e8c7e04b5",
+    "after": "86440120d66011ad79c58d3e748487af9a416385849988ce939ae8636780e8fc"
+  },
+  {
+    "project": "test",
+    "relative": ".codingkeeper/gate.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/test/.codingkeeper/gate.sh",
+    "before": "c3c6f3387a3c4f533e7001e516aa0bfffa2364a127b4e82eb4f166c705bc9652",
+    "after": "3f57113d7f0728ccf7bc056e8008e8a8a7c96c2659dfb9fa1c638b905f0fea3f"
+  },
+  {
+    "project": "test",
+    "relative": ".codingkeeper/leaf-audit-2026-11-05.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/test/.codingkeeper/leaf-audit-2026-11-05.md",
+    "before": null,
+    "after": "0fec7baa6fd90ddc036aa8a786b2210052f5f6a60dcdb8ab5ddcd38dbcb7cfc1"
+  },
+  {
+    "project": "zcode-exp",
+    "relative": ".codingkeeper/queue.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/zcode-exp/.codingkeeper/queue.md",
+    "before": "5573fc9b2371624301d6734554476577e8e8191d1c3ad63e95019dd940531c29",
+    "after": "cfa833c753f7c2b236d4c47ff9a408aa3524453058d455d33caca566d699a646"
+  },
+  {
+    "project": "zcode-exp",
+    "relative": ".codingkeeper/gate.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/zcode-exp/.codingkeeper/gate.sh",
+    "before": "22cd8c9f28274631793e92924c16939d5eb3246d46f76662dad4c0f0472855de",
+    "after": "3f57113d7f0728ccf7bc056e8008e8a8a7c96c2659dfb9fa1c638b905f0fea3f"
+  },
+  {
+    "project": "zcode-exp",
+    "relative": ".codingkeeper/leaf-audit-2026-11-05.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/zcode-exp/.codingkeeper/leaf-audit-2026-11-05.md",
+    "before": null,
+    "after": "0fec7baa6fd90ddc036aa8a786b2210052f5f6a60dcdb8ab5ddcd38dbcb7cfc1"
+  },
+  {
+    "project": "sale",
+    "relative": ".codingkeeper/gate.sh",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/.codingkeeper/gate.sh",
+    "before": "2a8c6d02173fa8c9cbe7ba591b960a035cb24c43fdfc593cc231634b6e5dcc13",
+    "after": "8beaf9610d4b7d58a7facbaf505ea9a78f821fe7e7a1a3614e6c4031513faeb3"
+  },
+  {
+    "project": "sale",
+    "relative": ".codingkeeper/quality-leaves.tsv",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/sale/.codingkeeper/quality-leaves.tsv",
+    "before": "2320aed8573520363f7d09564ae52f70d7081e52d79816413610daf6711777f8",
+    "after": "52ea0f98ee4ade722fae1ad72680fe661b6c5fac9775d14364b9d6596cfe87f2"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "AGENTS.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/AGENTS.md",
+    "before": "d0e988c862046b85f8fc7bb33dc31d71775b653baeef19d19fc32b3db8d57aa1",
+    "after": "2183dabfb52fb01ed0f52bbb443af83a6e8ade224fa04e6a396d8d743db6796d"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "DIMENSIONS.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/DIMENSIONS.md",
+    "before": "33854c0ba5be662dc40716e8844cd39fff6051b123549e9583bb67925423a8e1",
+    "after": "929d142c395bdd31bee072ae6d301a1e64c6b56f54855dc14c8eeb7efaa4b2d0"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "PRIORITY.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/PRIORITY.md",
+    "before": "118ce91abb0b693d0578fcab8e5f2366882acc3f1fc5955b9af5590127d04ada",
+    "after": "4646a1889096262a230a016754fe8386abbc4440f04580676305bbf9780b09d5"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "README.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/README.md",
+    "before": "cd098a112b8462696dbd5bc54c4ff6e4de4f54e7174242c810ef491d45f4cccf",
+    "after": "51dd79d47d0987f8636752522205b5699b4c47015eaa7e266a352b120ec586da"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "SKILL.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/SKILL.md",
+    "before": "eb01d502e0ec15f9a9b9320e54eceedef37b5ca8d0ef1cafc2dbe50c933421eb",
+    "after": "2081d78f20fcf970e8d24d1df7659540f3e1ab5ebfa544ae8e66814c657aad7f"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "job-contract.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/job-contract.md",
+    "before": "a0200c80bf5782c3402be7c39ddf7e2c0e1a08c2fbd5fadb4d5716c69f62628d",
+    "after": "d2965a70fa1b98d0cac18d0a732f48ce8a88293b32ed0058577ee56199375535"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "project-profile.example.yaml",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/project-profile.example.yaml",
+    "before": "12bfe289f739712ac5c2304a35bad017f1530c3361bac7d39526865588f30b14",
+    "after": "38bf514468e8a0c42d9757b74f8b297097cba0ac7220e7434bc7cb687d658b37"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "scheduler.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/scheduler.md",
+    "before": "63480830ef1d5d03adbb7bead9b6ed43a07132bb0aabb419aee77cb957c498f8",
+    "after": "593274a4d087df0da7652e7b216dd66485bc847debb77b75abbe8b78c538d92c"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "taxonomy.md",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/taxonomy.md",
+    "before": "12cc9d18a59e858b976fca809cbeef65b76114ef52c5b8f83b4aab158ed1a99e",
+    "after": "4b76772cd59562be3ee003baeb6f6ceeddf12a62c0d5664080f00979593fe5eb"
+  },
+  {
+    "project": "quality-framework",
+    "relative": "thresholds.yaml",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/framework/thresholds.yaml",
+    "before": "5682b8c8e8baae1d71d31a0cc609c68f89f39af1aab0dd0d459156dd1cf54418",
+    "after": "84b0a8f9b82e562c5cbdc4e00f833cd38221c086a811c66452ecfcb29b9a319a"
+  },
+  {
+    "project": "fingerprint",
+    "relative": ".codingkeeper/quality-leaves.tsv",
+    "source": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/docs/leaf-audit/prepared/fingerprint/.codingkeeper/quality-leaves.tsv",
+    "before": "e67c0083acc42cf31dd10f082a06899b8fb8c2b707d2111426717938085a3daa",
+    "after": "434194cf150705fabfcb9f7401ba8dd560ccae5005276008e35fff33a9d33af6"
+  }
+]

@@ -1,0 +1,38 @@
+{
+  "scope": "cmd_status aggregation including Bash and reader subprocess startup",
+  "platform": "macOS-26.7.1-x86_64-i386-64bit-Mach-O",
+  "python": "3.14.0",
+  "projects": 100,
+  "repeat": 3,
+  "warmup_each": 1,
+  "fixture": "Each project: 5 ready tasks, 3 completed tasks, journal, status.json; 20% have a live fixture PID.",
+  "sources": {
+    "baseline": {
+      "path": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/codexc/codexc-headless",
+      "sha256": "835d9a46f8ba9d62f609427ad024019eb5af4864a170798ec8d3ff28c9f5fd7a"
+    },
+    "candidate": {
+      "path": "/private/tmp/codexc-audit-6zrruwm2/codexc-headless",
+      "sha256": "57ded401b860cc6df2ba0474b19087a2f221ebfe487f888ad6522a3e65b40761"
+    }
+  },
+  "samples_seconds": {
+    "baseline": [
+      11.374427537899464,
+      11.780967384111136,
+      10.562190188094974
+    ],
+    "candidate": [
+      0.16312158107757568,
+      0.16008280590176582,
+      0.12969035608693957
+    ]
+  },
+  "fixture_unchanged": true,
+  "median_seconds": {
+    "baseline": 11.374427537899464,
+    "candidate": 0.16008280590176582
+  },
+  "speedup_ratio": 71.05339935682622,
+  "median_latency_reduction_percent": 98.59260780053877
+}

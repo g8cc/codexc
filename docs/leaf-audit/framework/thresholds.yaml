@@ -1,0 +1,66 @@
+# schema v2: reference values are diagnostic hints, never automatic defects.
+# This file does not implement enforcement; adapters must opt into schema v2.
+schema_version: 2
+mode: reference_only
+automatic_task_creation: false
+automatic_commit: false
+automatic_rollback: false
+
+scope_review:
+  suggested_file_count: 8
+  hard_file_limit: null
+  action_when_exceeded: review_cohesion_and_document_reason
+
+project_budget_requirements:
+  - source_or_user_result
+  - supported_environment
+  - workload_and_data_scale
+  - measurement_boundary
+  - sample_size_and_repetitions
+  - required_correctness_checks
+  - acceptable_tradeoffs
+# A project-specific accepted contract provides enforced targets.
+# Missing values mean unknown, not permission to use the references as gates.
+project_targets: {}
+
+reference_values:
+  web:
+    lcp_ms: 2500
+    inp_ms: 200
+    cls: 0.1
+    ttfb_ms: 800
+    first_js_gzip_kb: 200
+    max_serial_requests_on_critical_path: 2
+    notes: "Vitals need field/lab and percentile labels; size/count are screening hints."
+  api:
+    p95_ms: 200
+    p99_ms: 500
+    slow_query_ms: 100
+    gateway_added_p95_ms: 20
+    notes: "Use real handler/store/workload; subtracting two p95s is not added-latency p95."
+  resources:
+    db_pool_used_pct: 80
+    notes: "Judge wait/errors/leaks and downstream capacity; utilization alone is not a defect."
+  input_examples:
+    string_bytes: 1048576
+    body_bytes: 1048576
+    notes: "Choose actual field/protocol limits; examples are neither mandated limits nor policy."
+  contracts:
+    inner_timeout_ratio: 0.8
+    clock_skew_s: 30
+    notes: "Actual deadlines include retries/cancellation; clock windows follow security policy."
+  engineering:
+    line_coverage_pct: 70
+    notes: "Coverage is context; tests need discriminating assertions on valuable behavior."
+  accessibility:
+    standard: WCAG_2_2_AA
+    notes: "Confirm supported product/platform; critical access failures are prioritized by impact."
+
+evidence_rules:
+  skip_is_pass: false
+  missing_result_is_pass: false
+  old_artifact_is_current_evidence: false
+  changed_workload_is_comparable_without_explanation: false
+  source_text_match_proves_runtime_behavior: false
+  existing_gap_may_be_deleted_after_retry_limit: false
+

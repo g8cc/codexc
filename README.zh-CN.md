@@ -15,7 +15,7 @@
 ## 环境要求
 
 - macOS
-- [tmux](https://github.com/tmux/tmux) ≥ 3.5（CSI-u 扩展键需要）、`sqlite3`、`python3`
+- [tmux](https://github.com/tmux/tmux) ≥ 3.5（CSI-u 扩展键需要）、`sqlite3`、Python 3.11+（`python3`）
 - [Codex CLI](https://developers.openai.com/codex/)（`npm i -g @openai/codex`）且已登录
 
 ## 快速开始
@@ -42,11 +42,11 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc` | 兼容别名，等同 `ck codex` |
 | `codexc` | 接入/创建本目录的会话 — 默认纯交互，不自动投喂任何内容 |
 | `codexc loop` | 显式装配无人值守交付循环（首次运行自动生成 `.codingkeeper/`；`--no-loop` 强制关闭） |
-| `codexc codex <参数>` | `codexc codex -m o3 --search` → 本目录新开会话并携带 codex 参数 |
+| `codexc codex <参数>` | `codexc codex -m o3 --search` → 启动时携带参数；已有会话时用 `-n <新名字>` 新开 |
 | `codexc resume --last` | 续跑最近一次 codex 会话 |
 | `codexc resume <会话id>` | 续跑指定会话 |
 | `codexc -t 10:00 "prompt"` | 10:00 定时发送（也支持 `+30m`） |
-| `codexc loop` | 同 `codexc`（保留写法，显式表达） |
+| `codexc loop --no-loop` | 纯交互启动；显式 `--no-loop` 优先 |
 | `codexc fuel [codex\|claude]` | 锅炉燃料表：当前 provider、换煤队列、今日/本月消耗、中转错误 |
 | `codexc -T claude` | 驱动 **Claude Code**（循环/门禁/审查完全一致） |
 | `codexc -T opencode` | 驱动 **opencode**（同一管线；会话从 opencode.db 读取） |
@@ -60,13 +60,16 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc-daily pause` / `resume` | 暂停 / 恢复每日任务 |
 | `codexc-daily status` / `uninstall` | 查看状态 / 移除注册 |
 
+`zcodec run` / `ck zcode run` 默认只在 **23:00 至次日 09:00（Asia/Shanghai，UTC+8）** 执行自动任务。白天等待，不发送模型请求；09:00 停止受管的 worker、门禁与独立审查子进程，未验收任务留在队列。配额耗尽等待下一次开放时段，重启 runner 也保留这个等待。面板区分等待时段、等待配额、退避和任务执行。可通过 `CODEXC_ACTIVE_WINDOW=HH:MM-HH:MM` / `CODEXC_ACTIVE_TZ` 调整；无效配置停止执行。人工 `loop.halt` 始终优先，`CODEXC_AUTO_RESUME=0` 禁止配额自动恢复。此规则适用于 ZCode 自动 runner，裸命令和其它工具入口保持原用法。
+
+
 ### 会话命名规则
 
 每个工作目录一个 tmux 会话：取目录 basename，重名时逐级加父目录名，仍冲突则加 `-2`/`-3` 后缀。脱离 = 后台继续；pane 内命令退出则会话自然销毁。
 
 ## 自动 continue 规则
 
-看门狗轮询 Codex 的 `logs_*.sqlite` 错误记录（大小写不敏感），对连续发送执行冷却间隔（默认 10 秒），并短暂等待 TUI 稳定后发送 `continue` + Enter。内置模式覆盖 429 限流、"server error"、"stream error"、overloaded、connection reset、fetch failed、超时等。**默认累计自动 continue 30 次**后暂停并通知；可用 `CODEXC_MAX_CONTINUES` 调整上限（`0` 禁用自动重试）。
+看门狗读取本项目 Codex rollout 的新增错误事件（大小写不敏感），对连续发送执行冷却间隔（默认 10 秒），并短暂等待 TUI 稳定后发送 `continue` + Enter。内置模式覆盖 429 限流、"server error"、"stream error"、overloaded、connection reset、fetch failed、超时等。**默认累计自动 continue 30 次**后暂停并通知；可用 `CODEXC_MAX_CONTINUES` 调整上限（`0` 禁用自动重试）。
 
 两道保险：
 
@@ -101,7 +104,7 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 - 每个完成的任务由独立的只读 `codex exec --ephemeral` 审查上下文。连续 `CODEXC_REVIEW_PASS`（默认 2）次零 bug 才算通过；发现 bug 就回灌修复。重试耗尽会挂起循环（`touch .codingkeeper/loop.halt` 暂停，`rm` 恢复）并发通知。
 - `CODEXC_LOOP_DRY=1 codexc loop` — 只记录动作、不触碰 TUI 的安全试跑。
 - **桌面面板**：两个 runner 每次状态变化即发布 `status.json`；菜单栏应用（`desktop/CodingKeeperBar.swift`，install 自动编译）一屏显示所有项目的任务与挂起状态。**burn 模式（默认开启）**：队列烧干后，循环自动投喂持续改进指令——先按 worker 自己说的下一步做，否则做一轮专业收尾审查（正确性、安全、性能、可靠、鲁棒/边界、可维护、测试完整性、依赖健康、可观测、文档一致性），发现问题小步提交修复。worker 连续两轮报告无事可做，锅炉自动熄火并通知你。`CODEXC_LOOP_IDLE=0` 关闭；其他值替换内置指令；`CODEXC_IDLE_PARK` 调整空转上限。
-- 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查始终用 codex，保证评分者与实现者不是同一个模型。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`ck zcode run` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
+- 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查使用独立的 Codex 上下文；底层模型可能与 worker 相同。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`ck zcode run` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
 
 ## 自动 Yes
 
@@ -138,11 +141,17 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 
 ## 工作原理
 
-- `codexc` 创建/接入 tmux，注入 codex 参数与自愈重试配置，并启动后台看门狗轮询 Codex SQLite 错误日志；同时检查 pane，避免在回合运行时输入。
+- `codexc` 创建/接入 tmux，注入 codex 参数与自愈重试配置，并启动后台看门狗读取本项目 Codex rollout 新事件；同时检查 pane，避免在回合运行时输入。
 - `codexc-daily` 解析 `$CODEX_HOME/sessions/` 下的 JSONL rollout 文件定位最近会话；调度委托给 launchd（`com.codexc.daily`）。
 - 随附 `tmux.conf` 通过 `sync-prefix2.sh` 把 `prefix` 键表镜像到 tmux 默认为空的 `prefix2` 表，两个前缀行为完全一致。
 
 - [处理逻辑手册](docs/OPERATIONS.md) · [架构与不变量](docs/ARCHITECTURE.md) · [工具矩阵与凭证](docs/TOOLS.md) · [商业化路线](docs/COMMERCIALIZATION.md) · [Changelog](CHANGELOG.md)
+
+## 审计与验证
+
+`tests/run-all` 运行隔离离线套件，使用私有 home/tmux socket 与假 worker/reviewer，不发送模型请求。修复清单、证据和验证边界见 [2026-11-05 深度审计](docs/AUDIT-2026-11-05.md)。
+
+重新接入会复用活跃 watcher；旧会话需重新启动以启用新版 watcher 和归属校验。定时发送只接受由本项目、本工具拥有的窗格，且不能与交付循环同时开启。
 
 ## 卸载
 
@@ -157,3 +166,15 @@ rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 ## 许可
 
 [MIT](LICENSE)
+
+### 叶子任务与额度保护（2026-11）
+
+`zcodec run` 默认只执行 `## ready` 内未勾选的任务；队列空时进入 `idle` 等待，不再自动持续改进。它仍受 23:00–09:00（Asia/Shanghai）时段约束，并在调用 worker 前拒绝缺失或官方占位的 gate。其他入口保留原有兼容行为；明确设置 `CODEXC_LOOP_IDLE=1` 才会给 ZCode 开启空闲改进。
+
+运行 `ck leaves --registry` 或 `zcodec leaves . --json` 可离线检查队列结构、重复 ID、藏在错误分区的待办和占位门禁，不调用模型。每条任务可以带缩进的目标/范围/验收/依赖续行，完整合同会一起投喂。`review-needed`、`blocked` 和归档分区不自动执行。结构检查不能替代源码审计或业务价值判断。
+
+验收会保存 `.codingkeeper/evidence/<id>/`：开工前基线、本次候选、精确变化、gate/review 输出和 accepted receipt。已提交的改动也在审查范围；门禁或审查期间候选变化会拒绝验收。队列勾选和 journal 通过可恢复事务提交；崩溃后先恢复，冲突则保留待处理，不把丢日志当成功。证据只存在本机，可包含项目源码，应按项目文件保护。
+
+`codexc-review-leaf` 是共享审查适配器：ZCode 使用全新会话、plan 模式和已知写/执行/委托工具禁用；Codex 使用只读沙箱。ZCode 没有工具允许列表或操作系统沙箱，未知插件并不受这份禁用列表全面约束；候选校验提供额外变更检测。`auto` 固定使用 Codex，不再发送计费 ping 或自动改用另一计费渠道。适配器应由 runner 调用，以获得超时、时窗和进程组清理。
+
+95 项质量目录用于选择有证据、有价值的检查，不是必须逐项执行的待办。已有实现先验收；已有等价测试引用证据；无缺陷不制造提交；实机或浏览器依赖缺失时保留待验收。见 [本轮叶子审计](docs/LEAF-AUDIT-2026-11-05.md)。

@@ -6,6 +6,7 @@
 #   zcodec run              自动: headless 夜间 runner (队列/gate/审查/burn)
 #   zcodec init             项目脚手架
 #   zcodec status           跨项目总览
+#   zcodec leaves [args]    离线审计叶子队列 (不调用模型)
 #   zcodec selftest         单元自测 (selftest-integration 同理)
 #
 # 仅 run/init/status/selftest* 是 CodingKeeper 保留动词; 裸命令绝不启动
@@ -14,6 +15,8 @@
 # Env:
 #   ZCODE_CJS              zcode.cjs 路径 (默认桌面应用自带)
 #   CODEXC_HEADLESS_CMD    覆盖 worker 命令 (默认本仓库 codexc-zcode-worker)
+#   CODEXC_ACTIVE_WINDOW   自动任务可用时段 (默认 23:00-09:00)
+#   CODEXC_ACTIVE_TZ       时段时区 (默认 Asia/Shanghai, UTC+8)
 
 set -u
 
@@ -22,13 +25,19 @@ REPO="$(dirname "$SELF")"
 ZCODE_CJS="${ZCODE_CJS:-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs}"
 
 hl() {  # CodingKeeper headless 车道转发 (注入默认 worker)
-    export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$REPO/codexc-zcode-worker}"
+    export CODEXC_HEADLESS_CMD="${CODEXC_HEADLESS_CMD:-$(printf '%q' "$REPO/codexc-zcode-worker")}"
     exec "$REPO/codexc-headless" "$@"
 }
 
 case "${1:-}" in
     run)
+        export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-23:00-09:00}"
+        export CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
+        export CODEXC_LOOP_IDLE="${CODEXC_LOOP_IDLE:-0}"
+        export CODEXC_REQUIRE_GATE=1
         shift; hl run "$@" ;;
+    leaves)
+        shift; exec python3 "$REPO/ck-leaves.py" "$@" ;;
     init|status|selftest|selftest-integration)
         hl "$@" ;;
     -h|--help|help)

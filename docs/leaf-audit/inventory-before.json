@@ -1,0 +1,307 @@
+[
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/test",
+    "counts": {
+      "ready:checked": 1,
+      "review-needed:checked": 3
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 3,
+        "detail": "move accepted history to done after reconciling evidence"
+      }
+    ],
+    "pending": 0,
+    "ready": 0
+  },
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/soul2soul",
+    "counts": {
+      "ready:checked": 3,
+      "ready:pending": 7
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 5,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 6,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 7,
+        "detail": "move accepted history to done after reconciling evidence"
+      }
+    ],
+    "pending": 7,
+    "ready": 7
+  },
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/zcode-exp",
+    "counts": {
+      "ready:checked": 1,
+      "ready:pending": 1
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 4,
+        "detail": "move accepted history to done after reconciling evidence"
+      }
+    ],
+    "pending": 1,
+    "ready": 1
+  },
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/likeclaw",
+    "counts": {
+      "ready:pending": 1
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "unbounded-task",
+        "line": 4,
+        "detail": "specify a demonstrated gap, scope, and acceptance before execution"
+      },
+      {
+        "severity": "error",
+        "code": "placeholder-gate",
+        "line": 0,
+        "detail": "ready tasks have an official placeholder gate"
+      }
+    ],
+    "pending": 1,
+    "ready": 1
+  },
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/sale",
+    "counts": {
+      "ready:checked": 5,
+      "ready:pending": 19
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 6,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 7,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 8,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 9,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 10,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "gate-task-count",
+        "line": 0,
+        "detail": "gate strength depends on task count; decouple before queue cleanup"
+      }
+    ],
+    "pending": 19,
+    "ready": 19
+  },
+  {
+    "project": "/Users/wardonguo/Documents/work/code/AI/AIworkspace/fingerprint",
+    "counts": {
+      "ready:checked": 21,
+      "done:pending": 6
+    },
+    "findings": [
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 5,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 6,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 7,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 8,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 9,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 10,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 11,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 12,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 13,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 14,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 15,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 16,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 17,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 18,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 19,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 20,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 21,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 22,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 23,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 24,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "warning",
+        "code": "completed-in-ready",
+        "line": 25,
+        "detail": "move accepted history to done after reconciling evidence"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 32,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 33,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 34,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 35,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 36,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      },
+      {
+        "severity": "error",
+        "code": "unreachable-task",
+        "line": 37,
+        "detail": "pending checkbox outside ready/review-needed/blocked/backlog"
+      }
+    ],
+    "pending": 6,
+    "ready": 0
+  }
+]

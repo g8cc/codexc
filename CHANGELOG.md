@@ -1,6 +1,21 @@
 # Changelog
 
+## 2026-11-05 ZCode 套餐时段修复
+
+- ZCode 自动任务默认限定 UTC+8 的 23:00–次日09:00，覆盖 worker、门禁、独立审查和 watchdog 复燃。
+- 配额等待持久化到下次开放，修复套餐未生效通知被当普通失败反复请求；截止和人工暂停停止受管子进程。
+- 等待/退避不再显示正在执行；桌面防止重复实例。
+
 ## v2.1.0 (unreleased)
+
+2026-11-05 深度审计加固（[完整报告](docs/AUDIT-2026-11-05.md)）：
+- 修复启动 watcher 阻塞、配置损坏、工具/参数/会话归属与 tmux 环境传播；配置编辑要求 Python 3.11+。
+- worker/reviewer 退出码与协议双校验，修复后 gate 强制通过；每次投喂的新鲜度水位防止旧 DONE 被误验收。
+- 跨车道原子锁、owner 清理、有效恢复预算、人工 halt 保护；补齐三工具 watcher。
+- ZCode 输出文件解析及接力校验，安全安装路径，桌面有界后台读取与极端时间戳保护。
+- `ck status` 单进程聚合：本机 100 项目离线基准中位 11.37s → 0.16s。
+- 新增离线行为回归和独立 HOME/tmux 全套测试环境，keys 不再发送模型请求。
+
 悬浮条任务面板 + 监督链路自愈（v2.0 的显示与监督体系全面落地）:
 - 悬浮条任务面板: 空闲 3px 细线 / 悬停弹出状态计数 (品牌 logo + 转圈运行数 +
   暂停待处理数) / 新任务蓝闪·完成绿闪 4s (10s 去重) / ⛔⏸ 琥珀常驻警示 /
@@ -38,3 +53,10 @@
 
 ## v1.0.0
 - 按目录 tmux 会话 + 429 自动续命 watcher + codexc-daily 每日恢复
+
+### Leaf audit hardening (2026-11-05)
+
+- ZCode defaults to queue-only execution and requires a configured gate.
+- Capture exact leaf baseline/candidate evidence, detect verification mutation, and recover queue/journal acceptance transactions.
+- Preserve reviewer failure/final-output semantics; add offline `ck leaves` audits and complete multiline task contracts.
+- Reconcile project leaf queues and the 95-check candidate catalog with source evidence.

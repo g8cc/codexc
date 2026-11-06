@@ -91,6 +91,9 @@
 
 set -u
 
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+SCRIPT_DIR="$(dirname "$(readlink -f "$SELF" 2>/dev/null || printf '%s' "$SELF")")"
+
 CODEXC_SESSION="${CODEXC_SESSION:-}"
 CODEXC_MESSAGE="${CODEXC_MESSAGE:-continue}"
 # 单行化: CR/LF 会被 send-keys -l 字面打进 composer, TUI 把尾随换行当作
@@ -125,8 +128,9 @@ case "$CODEXC_LOOP" in
 esac
 
 notify() {  # $1=text — macOS 通知, 带跨进程全局弹窗间隔闸 (CODEXC_NOTIFY_GAP, 默认3s, 0=关)
-    local text="$1" gap="${CODEXC_NOTIFY_GAP:-3}" last now esc
-    case "$gap" in ''|*[!0-9]*) gap=3 ;; esac
+    [ "${CODEXC_NOTIFY:-1}" = "1" ] || return 0
+    local text="$1" gap last now esc
+    gap="$(normalize_uint CODEXC_NOTIFY_GAP "${CODEXC_NOTIFY_GAP:-3}" 3 0 86400)"
     if [ "$gap" -gt 0 ]; then
         last="$(cat "$HOME/.codingkeeper/.notify-last" 2>/dev/null || echo 0)"
         case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -165,7 +169,7 @@ normalize_uint() {
 has_explicit_auto_mode() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --ask-for-approval|--ask-for-approval=*|--sandbox|--sandbox=*|--dangerously-bypass-approvals-and-sandbox|--full-auto|--yolo|-a|-s|-a=*|-s=*|--dangerously-skip-permissions|--permission-mode|--permission-mode=*|--auto) return 0 ;;
+            --ask-for-approval|--ask-for-approval=*|--sandbox|--sandbox=*|--dangerously-bypass-approvals-and-sandbox|--full-auto|--yolo|-a|-s|-a?*|-s?*|--dangerously-skip-permissions|--permission-mode|--permission-mode=*|--auto) return 0 ;;
             --) return 1 ;;
         esac
         shift
@@ -179,7 +183,8 @@ CODEXC_POLL="$(normalize_uint CODEXC_POLL "$CODEXC_POLL" 2 1 60)"
 CODEXC_NOTIFY="$(normalize_uint CODEXC_NOTIFY "${CODEXC_NOTIFY:-1}" 1 0 1)"
 CODEXC_NOTIFY_SECS="$(normalize_uint CODEXC_NOTIFY_SECS "${CODEXC_NOTIFY_SECS:-120}" 120 0 86400)"
 
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_HOME_DIR="${CODEX_HOME:-${CODEXC_HOME:-$HOME/.codex}}"
+export CODEX_HOME="$CODEX_HOME_DIR"
 
 # Transient provider/relay errors worth an automatic "continue". Covers the
 # 429 quota storms, dropped streams, 5xx server/relay hiccups (Bad Gateway,
@@ -208,59 +213,13 @@ prepare_watch_log() {
 # ---- self-heal: config switchers (CC Switch etc.) rewrite config.toml from
 # stale stored templates and wipe these retry keys — re-add before launch ----
 ensure_retry_config() {
-    local cfg="$CODEX_HOME_DIR/config.toml"
-    [ -f "$cfg" ] || return 0
-    grep -q "request_max_retries" "$cfg" && return 0
-    python3 - "$cfg" <<'PYEOF'
-import os, sys
-p = sys.argv[1]
-lines = open(p).read().split("\n")
-out, in_provider, inserted = [], False, False
-keys = ["request_max_retries = 8", "stream_max_retries = 10", "stream_idle_timeout_ms = 300000"]
-for ln in lines:
-    if in_provider and ln.startswith("["):
-        out += keys
-        inserted = True
-        in_provider = False
-    if ln.strip() == "[model_providers.custom]":
-        in_provider = True
-    out.append(ln)
-if in_provider and not inserted:
-    out += keys
-    inserted = True
-if inserted:
-    # 原子替换并保留原权限: config.toml 是 codex 的活配置, 半截写会让会话起不来
-    tmp = p + ".codingkeeper-tmp"
-    with open(tmp, "w") as fh:
-        fh.write("\n".join(out))
-    try:
-        os.chmod(tmp, os.stat(p).st_mode & 0o777)
-    except OSError:
-        os.chmod(tmp, 0o600)
-    os.replace(tmp, p)
-    print(f"codexc: re-added retry keys to {p} (a config switcher had wiped them)", file=sys.stderr)
-PYEOF
-    grep -q "request_max_retries" "$cfg" && \
-        echo "$(date '+%F %T') self-heal: retry keys re-added to config.toml" >> "${CODEX_HOME_DIR}/codexc-watch.log"
+    [ -f "$CODEX_HOME_DIR/config.toml" ] || return 0
+    python3 "$SCRIPT_DIR/ck-config.py" codex "$CODEX_HOME_DIR/config.toml" retry
 }
 
-# ---- self-heal: pre-trust the current directory so codex's first-run
-# "Do you trust the contents of this directory?" gate never blocks ----
 ensure_project_trust() {
-    local cfg="$CODEX_HOME_DIR/config.toml" dir project_key
     [ "$CODEXC_AUTO_YES" != "0" ] || return 0
-    (umask 077; mkdir -p "$CODEX_HOME_DIR") || return 1
-    if [ ! -f "$cfg" ]; then (umask 077; : > "$cfg") || return 1; fi
-    # codex keys trust on the directory the TUI sees, which is not always the
-    # physical path (symlinked cwd chains, /tmp -> /private/tmp): trust BOTH
-    # forms or an unattended run stalls on the trust gate forever
-    for dir in "$PWD" "$(pwd -P)"; do
-        [ -n "$dir" ] || continue
-        project_key="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$dir")" || return 1
-        grep -Fxq -- "[projects.$project_key]" "$cfg" && continue
-        printf '\n[projects.%s]\ntrust_level = "trusted"\n' "$project_key" >> "$cfg"
-        echo "$(date '+%F %T') self-heal: trusted project added to config.toml: $dir" >> "$WATCHLOG"
-    done
+    python3 "$SCRIPT_DIR/ck-config.py" codex "$CODEX_HOME_DIR/config.toml" trust "$PWD" "$(pwd -P)"
 }
 
 # ---- claude tool profile ----------------------------------------------------
@@ -289,48 +248,7 @@ claude_project_dir() {  # $1=cwd -> munged project dir name (first that exists)
 # or the TUI stalls forever exactly like codex's trust gate did.
 seed_claude_trust() {
     [ "$CODEXC_AUTO_YES" != "0" ] || return 0
-    local cfg="$CLAUDE_DIR/.claude.json" p
-    (umask 077; mkdir -p "$CLAUDE_DIR") || return 1
-    python3 - "$cfg" "$PWD" "$(pwd -P)" <<'PYEOF'
-import json, os, sys
-cfg, logical, physical = sys.argv[1], sys.argv[2], sys.argv[3]
-data = {}
-if os.path.isfile(cfg):
-    try:
-        with open(cfg, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        data = {}
-if not isinstance(data, dict):
-    data = {}
-data["hasCompletedOnboarding"] = True
-if data.get("bypassPermissionsModeAccepted") is not True:
-    data["bypassPermissionsModeAccepted"] = True
-projects = data.get("projects")
-if not isinstance(projects, dict):
-    projects = {}
-for path in {logical, physical}:
-    entry = projects.get(path)
-    if not isinstance(entry, dict):
-        entry = {}
-    if entry.get("hasTrustDialogAccepted") is not True:
-        entry["hasTrustDialogAccepted"] = True
-    if entry.get("hasCompletedProjectOnboarding") is not True:
-        entry["hasCompletedProjectOnboarding"] = True
-    projects[path] = entry
-data["projects"] = projects
-tmp = cfg + ".codingkeeper-tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, ensure_ascii=False, indent=2)
-# preserve the original file's mode across the replace — os.replace adopts
-# the tmp file's perms, which would silently open a 600 config to world-read
-try:
-    os.chmod(tmp, os.stat(cfg).st_mode & 0o777)
-except OSError:
-    os.chmod(tmp, 0o600)
-os.replace(tmp, cfg)
-PYEOF
-    echo "$(date '+%F %T') self-heal: claude trust/onboarding seeded for $PWD" >> "$WATCHLOG"
+    python3 "$SCRIPT_DIR/ck-config.py" claude "$CLAUDE_DIR/.claude.json" "$CODEXC_AUTO_YES" "$PWD" "$(pwd -P)"
 }
 
 # ---- pi / opencode profiles -------------------------------------------------
@@ -376,6 +294,15 @@ sanitize_name() {
 # Ownership is compared on PHYSICAL paths (pwd -P): the same directory
 # reached through a symlink (e.g. ~/Documents/ai -> .../AIworkspace) counts
 # as the same owner, not a name collision.
+session_tool_matches() {
+    local tool command
+    tool="$(tmux show-option -p -v -t "=$1:" @codexc_tool 2>/dev/null || true)"
+    [ "$tool" = "$CODEXC_TOOL" ] && return 0
+    [ -z "$tool" ] || return 1
+    command="$(tmux display-message -p -t "=$1:" '#{pane_current_command}' 2>/dev/null)"
+    [ "$command" = "$CODEXC_TOOL" ]
+}
+
 resolve_session_name() {
     local name cand p spath spath_phys base suffix cwd_phys
     cwd_phys="$(pwd -P)"
@@ -387,9 +314,9 @@ resolve_session_name() {
             echo "$name"; return 0
         fi
         # taken — is it ours (same startup directory, symlinks resolved)?
-        spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
+        spath="$(tmux display-message -t "=$name:" -p '#{session_path}' 2>/dev/null)"
         spath_phys="$(cd "$spath" 2>/dev/null && pwd -P)"
-        if [ "$spath_phys" = "$cwd_phys" ]; then
+        if [ "$spath_phys" = "$cwd_phys" ] && session_tool_matches "$name"; then
             echo "$name"; return 0
         fi
         # taken by another directory: widen the scope with the parent name
@@ -401,9 +328,9 @@ resolve_session_name() {
                 if ! tmux has-session -t "=$name" 2>/dev/null; then
                     echo "$name"; return 0
                 fi
-                spath="$(tmux display-message -t "$name" -p '#{session_path}' 2>/dev/null)"
+                spath="$(tmux display-message -t "=$name:" -p '#{session_path}' 2>/dev/null)"
                 spath_phys="$(cd "$spath" 2>/dev/null && pwd -P)"
-                if [ "$spath_phys" = "$cwd_phys" ]; then
+                if [ "$spath_phys" = "$cwd_phys" ] && session_tool_matches "$name"; then
                     echo "$name"; return 0
                 fi
                 suffix=$((suffix + 1))
@@ -461,8 +388,34 @@ except Exception:
 PYEOF
 }
 
+scheduler_pane_owned() {
+    local pane="$1" expected="${2:-}" owner project tool
+    owner="$(tmux show-option -p -v -t "$pane" @codexc_owner 2>/dev/null)"
+    case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#owner}" -le 10 ] && [ "$owner" -gt 1 ] || return 1
+    [ -z "$expected" ] || [ "$owner" = "$expected" ] || return 1
+    kill -0 "$owner" 2>/dev/null || return 1
+    tool="$(tmux show-option -p -v -t "$pane" @codexc_tool 2>/dev/null)"
+    project="$(tmux show-option -p -v -t "$pane" @codexc_project 2>/dev/null)"
+    [ "$tool" = "$CODEXC_TOOL" ] && [ "$project" = "$(pwd -P)" ] || return 1
+    printf '%s' "$owner"
+}
+
+scheduler_pane_busy() {
+    local screen
+    screen="$(tmux capture-pane -p -t "$1" 2>/dev/null)" || return 0
+    case "$CODEXC_TOOL" in
+        opencode) ! printf '%s\n' "$screen" | tail -5 | grep -q 'ctrl+p commands' ;;
+        *) printf '%s\n' "$screen" | grep -qi 'to interrupt' ;;
+    esac
+}
+
 run_scheduler() {
-    local target="$1" pane="$2" prompt="$3" spec="${4:-$1}" now left
+    local target="$1" pane="$2" prompt="$3" spec="${4:-$1}" now left owner
+    owner="$(scheduler_pane_owned "$pane")" || {
+        echo "codexc: scheduled prompt refused: pane is not owned by this project/tool" >&2
+        return 1
+    }
     case "$target" in ''|*[!0-9]*)
         echo "$(date '+%F %T') scheduler: invalid target for '$spec'" >> "$WATCHLOG"
         return 1
@@ -475,9 +428,10 @@ run_scheduler() {
     target=$((10#$target))
     echo "$(date '+%F %T') scheduler: prompt queued for $pane at $(date -r "$target" '+%F %T') (spec: $spec): $prompt" >> "$WATCHLOG"
     while :; do
+        scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
         now=$(date +%s)
         [ "$now" -ge "$target" ] && break
-        tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || {
+        [ -n "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ] || {
             echo "$(date '+%F %T') scheduler: pane gone before fire time, giving up" >> "$WATCHLOG"
             return 0
         }
@@ -486,25 +440,28 @@ run_scheduler() {
     done
     # fire only into an idle TUI (a running turn shows "esc to interrupt")
     while :; do
-        tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || {
+        [ -n "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ] || {
             echo "$(date '+%F %T') scheduler: pane gone before send, giving up" >> "$WATCHLOG"
             return 0
         }
-        if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt"; then
+        if scheduler_pane_busy "$pane"; then
             sleep 5
             continue
         fi
         sleep 1
-        tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "esc to interrupt" && continue
+        scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
+        scheduler_pane_busy "$pane" && continue
         break
     done
     echo "$(date '+%F %T') scheduler: firing scheduled prompt: $prompt" >> "$WATCHLOG"
     notify "Scheduled prompt fired"
-    tmux send-keys -t "$pane" -l "$prompt" || {
+    scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
+    tmux send-keys -t "$pane" -l -- "$prompt" || {
         echo "$(date '+%F %T') scheduler: failed to send prompt text" >> "$WATCHLOG"
         return 1
     }
     sleep 0.4
+    scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
     tmux send-keys -t "$pane" Enter || {
         echo "$(date '+%F %T') scheduler: failed to submit prompt" >> "$WATCHLOG"
         return 1
@@ -541,7 +498,7 @@ watch_and_run() {
         # 等, 用户提交任务后 rollout mtime 变新即被发现; 不再按次数放弃
         tries=$((tries + 1))
         [ "$tries" = "30" ] && echo "$(date '+%F %T') watcher: no rollout yet — waiting for session activity" >> "$WATCHLOG"
-        sleep 1
+        sleep "$CODEXC_POLL"
     done
     sess_file="$rollout"
     sess_off="$(stat -f '%z' "$sess_file" 2>/dev/null || echo 0)"   # skip history
@@ -736,17 +693,19 @@ PYEOF6
                 echo "$(date '+%F %T') reached max continues ($count), stopping" >> "$WATCHLOG"
                 return 0
             fi
-            tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || { echo "$(date '+%F %T') pane gone, watcher stopping" >> "$WATCHLOG"; return 0; }
+            [ -n "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ] || { echo "$(date '+%F %T') pane gone, watcher stopping" >> "$WATCHLOG"; return 0; }
             if tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "to interrupt"; then
                 echo "$(date '+%F %T') turn still active, skipping send" >> "$WATCHLOG"
                 continue
             fi
             sleep 3
-            tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || return 0
+            [ -n "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ] || return 0
             tmux capture-pane -p -t "$pane" 2>/dev/null | grep -q "to interrupt" && continue
             echo "$(date '+%F %T') Turn error in rollout -> auto-continue #$((count+1)): ${api_text:0:80}" >> "$WATCHLOG"
-            tmux send-keys -t "$pane" -l "$CODEXC_MESSAGE" || return 0
+            kill -0 "$follow_pid" 2>/dev/null || return 0
+            tmux send-keys -t "$pane" -l -- "$CODEXC_MESSAGE" || return 0
             sleep 0.4
+            kill -0 "$follow_pid" 2>/dev/null || return 0
             tmux send-keys -t "$pane" Enter || return 0
             count=$((count + 1)); ts_last=$(date +%s)
         done <<EOF
@@ -759,9 +718,12 @@ EOF
 write_status() {  # $1=任务文本 $2=active(1/0) $3=started_at epoch(0=未知)
     # 记录最近一次写入的载荷 — 心跳(30s)反复广播它, 会话关闭后随之过期
     hb_task="$1"; hb_active="$2"; hb_started="${3:-0}"
+    local driver
+    driver="$(cat .codingkeeper/loop.pid 2>/dev/null || true)"
+    case "$driver" in ''|*[!0-9]*) ;; *) kill -0 "$driver" 2>/dev/null && return 0 ;; esac
     mkdir -p ".codingkeeper" 2>/dev/null
     python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" "${3:-0}" <<'PYEOF3'
-import json, os, sys, time
+import json, os, sys, time, tempfile
 pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
 # 口喷长文只留标识头: 32 字符 + … (bash 3.2 的 ${v:0:N} 按字节切会碎多字节,
 # 截断必须在 python 按字符做)
@@ -786,36 +748,30 @@ snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "ready": ready,
         "ts": int(time.time())}
 # 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
-tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")
-with open(tmp, "w", encoding="utf-8") as fh:
-    json.dump(snap, fh, ensure_ascii=False)
-os.replace(tmp, os.path.join(pdir, "status.json"))
+fd, tmp = tempfile.mkstemp(prefix=".status-", dir=pdir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh, ensure_ascii=False)
+    os.replace(tmp, os.path.join(pdir, "status.json"))
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
 PYEOF3
     return 0
 }
 
-spawn_watcher() {  # $1=follow_pid $2=pane — 先杀 pidfile 里的旧实例再换上新 watcher
-    local fp="$1" pane="$2" old wpid
-    # 交互会话注册进面板 (纯手动项目也能被悬浮条/ck status 看到)
-    case "$PWD" in /tmp/*|/private/tmp/*|"$TMPDIR"*) ;; *)
-        mkdir -p "$HOME/.codingkeeper" 2>/dev/null
-        grep -qxF "$PWD" "$HOME/.codingkeeper/projects" 2>/dev/null || printf '%s\n' "$PWD" >> "$HOME/.codingkeeper/projects" ;;
-    esac
-    mkdir -p ".codingkeeper" 2>/dev/null
-    old="$(cat ".codingkeeper/watcher.pid" 2>/dev/null || true)"
-    case "$old" in ''|*[!0-9]*) old="" ;; esac
-    [ -n "$old" ] && kill "$old" 2>/dev/null
-    case "$CODEXC_TOOL" in
-        claude)   ( watch_and_run_claude "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
-        pi)       ( watch_and_run_pi "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
-        opencode) ( watch_and_run_opencode "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
-        *)        ( watch_and_run "$fp" "$pane" >> "$WATCHLOG" 2>&1 ) & ;;
-    esac
-    wpid=$!
-    printf '%s\n' "$wpid" > ".codingkeeper/watcher.pid"
-    echo "$(date '+%F %T') watcher: spawned (pid $wpid pane $pane follow $fp)" >> "$WATCHLOG"
-    printf '%s' "$wpid"
-    return 0
+spawn_watcher() {  # $1=owner pid $2=pane; result in SPAWNED_WATCHER_PID
+    local fp="$1" pane="$2"
+    SPAWNED_WATCHER_PID=""
+    (CK_LANE=codexc; . "$SCRIPT_DIR/ck-common.sh"; register_project)
+    # The launcher redirects every child descriptor before returning the PID.
+    # Only the short-lived Python launcher is captured, never a background shell.
+    SPAWNED_WATCHER_PID="$(CODEXC_TOOL="$CODEXC_TOOL" CODEX_HOME="$CODEX_HOME_DIR" \
+        CODEXC_POLL="$CODEXC_POLL" CODEXC_NOTIFY="$CODEXC_NOTIFY" CODEXC_NOTIFY_SECS="$CODEXC_NOTIFY_SECS" \
+        CODEXC_COOLDOWN="$CODEXC_COOLDOWN" CODEXC_MAX_CONTINUES="$CODEXC_MAX_CONTINUES" \
+        CODEXC_MESSAGE="$CODEXC_MESSAGE" CODEXC_EXTRA_RE="$CODEXC_EXTRA_RE" \
+        CLAUDE_CONFIG_DIR="$CLAUDE_DIR" PI_DIR="$PI_DIR" OPENCODE_DATA_DIR="$OPENCODE_DIR" \
+        python3 "$SCRIPT_DIR/ck-watcher.py" "$SELF" "$pane" "$fp" "$WATCHLOG")" || return 1
+    echo "$(date '+%F %T') watcher: spawned (pid $SPAWNED_WATCHER_PID pane $pane follow $fp)" >> "$WATCHLOG"
 }
 
 # the watcher's rollout discovery: newest sessions/*.jsonl held open inside
@@ -826,15 +782,22 @@ watcher_find_rollout() {  # $1=pane -> prints path or nothing
     home_phys="$(cd "$CODEX_HOME_DIR" 2>/dev/null && pwd -P)"
     root_pids="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)"
     [ -n "$root_pids" ] || return 0
-    lsof_out=".codingkeeper-watcher-lsof.$$"
     all="$root_pids"
+    local frontier="$root_pids" next child
     for _ in 1 2 3; do
-        for p in $all; do all="$all $(pgrep -P "$p" 2>/dev/null)"; done
+        next=""
+        for p in $frontier; do
+            for child in $(pgrep -P "$p" 2>/dev/null); do
+                case " $all " in *" $child "*) ;; *) all="$all $child"; next="$next $child" ;; esac
+            done
+        done
+        [ -n "$next" ] || break
+        frontier="$next"
     done
-    : > "$lsof_out" 2>/dev/null || { lsof_out="/tmp/codexc-watcher-lsof.$$"; : > "$lsof_out"; }
-    for p in $all; do
-        lsof -Fn -p "$p" 2>/dev/null | sed -n 's/^n//p' >> "$lsof_out"
-    done
+    lsof_out="$(mktemp "${TMPDIR:-/tmp}/codexc-watcher.XXXXXX")" || return 0
+    local pid_csv
+    pid_csv="$(printf '%s' "$all" | tr ' ' ',')"
+    lsof -Fn -p "$pid_csv" 2>/dev/null | sed -n 's/^n//p' > "$lsof_out"
     while IFS= read -r f; do
         # macOS /tmp -> /private/tmp etc.: the fd path is physical while
         # CODEX_HOME may be logical — accept both forms
@@ -876,7 +839,7 @@ for current, dirs, files in os.walk(root, onerror=lambda _e: None):
         if now - info.st_mtime <= 300:
             cands.append((info.st_mtime, path))
 cands.sort(reverse=True)
-for _mtime, path in cands[:6]:
+for _mtime, path in cands:
     try:
         with open(path, encoding="utf-8") as fh:
             meta = json.loads(fh.readline())
@@ -894,6 +857,11 @@ PYEOF5
     [ -n "$newest" ] && printf '%s' "$newest"
 }
 
+# Optional tool adapters share the loop's discovery/schema helpers.
+if [ -f "$SCRIPT_DIR/ck-watch-tools.sh" ]; then
+    . "$SCRIPT_DIR/ck-watch-tools.sh"
+fi
+
 # ---- internal: standalone watcher entry (live restart of long sessions) -----
 # codexc __watcher_run <pane-id> <codex-pid>: re-arms the rollout-tail
 # watcher for a session whose watcher predates a code update; the follow pid
@@ -902,7 +870,12 @@ if [ "${1:-}" = "__watcher_run" ]; then
     [ $# -ge 3 ] || { echo "codexc: __watcher_run needs <pane-id> <codex-pid>" >&2; exit 1; }
     prepare_watch_log || exit 1
     echo "$(date '+%F %T') watcher: standalone watcher armed on pane $2 (codex pid $3)" >> "$WATCHLOG"
-    watch_and_run "$3" "$2"
+    case "$CODEXC_TOOL" in
+        claude) watch_and_run_claude "$3" "$2" ;;
+        pi) watch_and_run_pi "$3" "$2" ;;
+        opencode) watch_and_run_opencode "$3" "$2" ;;
+        *) watch_and_run "$3" "$2" ;;
+    esac
     exit $?
 fi
 
@@ -922,6 +895,7 @@ fi
 # sessions; anything else is passed through to codex unchanged. Without an
 # explicit name the session is auto-resolved from the current directory.
 ACTION=""
+NO_LOOP=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -n|--name)
@@ -930,8 +904,9 @@ while [ $# -gt 0 ]; do
         -t|--at)
             [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a time (HH:MM or +N[h|m|s])" >&2; exit 1; }
             CODEXC_AT="$2"; shift 2 ;;
+        codex) shift; break ;;
         loop) ACTION="loop"; shift ;;
-        --no-loop) CODEXC_LOOP=0; shift ;;
+        --no-loop) NO_LOOP=1; CODEXC_LOOP=0; shift ;;
         -T|--tool)
             [ $# -ge 2 ] && [ -n "$2" ] || { echo "codexc: $1 requires a tool (codex|claude|pi|opencode)" >&2; exit 1; }
             CODEXC_TOOL="$2"; shift 2 ;;
@@ -942,6 +917,13 @@ while [ $# -gt 0 ]; do
         *)   break ;;
     esac
 done
+
+case "$CODEXC_TOOL" in
+    codex|claude|pi|opencode) ;;
+    *) echo "codexc: unsupported tool '$CODEXC_TOOL' (use codex|claude|pi|opencode)" >&2; exit 1 ;;
+esac
+
+export CODEXC_TOOL
 
 if [ "$ACTION" = "help" ]; then
     usage; exit 0
@@ -1005,8 +987,12 @@ if [ "$ACTION" = "fuel" ]; then
     exit 0
 fi
 if [ "$ACTION" = "loop" ]; then
-    CODEXC_LOOP=1
+    [ "$NO_LOOP" = "1" ] || CODEXC_LOOP=1
     ACTION=""
+fi
+if [ "$CODEXC_LOOP" = "1" ] && [ -n "$CODEXC_AT" ]; then
+    echo "codexc: choose either a scheduled prompt (-t) or the delivery loop per session" >&2
+    exit 1
 fi
 command -v tmux    >/dev/null || { echo "codexc: tmux is required" >&2; exit 1; }
 command -v sqlite3 >/dev/null || { echo "codexc: sqlite3 is required" >&2; exit 1; }
@@ -1042,6 +1028,18 @@ if [ "$CODEXC_TOOL" = "claude" ] && [ "${1:-}" = "resume" ] && [ "${2:-}" = "--l
     set -- --continue "$@"
 fi
 
+# Stale TMUX/TMUX_PANE can survive a server restart or inherited environment.
+# Only run in place when this exact pane still exists on that server.
+if [ -n "${TMUX:-}" ]; then
+    inherited_pane=""
+    if [ -n "${TMUX_PANE:-}" ]; then
+        inherited_pane="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_id}' 2>/dev/null)"
+    fi
+    if [ -z "$inherited_pane" ] || [ "$inherited_pane" != "${TMUX_PANE:-}" ]; then
+        unset TMUX TMUX_PANE
+    fi
+fi
+
 # ---- inside tmux: run codex + watcher (+ optional scheduler) in this pane --
 if [ -n "${TMUX:-}" ]; then
     case "$CODEXC_TOOL" in
@@ -1050,10 +1048,14 @@ if [ -n "${TMUX:-}" ]; then
         opencode) command -v opencode >/dev/null || { echo "codexc: opencode CLI is required" >&2; exit 1; } ;;
         *)        command -v codex    >/dev/null || { echo "codexc: codex CLI is required" >&2; exit 1; } ;;
     esac
-    PANE="$(tmux display-message -p '#{pane_id}')"
+    PANE="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{pane_id}')"
+    [ -n "$PANE" ] || { echo "codexc: tmux pane is unavailable; open a fresh terminal and retry" >&2; exit 1; }
+    tmux set-option -p -t "$PANE" @codexc_tool "$CODEXC_TOOL"
+    tmux set-option -p -t "$PANE" @codexc_project "$(pwd -P)"
+    tmux set-option -p -t "$PANE" @codexc_owner "$$"
     case "$CODEXC_TOOL" in
-        claude) seed_claude_trust ;;
-        codex)  ensure_retry_config; ensure_project_trust ;;
+        claude) seed_claude_trust || exit 1 ;;
+        codex) ensure_retry_config && ensure_project_trust || exit 1 ;;
         *)      : ;;
     esac
     sched_pid=""
@@ -1064,15 +1066,13 @@ if [ -n "${TMUX:-}" ]; then
         sched_pid=$!
         set --   # the prompt goes to the scheduler, not to codex's argv
     fi
-    # spawn_watcher 的结果走文件中转, 不用 $() 捕获: 后台 watcher 子壳可能继承
-    # 替换管道的写端 (重定向前的 fork 时序), $() 会等管道 EOF 永久挂起 —
-    # 实测 pane 卡死在 bash 内 (2026-11-04)。文件写入永不阻塞。
-    # 全新项目 .codingkeeper 可能尚不存在 — 重定向目标必须先有目录,
-    # 否则 spawn_watcher 静默不启动 (首次进入 watcher 缺失回归, 2026-11-05)
-    mkdir -p ".codingkeeper"
-    spawn_watcher "$$" "$PANE" > ".codingkeeper/.watcher-launch.$$" 2>/dev/null
-    watcher="$(cat ".codingkeeper/.watcher-launch.$$" 2>/dev/null)"
-    rm -f ".codingkeeper/.watcher-launch.$$"
+    # A background watcher must never be started inside command substitution:
+    # inherited output pipes otherwise keep the launcher waiting for EOF.
+    watcher=""
+    if ! spawn_watcher "$$" "$PANE"; then
+        echo "codexc: watcher unavailable; see $WATCHLOG" >&2
+    fi
+    watcher="${SPAWNED_WATCHER_PID:-}"
     loop_pid=""
     if [ "${CODEXC_LOOP:-0}" = "1" ] && [ -n "$CODEXC_AT" ]; then
         echo "codexc: warning — scheduled prompt (-t) and the delivery loop both feed this TUI; they can interleave. Prefer one." >&2
@@ -1129,7 +1129,7 @@ if [ -n "${TMUX:-}" ]; then
         *)        codex    $codex_flags "$@" ;;
     esac
     rc=$?
-    kill "$watcher" 2>/dev/null
+    [ -n "$watcher" ] && kill "$watcher" 2>/dev/null
     [ -n "$sched_pid" ] && kill "$sched_pid" 2>/dev/null
     [ -n "$loop_pid" ] && kill "$loop_pid" 2>/dev/null
     exit $rc
@@ -1137,17 +1137,33 @@ fi
 
 # ---- outside tmux: create a session running this script, then attach ------
 if tmux has-session -t "=$CODEXC_SESSION" 2>/dev/null; then
+    existing_path="$(tmux display-message -p -t "=$CODEXC_SESSION:" '#{session_path}')"
+    existing_phys="$(cd "$existing_path" 2>/dev/null && pwd -P)"
+    existing_tool="$(tmux show-option -p -v -t "=$CODEXC_SESSION:" @codexc_tool 2>/dev/null || true)"
+    if [ "$existing_phys" != "$(pwd -P)" ] || ! session_tool_matches "$CODEXC_SESSION"; then
+        echo "codexc: session '$CODEXC_SESSION' belongs to another project or tool; choose a different name with -n" >&2
+        exit 1
+    fi
+    if [ "$#" -gt 0 ]; then
+        echo "codexc: attaching existing session; arguments apply only when starting a new session (use -n to choose a new name)" >&2
+    fi
     # session already running: queue the scheduled prompt into it from a
     # detached helper so it survives this client attaching/detaching
     if [ -n "$CODEXC_AT" ]; then
-        sched_pane="$(tmux display-message -p -t "$CODEXC_SESSION" '#{pane_id}')"
-        nohup "$0" __schedule_run "$CODEXC_TARGET" "$sched_pane" "$CODEXC_PROMPT" >> "$WATCHLOG" 2>&1 &
+        sched_pane="$(tmux display-message -p -t "=$CODEXC_SESSION:" '#{pane_id}')"
+        scheduler_pane_owned "$sched_pane" >/dev/null || { echo "codexc: cannot schedule into an unowned pane; restart its codexc session first" >&2; exit 1; }
+        nohup "$SELF" __schedule_run "$CODEXC_TARGET" "$sched_pane" "$CODEXC_PROMPT" >> "$WATCHLOG" 2>&1 &
         echo "codexc: scheduled ${CODEXC_AT} queued into session '${CODEXC_SESSION}' (log: ${WATCHLOG})" >&2
     fi
-    # 重新监督: 会话里的 watcher 可能已死 (升级/崩溃/退出) — attach 时总是
-    # 换上当前代码的 watcher; follow_pid 用 pane 进程, 会话关闭即自然退出
-    attach_pane="$(tmux display-message -p -t "$CODEXC_SESSION" '#{pane_id}')"
-    spawn_watcher "$(tmux display-message -p -t "$attach_pane" '#{pane_pid}')" "$attach_pane" >/dev/null
+    # Reuse a verified live watcher; replace a missing watcher without touching
+    # an unrelated PID from a project file. Existing code stays until restart.
+    attach_pane="$(tmux display-message -p -t "=$CODEXC_SESSION:" '#{pane_id}')"
+    attach_owner="$(scheduler_pane_owned "$attach_pane")"
+    if [ -n "$attach_owner" ]; then
+        spawn_watcher "$attach_owner" "$attach_pane" >/dev/null
+    else
+        echo "codexc: legacy session attached; restart it to enable the current watcher" >&2
+    fi
     exec tmux attach -t "=$CODEXC_SESSION"
 fi
 
@@ -1161,13 +1177,19 @@ esac
 codex_args=""
 [ $# -gt 0 ] && codex_args="$(printf '%q ' "$@")"
 
-inner="env PATH=$(printf '%q' "$PATH") \
+# A long-lived tmux server carries the environment from its first client.
+# Clear supported settings there, then apply this invocation's values explicitly.
+inner_env=""
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER PI_DIR OPENCODE_DATA_DIR; do
+    inner_env="$inner_env -u $setting"
+done
+inner="env$inner_env PATH=$(printf '%q' "$PATH") \
 CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") \
 CODEXC_COOLDOWN=$CODEXC_COOLDOWN \
 CODEXC_MAX_CONTINUES=$CODEXC_MAX_CONTINUES \
 CODEXC_POLL=$CODEXC_POLL \
 CODEXC_SESSION=$(printf '%q' "$CODEXC_SESSION") \
-CODEX_HOME=$(printf '%q' "${CODEX_HOME:-}") \
+CODEX_HOME=$(printf '%q' "$CODEX_HOME_DIR") \
 CODEXC_AT=$(printf '%q' "$CODEXC_AT") \
 CODEXC_TARGET=$(printf '%q' "$CODEXC_TARGET") \
 CODEXC_PROMPT=$(printf '%q' "$CODEXC_PROMPT") \
@@ -1175,16 +1197,21 @@ CODEXC_EXTRA_RE=$(printf '%q' "$CODEXC_EXTRA_RE") \
 CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") \
 CODEXC_LOOP=$(printf '%q' "${CODEXC_LOOP:-}") \
 CODEXC_TOOL=$(printf '%q' "$CODEXC_TOOL") \
-CLAUDE_CONFIG_DIR=$(printf '%q' "${CLAUDE_CONFIG_DIR:-}") \
-$(printf '%q' "$0") $codex_args"
+CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_DIR")"
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER PI_DIR OPENCODE_DATA_DIR; do
+    if declare -p "$setting" >/dev/null 2>&1; then
+        inner="$inner $setting=$(printf '%q' "${!setting}")"
+    fi
+done
+inner="$inner OPENCODE_DATA_DIR=$(printf '%q' "$OPENCODE_DIR") $(printf '%q' "$SELF") $codex_args"
 
 if [ -n "$CODEXC_AT" ]; then
     echo "codexc: session '${CODEXC_SESSION}' created; prompt fires at ${CODEXC_AT} (log: ${WATCHLOG})" >&2
 fi
 
-if ! tmux new-session -d -s "$CODEXC_SESSION" "$inner"; then
+if ! tmux new-session -d -s "$CODEXC_SESSION" -c "$PWD" "$inner"; then
     if tmux has-session -t "=$CODEXC_SESSION" 2>/dev/null; then
-            existing_path="$(tmux display-message -p -t "$CODEXC_SESSION" '#{session_path}' 2>/dev/null)"
+            existing_path="$(tmux display-message -p -t "=$CODEXC_SESSION:" '#{session_path}' 2>/dev/null)"
             existing_phys="$(cd "$existing_path" 2>/dev/null && pwd -P)"
             if [ "$existing_phys" != "$(pwd -P)" ]; then
             echo "codexc: session name '$CODEXC_SESSION' was claimed by another directory; run codexc again to resolve a unique name" >&2
@@ -1195,6 +1222,6 @@ if ! tmux new-session -d -s "$CODEXC_SESSION" "$inner"; then
         exit 1
     fi
 fi
-tmux set-option -t "=$CODEXC_SESSION" remain-on-exit off >/dev/null 2>&1
+tmux set-option -t "=$CODEXC_SESSION:" remain-on-exit off >/dev/null 2>&1
 exec tmux attach -t "=$CODEXC_SESSION"
 

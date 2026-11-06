@@ -24,6 +24,49 @@ CK_TURN_TS=0
 : "${CK_LANE:=codexc}"
 CK_TAG="${CK_LANE#codexc-}"
 
+# The helper is resolved relative to the sourced library, including bin symlinks.
+CK_COMMON_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd -P)"
+
+ck_window_check() {  # rc 0=allowed; 125=closed/invalid/unavailable
+    local answer extra helper_rc=0
+    CK_WINDOW_ALLOWED=0; CK_WINDOW_DEADLINE=0; CK_WINDOW_NEXT_OPEN=0
+    CK_WINDOW_REASON=check_failed
+    if [ -z "${CODEXC_ACTIVE_WINDOW:-}" ]; then
+        CK_WINDOW_ALLOWED=1; CK_WINDOW_REASON=disabled
+        return 0
+    fi
+    answer="$(CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ-Asia/Shanghai}" python3 "$CK_COMMON_DIR/ck-window.py" --format tsv 2>/dev/null)" || helper_rc=$?
+    IFS="$TAB" read -r CK_WINDOW_ALLOWED CK_WINDOW_DEADLINE CK_WINDOW_NEXT_OPEN CK_WINDOW_REASON extra <<< "$answer"
+    # A failed/partial helper must never accidentally open the gate.
+    case "$CK_WINDOW_ALLOWED" in 0|1) ;; *) CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response; return 125 ;; esac
+    case "$CK_WINDOW_DEADLINE" in ''|*[!0-9]*) CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response; return 125 ;; esac
+    case "$CK_WINDOW_NEXT_OPEN" in ''|*[!0-9]*) CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response; return 125 ;; esac
+    if [ "${#CK_WINDOW_DEADLINE}" -gt 12 ] || [ "${#CK_WINDOW_NEXT_OPEN}" -gt 12 ] || [ -n "$extra" ]; then
+        CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response; return 125
+    fi
+    case "$answer" in *$'\n'*) CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response; return 125 ;; esac
+    if [ "$helper_rc" != 0 ]; then
+        CK_WINDOW_ALLOWED=0
+        case "$CK_WINDOW_REASON" in invalid_window|invalid_timezone|invalid_clock) ;; *) CK_WINDOW_REASON=check_failed ;; esac
+        return 125
+    fi
+    case "$CK_WINDOW_ALLOWED:$CK_WINDOW_REASON" in
+        1:allowed) [ "$CK_WINDOW_DEADLINE" != 0 ] && return 0 ;;
+        0:outside_window) return 125 ;;
+    esac
+    CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response
+    return 125
+}
+
+ck_run_check() {  # a manual project halt takes precedence over clock policy
+    if [ -e .codingkeeper/loop.halt ]; then
+        CK_WINDOW_ALLOWED=0; CK_WINDOW_DEADLINE=0; CK_WINDOW_NEXT_OPEN=0
+        CK_WINDOW_REASON=manual_stop
+        return 125
+    fi
+    ck_window_check
+}
+
 normalize_uint() {
     local name="$1" value="$2" fallback="$3" minimum="$4" maximum="$5" number
     case "$value" in
@@ -48,9 +91,11 @@ normalize_uint() {
 trim_watchlog() {
     [ -f "$WATCHLOG" ] || return 0
     [ "$(stat -f '%z' "$WATCHLOG" 2>/dev/null || echo 0)" -lt 5242880 ] && return 0
-    tail -n 2000 "$WATCHLOG" > "$WATCHLOG.tmp" 2>/dev/null \
-        && cat "$WATCHLOG.tmp" > "$WATCHLOG" 2>/dev/null
-    rm -f "$WATCHLOG.tmp" 2>/dev/null
+    local temp
+    temp="$(mktemp "$WATCHLOG.trim.XXXXXX")" || return 0
+    tail -n 2000 "$WATCHLOG" > "$temp" 2>/dev/null \
+        && cat "$temp" > "$WATCHLOG" 2>/dev/null
+    rm -f "$temp" 2>/dev/null
     return 0
 }
 
@@ -85,70 +130,182 @@ notify() {
     return 0
 }
 
-kill_tree() {  # $1=pid — kill a timed-out gate/review and its whole child tree
-    local p
-    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
-    kill -9 "$1" 2>/dev/null
+# The lock file inode is never removed: flock serializes both acquisition and
+# release. The separate owner survives accidental deletion of legacy loop.pid.
+runner_lock_acquire() {
+    CK_LOCK_TOKEN="$(python3 - "$$" <<'PYLOCK'
+import errno, fcntl, json, os, secrets, sys, tempfile
+pid = int(sys.argv[1])
+state = ".codingkeeper"
+os.makedirs(state, exist_ok=True)
+with os.fdopen(os.open(os.path.join(state, "runner.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "a+") as lock:
+    os.chmod(lock.name, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    candidates = []
+    for name in ("runner.owner", "loop.pid", "../.codexc/loop.pid"):
+        try:
+            with open(os.path.join(state, name)) as fh:
+                data = fh.read().strip()
+            owner = json.loads(data).get("pid") if name == "runner.owner" else int(data)
+            if not isinstance(owner, int) or owner <= 1:
+                raise ValueError("invalid PID")
+            candidates.append(owner)
+        except FileNotFoundError:
+            pass
+        except (ValueError, TypeError, AttributeError):
+            print("runner lock contains invalid metadata; inspect .codingkeeper/" + name, file=sys.stderr)
+            raise SystemExit(1)
+    for owner in candidates:
+        try:
+            os.kill(owner, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        print(f"another runner (pid {owner}) is already running for this project", file=sys.stderr)
+        raise SystemExit(1)
+    token = secrets.token_hex(16)
+    for name, value in (("runner.owner", json.dumps({"pid": pid, "token": token})), ("loop.pid", str(pid))):
+        fd, temp = tempfile.mkstemp(prefix=".runner-", dir=state)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(value + "\n")
+            os.replace(temp, os.path.join(state, name))
+        finally:
+            if os.path.exists(temp): os.unlink(temp)
+    print(token, end="")
+PYLOCK
+)" || { log "another runner owns the project lock, or its metadata cannot be read"; return 1; }
     return 0
+}
+
+kill_tree() {  # stop parents before walking so they cannot fork during cleanup
+    local pid="${1:-}" p
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#pid}" -le 10 ] && [ "$pid" -gt 1 ] && [ "$pid" != "$$" ] || return 1
+    kill -STOP "$pid" 2>/dev/null || return 0
+    for p in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$p"; done
+    kill -KILL "$pid" 2>/dev/null
+    return 0
+}
+
+review_groups_prepare() {
+    [ -n "${CK_REVIEW_GROUP_DIR:-}" ] && return 0
+    CK_REVIEW_GROUP_DIR="$(mktemp -d .codingkeeper/.review-groups.XXXXXX)" || return 1
+    CK_REVIEW_GROUP_TOKEN="${CK_LOCK_TOKEN:-$$-$RANDOM-$RANDOM}"
+}
+
+review_group_stop() {
+    local review_pid="$1" cleanup_pid
+    if [ -f "$CK_REVIEW_GROUP_DIR/$review_pid.json" ]; then
+        # Keep cleanup in its own child: Bash 3.2 can tail-exec this nested
+        # function in a background review, losing the caller's final verdict.
+        command python3 "$CK_COMMON_DIR/ck-review-process.py" cleanup "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" "$review_pid" &
+        cleanup_pid=$!
+        wait "$cleanup_pid"
+    else
+        # Registration precedes exec; no MCP descendants can exist yet.
+        kill_tree "$review_pid"
+    fi
 }
 
 loop_cleanup() {
+    local child
+    for child in $(pgrep -P "$$" 2>/dev/null); do kill_tree "$child"; done
+    if [ -n "${CK_REVIEW_GROUP_DIR:-}" ]; then
+        command python3 "$CK_COMMON_DIR/ck-review-process.py" cleanup "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" || true
+        rmdir "$CK_REVIEW_GROUP_DIR" 2>/dev/null || true
+    fi
+    # Paths are runner-generated names without spaces, never user queue text.
     # shellcheck disable=SC2086
-    rm -f $LOOP_TMP_FILES ".codingkeeper/loop.pid" 2>/dev/null
+    rm -f $LOOP_TMP_FILES 2>/dev/null
+    [ -n "${CK_LOCK_TOKEN:-}" ] || return 0
+    python3 - "$$" "$CK_LOCK_TOKEN" <<'PYLOCK'
+import fcntl, json, os, sys
+state = ".codingkeeper"
+try:
+    with os.fdopen(os.open(os.path.join(state, "runner.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(os.path.join(state, "runner.owner")) as fh:
+            owner = json.load(fh)
+        if owner == {"pid": int(sys.argv[1]), "token": sys.argv[2]}:
+            for name in ("loop.pid", "runner.owner"):
+                try: os.unlink(os.path.join(state, name))
+                except FileNotFoundError: pass
+except (OSError, ValueError, TypeError):
+    pass
+PYLOCK
     return 0
 }
 
-queue_next() {  # $1=queue file -> prints "lineno<TAB>b64(task)" or nothing
-    python3 - "$1" <<'PYEOF'
-import base64, sys
-try:
-    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-except OSError:
-    raise SystemExit(0)
-section = ""
-for i, line in enumerate(lines, 1):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section != "ready" or not stripped.startswith("- [ ]"):
-        continue
-    task = stripped[len("- [ ]"):].strip()
-    if not task:
-        continue
-    b64 = base64.b64encode(task.encode("utf-8")).decode("ascii")
-    print(f"{i}\t{b64}")
-    break
-PYEOF
+queue_next() {  # rc 0 = found or empty; rc 2 = unreadable/invalid, never burn
+    python3 "$CK_COMMON_DIR/ck-leaf.py" next "$1"
 }
 
-queue_mark_done() {  # $1=queue file $2=b64(task) -> prints "marked" or "not-found"
-    python3 - "$1" "$2" <<'PYEOF'
-import base64, os, sys
-queue, b64 = sys.argv[1], sys.argv[2]
-task = base64.b64decode(b64).decode("utf-8", "replace")
-try:
-    lines = open(queue, encoding="utf-8").read().splitlines()
-except OSError:
-    print("not-found"); raise SystemExit(0)
-section = ""
-done_it = False
-for i, line in enumerate(lines):
-    stripped = line.strip()
-    if stripped.startswith("##"):
-        section = stripped.lstrip("#").strip().lower()
-        continue
-    if section == "ready" and stripped == f"- [ ] {task}":
-        lines[i] = line.replace("- [ ]", "- [x]", 1)
-        done_it = True
-        break
-# 原子替换: queue.md 是循环的任务源真相, 半截写会让任务行凭空消失
-tmp = queue + ".codingkeeper-tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    fh.write("\n".join(lines) + "\n")
-os.replace(tmp, queue)
-print("marked" if done_it else "not-found")
-PYEOF
+queue_mark_done() {  # compatibility API; runners use leaf_accept transaction
+    python3 "$CK_COMMON_DIR/ck-leaf.py" mark "$1" "$2"
+}
+
+leaf_begin() {
+    CODEXC_LEAF_EVIDENCE_DIR="$(python3 "$CK_COMMON_DIR/ck-leaf.py" begin "$1")" || return 1
+    export CODEXC_LEAF_EVIDENCE_DIR
+}
+
+leaf_candidate() {
+    [ -n "${CODEXC_LEAF_EVIDENCE_DIR:-}" ] || return 1
+    python3 "$CK_COMMON_DIR/ck-leaf.py" candidate "$CODEXC_LEAF_EVIDENCE_DIR" || return 1
+    CODEXC_LEAF_BASE_HEAD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("head") or "")' "$CODEXC_LEAF_EVIDENCE_DIR/baseline.json")" || return 1
+    CODEXC_LEAF_CANDIDATE_HEAD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("head") or "")' "$CODEXC_LEAF_EVIDENCE_DIR/candidate.json")" || return 1
+    export CODEXC_LEAF_BASE_HEAD CODEXC_LEAF_CANDIDATE_HEAD
+}
+
+leaf_verify() {
+    [ -n "${CODEXC_LEAF_EVIDENCE_DIR:-}" ] || return 1
+    python3 "$CK_COMMON_DIR/ck-leaf.py" verify "$CODEXC_LEAF_EVIDENCE_DIR"
+}
+
+leaf_gate_run() {
+    local leaf_rc
+    leaf_candidate || return 126
+    : > "$1" || return 126
+    gate_run "$1"; leaf_rc=$?
+    [ "$leaf_rc" != 125 ] || return 125
+    leaf_save_output "$1" gate || return 126
+    leaf_verify || return 126
+    return "$leaf_rc"
+}
+
+leaf_changed() {
+    python3 "$CK_COMMON_DIR/ck-leaf.py" changed "$CODEXC_LEAF_EVIDENCE_DIR"
+}
+
+leaf_accept() {
+    python3 "$CK_COMMON_DIR/ck-leaf.py" accept "$CODEXC_LEAF_EVIDENCE_DIR" "$1" "$2"
+}
+
+leaf_recover() { python3 "$CK_COMMON_DIR/ck-leaf.py" recover; }
+
+leaf_save_output() {
+    [ -n "${CODEXC_LEAF_EVIDENCE_DIR:-}" ] || return 0
+    python3 - "$1" "$CODEXC_LEAF_EVIDENCE_DIR" "$2" <<'PYSAVE'
+import os, shutil, sys, tempfile
+src, directory, label = sys.argv[1:]
+fd, out = tempfile.mkstemp(prefix=label + "-", suffix=".log", dir=directory)
+with os.fdopen(fd, "wb") as target, open(src, "rb") as source:
+    shutil.copyfileobj(source, target)
+PYSAVE
+}
+
+require_gate_check() {
+    [ "${CODEXC_REQUIRE_GATE:-0}" = "1" ] || return 0
+    if [ ! -f .codingkeeper/gate.sh ]; then
+        echo "真实验收 gate 缺失: 请配置 .codingkeeper/gate.sh" >&2
+        return 1
+    fi
+    if grep -qE '^# CK_GATE_PLACEHOLDER=1$|^echo "\(gate placeholder[ :—]' .codingkeeper/gate.sh; then
+        echo "gate 仍是官方占位模板: 请配置真实测试命令" >&2
+        return 1
+    fi
 }
 
 journal_append() {
@@ -157,14 +314,25 @@ journal_append() {
 
 gate_run() {  # $1=outfile; 0=pass
     local outfile="$1" gpid waited=0 rc
-    : > "$outfile"
-    if [ ! -x ".codingkeeper/gate.sh" ]; then
+    : > "$outfile" || return 1
+    if ! ck_run_check; then
+        printf '[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
+        return 125
+    fi
+    require_gate_check >> "$outfile" 2>&1 || return 1
+    if [ ! -e ".codingkeeper/gate.sh" ] && [ ! -L ".codingkeeper/gate.sh" ]; then
         printf 'no gate.sh — gate skipped\n' > "$outfile"
         return 0
     fi
     bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
     gpid=$!
     while kill -0 "$gpid" 2>/dev/null; do
+        if ! ck_run_check; then
+            kill_tree "$gpid"
+            wait "$gpid" 2>/dev/null
+            printf '\n[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
+            return 125
+        fi
         if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
             kill_tree "$gpid"
             wait "$gpid" 2>/dev/null
@@ -178,62 +346,150 @@ gate_run() {  # $1=outfile; 0=pass
     done
     wait "$gpid" 2>/dev/null
     rc=$?
+    if ! ck_run_check; then
+        printf '\n[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
+        return 125
+    fi
     return "$rc"
 }
 
 gate_tail() { tr '\n' ' ' < "$1" | tail -c 500; }
 
-parse_bugs() {  # $1=review output file -> bug count or "parse-fail"
-    [ -f "$1" ] || { printf 'parse-fail'; return; }
-    local last
-    last="$(grep -an 'BUGS:' "$1" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
-    case "$last" in
-        ''|*[!0-9]*) printf 'parse-fail' ;;
-        *) printf '%s' "$last" ;;
-    esac
+parse_bugs() {  # only a complete verdict line, with a bounded decimal count
+    python3 - "$1" <<'PYBUGS'
+import re, sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        text = fh.read().replace(b"\x00", b"").decode("utf-8", "replace")
+except OSError:
+    print("parse-fail", end=""); raise SystemExit(0)
+lines = [line.strip() for line in text.splitlines() if "BUGS:" in line]
+match = re.fullmatch(r"BUGS:[ \t]*([0-9]+)", lines[-1]) if lines else None
+value = match.group(1).lstrip("0") or "0" if match else ""
+print(value if value and len(value) <= 6 else "parse-fail", end="")
+PYBUGS
 }
 
-review_run() {  # $1=task text $2=outfile -> bug count / "parse-fail" / "timeout"
-    local out="$2" instrfile="$2.instr" rpid waited=0 bugs
-    : > "$out"
+review_run() {  # -> decimal / parse-fail / timeout; window-closed returns rc 125
+    local out="$2" instrfile="$2.instr" rpid waited=0 rc instr
+    review_groups_prepare || { printf 'parse-fail'; return 0; }
+    : > "$out" || { printf 'parse-fail'; return 0; }
+    if ! ck_run_check; then
+        printf '[review interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$out"
+        printf 'window-closed'
+        return 125
+    fi
     instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
-    printf '%s' "$instr" > "$instrfile"
+    if [ -n "${CODEXC_LEAF_EVIDENCE_DIR:-}" ]; then
+        instr="你是独立验收审查员。本叶目标: $1 。本叶基线 HEAD=${CODEXC_LEAF_BASE_HEAD:-unborn}；候选 HEAD=${CODEXC_LEAF_CANDIDATE_HEAD:-unborn}。先读取 $CODEXC_LEAF_EVIDENCE_DIR/changes.diff 和 baseline.json/candidate.json；它们给出本叶开工前到本次候选的精确变化（包括 worker 已提交改动，勿只看 git diff HEAD）。按目标检查实现和证据，再阅读相关源文件。只读审查，不修改源码、测试、门禁或队列。只有目标已满足、未发现真实bug才输出 BUGS: 0；否则列出文件:行号及真实问题，最后一行 BUGS: <数量>。"
+    fi
+    printf '%s' "$instr" > "$instrfile" || { printf 'parse-fail'; return 0; }
     if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
-        ( eval "$CODEXC_REVIEW_CMD" ) < "$instrfile" > "$out" 2>&1 &
+        command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" /bin/bash -c "$CODEXC_REVIEW_CMD" < "$instrfile" > "$out" 2>&1 &
     else
-        ( codex exec --ephemeral -s read-only - ) < "$instrfile" > "$out" 2>&1 &
+        command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" codex exec --ephemeral -s read-only - < "$instrfile" > "$out" 2>&1 &
     fi
     rpid=$!
     while kill -0 "$rpid" 2>/dev/null; do
+        if ! ck_run_check; then
+            review_group_stop "$rpid"
+            wait "$rpid" 2>/dev/null
+            printf '\n[review interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$out"
+            rm -f "$instrfile"
+            printf 'window-closed'
+            return 125
+        fi
         if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
-            kill_tree "$rpid"
+            review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
             printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
             rm -f "$instrfile"
             printf 'timeout'
             return 0
         fi
-        # 阶段心跳: 审查最长 1800s, 无心跳横幅会误显"已停"
         [ $((waited % 30)) -eq 29 ] && status_touch
         sleep 1
         waited=$((waited + 1))
     done
-    wait "$rpid" 2>/dev/null
+    wait "$rpid" 2>/dev/null; rc=$?
+    review_group_stop "$rpid" || { printf 'parse-fail'; return 0; }
     rm -f "$instrfile"
-    LC_ALL=C tr -d '\000' < "$out" > "$out.n" && mv "$out.n" "$out"
+    if ! ck_run_check; then
+        printf '\n[review interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$out"
+        printf 'window-closed'
+        return 125
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf '\n[review exited with status %s]\n' "$rc" >> "$out"
+        printf 'parse-fail'
+        return 0
+    fi
+    leaf_save_output "$out" review || { printf 'parse-fail'; return 0; }
     parse_bugs "$out"
+}
+
+review_batch() {  # 0=all zero; 1=findings; 2=timeout; 3=unusable; 125=window/stop
+    local task="$1" base="$2" count="${3:-$CODEXC_REVIEW_PASS}" i p pids=() rc=0 child_rc b first_bad=""
+    : > "$base"
+    REVIEW_BATCH_RESULT=0
+    for ((i=1; i<=count; i++)); do
+        review_run "$task" "$base.$i" > "$base.$i.result" &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do
+        wait "$p" 2>/dev/null; child_rc=$?
+        if [ "$child_rc" = 125 ]; then
+            rc=125; REVIEW_BATCH_RESULT=window-closed
+        elif [ "$child_rc" != 0 ] && [ "$rc" != 125 ]; then
+            rc=3; REVIEW_BATCH_RESULT=parse-fail
+        fi
+    done
+    for ((i=1; i<=count; i++)); do
+        b="$(cat "$base.$i.result" 2>/dev/null)"
+        case "$b" in
+            window-closed) rc=125; REVIEW_BATCH_RESULT=window-closed ;;
+            timeout) [ "$rc" = 125 ] || { rc=2; REVIEW_BATCH_RESULT=timeout; } ;;
+            parse-fail|''|*[!0-9]*) [ "$rc" = 125 ] || [ "$rc" -eq 2 ] || { rc=3; REVIEW_BATCH_RESULT=parse-fail; } ;;
+            0) ;;
+            *) [ "$rc" -ne 0 ] || { rc=1; REVIEW_BATCH_RESULT=bugs; } ;;
+        esac
+        if [ "$b" != "0" ]; then
+            printf '\n[review %s: %s]\n' "$i" "$b" >> "$base"
+            cat "$base.$i" >> "$base" 2>/dev/null
+        fi
+    done
+    return "$rc"
+}
+
+review_collect() {  # Direct call only: command substitution defers TERM traps.
+    local resultfile="$2.result" review_job review_rc
+    REVIEW_RESULT=parse-fail
+    : > "$resultfile" || return 1
+    review_run "$1" "$2" > "$resultfile" &
+    review_job=$!
+    wait "$review_job"; review_rc=$?
+    REVIEW_RESULT="$(cat "$resultfile")"
+    rm -f "$resultfile"
+    return "$review_rc"
 }
 
 review_tail() { LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600; }
 
-result_marker() {  # $1=stdout file -> DONE / BLOCKED / none
-    [ -s "$1" ] || { printf 'none'; return; }
-    line="$(grep -ioE 'TASK_RESULT:[[:space:]]*(DONE|BLOCKED)' "$1" | tail -1 | tr '[:upper:]' '[:lower:]')"
-    case "$line" in
-        *done*)    printf 'DONE' ;;
-        *blocked*) printf 'BLOCKED' ;;
-        *)         printf 'none' ;;
-    esac
+result_marker() {  # only the final nonempty line may complete the protocol
+    python3 - "$1" <<'PYMARK'
+import re, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    lines = []
+last = next((line.strip() for line in reversed(lines) if line.strip()), "")
+if re.search(r"TASK_RESULT:[ \t]*DONE(?:[ \t]+\(idle\))?$", last, re.I):
+    print("DONE", end="")
+elif re.search(r"TASK_RESULT:[ \t]*BLOCKED(?::.*)?$", last, re.I):
+    print("BLOCKED", end="")
+else:
+    print("none", end="")
+PYMARK
 }
 
 # one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
@@ -242,50 +498,67 @@ result_marker() {  # $1=stdout file -> DONE / BLOCKED / none
 # 运行时残渣 (loop.pid/.hl-*/.loop-*) 不迁: 旧目录的 pid 合并过来会被锁误读
 migrate_state_dir() {
     [ -d .codexc ] || return 0
-    if [ ! -d .codingkeeper ]; then
-        mv .codexc .codingkeeper 2>/dev/null
-        rm -f .codingkeeper/loop.pid .codingkeeper/.hl-* .codingkeeper/.loop-* 2>/dev/null
-        log "state dir migrated: .codexc -> .codingkeeper (journal/queue preserved)"
-        return 0
-    fi
-    ( shopt -s dotglob; cd .codexc 2>/dev/null && mv -f * ../.codingkeeper/ 2>/dev/null )
-    rmdir .codexc 2>/dev/null
-    rm -f .codingkeeper/loop.pid .codingkeeper/.hl-* .codingkeeper/.loop-* 2>/dev/null
-    log "state dir merged: .codexc contents -> .codingkeeper"
+    # Migrate only durable data. The current runner may already hold its lock;
+    # old runtime files must never replace that ownership or another live lane.
+    python3 - <<'PYMIGRATE'
+import os
+source, target = ".codexc", ".codingkeeper"
+os.makedirs(target, exist_ok=True)
+for name in os.listdir(source):
+    if name in {"loop.pid", "runner.lock", "runner.owner", "watcher.pid", "status.json"} or name.startswith((".hl-", ".loop-", ".runner-")):
+        continue
+    # Existing new-format data is authoritative; keep conflicts for inspection.
+    dest = os.path.join(target, name)
+    if not os.path.lexists(dest):
+        os.rename(os.path.join(source, name), dest)
+try: os.rmdir(source)
+except OSError: pass
+PYMIGRATE
+    log "state migration checked: durable .codexc data copied without replacing current state"
 }
 
-status_write() {  # $1=状态文本 $2=工具名 $3=active(1/0) $4=started_at epoch(0=未知)
+status_write() {  # text tool active started_at [phase] [next_run_at]
     local pdir=".codingkeeper"
     # 记录最近载荷供 status_touch 心跳复用 (gate/review 阶段保活)
     _ST_TASK="$1"; _ST_TOOL="${2:-}"; _ST_ACTIVE="${3:-0}"; _ST_STARTED="${4:-0}"
-    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" <<'PYEOF'
-import json, os, sys
+    _ST_PHASE="${5:-}"; _ST_NEXT="${6:-0}"
+    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" "${5:-}" "${6:-0}" <<'PYEOF'
+import json, os, sys, tempfile
 pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
 task = " ".join(str(task).split())
 if len(task) > 32:
     task = task[:30].rstrip() + "…"
 tool, active, started_at = sys.argv[4], sys.argv[5] == "1", int(sys.argv[6] or 0)
+phase = sys.argv[7] or task
+try:
+    next_run_at = max(0, int(sys.argv[8] or 0))
+except (ValueError, OverflowError):
+    next_run_at = 0
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 # ready 计数口径 = 仅 ## ready 区 (review-needed 的自评任务不计入)
 ready = 0
 if os.path.exists(os.path.join(pdir, "queue.md")):
     sec = ""
-    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8"):
+    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8", errors="replace"):
         s = line.strip()
         if s.startswith("##"):
             sec = s.lstrip("#").strip().lower()
             continue
         if sec == "ready" and s.startswith("- [ ]"):
             ready += 1
-snap = {"project": project, "task": task, "phase": task, "parked": parked,
+snap = {"project": project, "task": task, "phase": phase, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
-        "ready": ready,
+        "next_run_at": next_run_at, "ready": ready,
         "ts": int(__import__("time").time())}
 # 原子替换: 桌面面板每 2s 轮询本文件, 非原子写会被读到半截 JSON
-tmp = os.path.join(pdir, "status.json.codingkeeper-tmp")
-with open(tmp, "w", encoding="utf-8") as fh:
-    json.dump(snap, fh, ensure_ascii=False)
-os.replace(tmp, os.path.join(pdir, "status.json"))
+os.makedirs(pdir, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".status-", dir=pdir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh, ensure_ascii=False)
+    os.replace(tmp, os.path.join(pdir, "status.json"))
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
 PYEOF
     return 0
 }
@@ -294,20 +567,39 @@ PYEOF
 # 横幅的 running 判定依赖 ts 新鲜度 — 阻塞阶段无心跳会被误显"已停")
 status_touch() {
     [ -n "${_ST_TASK:-}" ] || return 0
-    status_write "$_ST_TASK" "$_ST_TOOL" "$_ST_ACTIVE" "$_ST_STARTED"
+    status_write "$_ST_TASK" "$_ST_TOOL" "$_ST_ACTIVE" "$_ST_STARTED" "${_ST_PHASE:-}" "${_ST_NEXT:-0}"
 }
 
 register_project() {
-    # /tmp 下的测试世界不注册 — 集成测试会污染真实注册表 (悬浮条/ck status)
-    case "$PWD" in /tmp/*|/private/tmp/*|"$TMPDIR"*) return 0 ;; esac
-    # 物理路径归一: 符号链接路径 (~/Documents/ai → .../AIworkspace) 会把同一
-    # 物理目录注册两次, 悬浮条重复计数 (实测 zcode 3 = 2 真实 + 1 幽灵)
     local real
-    real="$(cd "$PWD" 2>/dev/null && pwd -P)" || real="$PWD"
-    mkdir -p "$HOME/.codingkeeper" 2>/dev/null
-    local reg="$HOME/.codingkeeper/projects"
-    grep -qxF "$real" "$reg" 2>/dev/null || printf '%s\n' "$real" >> "$reg"
-    return 0
+    real="$(pwd -P)" || return 1
+    if [ "${CODEXC_REGISTER_TEMP:-0}" != "1" ]; then
+        case "$real/" in /tmp/*|/private/tmp/*|"${TMPDIR:-/tmp/}"*) return 0 ;; esac
+    fi
+    python3 - "$HOME/.codingkeeper" "$real" <<'PYREGISTER'
+import fcntl, os, sys, tempfile
+state, project = sys.argv[1:]
+if "\n" in project or "\r" in project:
+    print("project path contains a newline and cannot be registered", file=sys.stderr)
+    raise SystemExit(1)
+os.makedirs(state, mode=0o700, exist_ok=True)
+with os.fdopen(os.open(os.path.join(state, "projects.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "a+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    registry = os.path.join(state, "projects")
+    try:
+        with open(registry, encoding="utf-8") as fh:
+            entries = [os.path.realpath(p) for p in fh.read().splitlines() if p]
+    except FileNotFoundError:
+        entries = []
+    entries = list(dict.fromkeys(entries + [project]))
+    fd, tmp = tempfile.mkstemp(prefix=".projects-", dir=state)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(entries) + "\n")
+        os.replace(tmp, registry)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+PYREGISTER
 }
 
 usage() {

@@ -1,5 +1,39 @@
 import AppKit
 
+// Keep one panel per user. Kernel ownership disappears on exit/crash; never
+// unlink the lock inode, and never inherit it into child executables.
+final class KeeperInstanceLock {
+    private var descriptor: Int32 = -1
+
+    func acquire(_ path: String) throws -> Bool {
+        if descriptor >= 0 { return true }
+        // BSD O_EXLOCK acquires the nonblocking flock atomically with open;
+        // unlike the C flock name, it has no Swift struct/function ambiguity.
+        let fd = Darwin.open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK | O_NONBLOCK, 0o600)
+        guard fd >= 0 else {
+            let code = errno
+            if code == EWOULDBLOCK || code == EAGAIN { return false }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            let code = errno; Darwin.close(fd)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
+            Darwin.close(fd)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        descriptor = fd
+        return true
+    }
+
+    func release() {
+        if descriptor >= 0 { Darwin.close(descriptor); descriptor = -1 }
+    }
+    deinit { release() }
+}
+
 // 可聚焦面板
 final class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -9,8 +43,9 @@ final class KeyablePanel: NSPanel {
 final class KeeperContentView: NSVisualEffectView {
     var contentRect: NSRect = .zero
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: nil)
-        return contentRect.contains(local) ? self : nil
+        let local = convert(point, from: superview)
+        guard contentRect.contains(local) else { return nil }
+        return super.hitTest(point)
     }
 }
 
@@ -24,6 +59,7 @@ final class KeeperContentView: NSVisualEffectView {
 // 每轮刷新只走一个分支, 子视图 frame 按状态显式设置, 动画仅在高度变化时发生。
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let instanceLock = KeeperInstanceLock()
     var panel: KeyablePanel!
     var contentView: KeeperContentView!
     var bannerText: NSTextField!
@@ -49,8 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var spinnerIdx = 0
     var spinnerTimer: Timer?
     var lastCountsModel: [(tool: String, run: Int, pend: Int)] = []
+    var lastWaitingSummary = ""
     var spinnerFrames: [NSImage] = []
     var pauseIcon: NSImage?
+    var toolImages: [String: NSImage] = [:]
+    private let statusQueue = DispatchQueue(label: "codingkeeper.status", qos: .utility)
+    private var statusReadPending = false
+    private var lastStatusRead = Date.distantPast
+    private var cachedStatuses: [(String, ProjStatus)] = []
 
     let hIdle: CGFloat = 3        // 空闲: 细线
     let hSmall: CGFloat = 22      // 小横幅: 状态计数
@@ -59,9 +101,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let freshWindow: TimeInterval = 120   // status.json 心跳视为存活的窗口
 
     func applicationDidFinishLaunching(_: Notification) {
+        do {
+            let directory = NSHomeDirectory() + "/.codingkeeper"
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            guard try instanceLock.acquire(directory + "/desktop-instance.lock") else {
+                NSApp.terminate(nil)
+                return
+            }
+        } catch {
+            fputs("CodingKeeperBar: 无法取得单实例锁: \(error.localizedDescription)\n", stderr)
+            NSApp.terminate(nil)
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
-        guard let screen = NSScreen.screens.first else { return }   // 无屏环境(如 SSH 启动)直接退出, 防越界崩溃
-        let bx = (screen.frame.width - barW) / 2
+        guard let screen = NSScreen.screens.first else { NSApp.terminate(nil); return }
+        let bx = screen.frame.minX + (screen.frame.width - barW) / 2
 
         panel = KeyablePanel(contentRect: NSRect(x: bx, y: screen.frame.maxY - hIdle,
                                                  width: barW, height: hIdle),
@@ -173,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
             guard let self = self, let s0 = NSScreen.screens.first else { return }
             let p = NSEvent.mouseLocation
-            let bx = (s0.frame.width - self.barW) / 2
+            let bx = s0.frame.minX + (s0.frame.width - self.barW) / 2
             let inStrip = p.x >= bx - 40 && p.x <= bx + self.barW + 40
                           && p.y >= s0.frame.maxY - 24
             if inStrip != self.hoverActive {
@@ -190,15 +244,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func dismissNotify() { notifyPanel.orderOut(nil) }
 
+    // Open nonblocking and inspect the opened descriptor. A FIFO, device or
+    // oversized/corrupt status must not freeze the panel or exhaust memory.
+    func boundedFile(_ path: String, limit: Int) -> Data? {
+        let fd = Darwin.open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size >= 0, info.st_size <= limit else { return nil }
+        guard let data = try? handle.read(upToCount: limit + 1), data.count <= limit else { return nil }
+        return data
+    }
+
     func registry() -> [String] {
         let reg = NSHomeDirectory() + "/.codingkeeper/projects"
-        guard let s = try? String(contentsOfFile: reg, encoding: .utf8) else { return [] }
+        guard let data = boundedFile(reg, limit: 2 * 1024 * 1024),
+              let s = String(data: data, encoding: .utf8) else { return [] }
         // 与 ck-common register_project 的 /tmp 过滤对齐 (含 realpath 的 /private/tmp 与系统 TMPDIR);
         // 物理路径归一去重: 符号链接路径与真实路径指向同一目录时, status.json 会被读两次 → 计数翻倍
         let tmpPrefixes = ["/tmp/", "/private/tmp/", NSTemporaryDirectory()]
         var seen = Set<String>()
         var out: [String] = []
         for line in s.split(separator: "\n").map(String.init) {
+            guard line.hasPrefix("/") else { continue }
             let real = URL(fileURLWithPath: line).resolvingSymlinksInPath().path
             guard FileManager.default.fileExists(atPath: real),
                   !tmpPrefixes.contains(where: { real.hasPrefix($0) }),
@@ -216,6 +285,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var active = false
         var parked = false
         var running = false
+        var phase = ""
+        var nextRunAt: TimeInterval = 0
+        var hasWaitingPhase: Bool { ["waiting_window", "waiting_quota", "backoff"].contains(phase) }
+        var waiting = false
         var startedAt: TimeInterval = 0
         var ts: TimeInterval = 0
     }
@@ -224,21 +297,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var st = ProjStatus()
         st.name = proj.split(separator: "/").last.map(String.init) ?? proj
         let kd = proj + "/.codingkeeper"
-        if let data = FileManager.default.contents(atPath: kd + "/status.json"),
+        if let data = boundedFile(kd + "/status.json", limit: 256 * 1024),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            st.task = obj["task"] as? String ?? ""
-            st.tool = obj["tool"] as? String ?? ""
+            st.task = String((obj["task"] as? String ?? "").prefix(4096))
+            let tool = obj["tool"] as? String ?? ""
+            st.tool = ["codex", "claude", "pi", "opencode", "zcode", "dsh", "headless"].contains(tool) ? tool : ""
             st.active = obj["active"] as? Bool ?? false
+            st.phase = obj["phase"] as? String ?? ""
+            let next = obj["next_run_at"] as? TimeInterval ?? 0
+            st.nextRunAt = next.isFinite && next > 0 && next <= 253402300799 ? next : 0
             st.startedAt = obj["started_at"] as? TimeInterval ?? 0
             st.ts = obj["ts"] as? TimeInterval ?? 0
         }
         // running 判定只认 status.json 心跳新鲜度: runner 对 work/gate/review
         // 三阶段均有 30s 心跳, fresh 精确反映"真在烧"。不再用 pidAlive (kill -0):
         // PID 被系统复用/僵尸进程时会有假阳性, runner 退出后 120s fresh 自然过期
-        let fresh = Date().timeIntervalSince1970 - st.ts < freshWindow
+        let age = Date().timeIntervalSince1970 - st.ts
+        let fresh = st.ts.isFinite && st.ts > 0 && age >= -5 && age < freshWindow
         st.parked = FileManager.default.fileExists(atPath: kd + "/loop.halt")
-        st.running = st.active && !st.parked && fresh
+        st.waiting = st.hasWaitingPhase && !st.parked && fresh
+        st.running = st.active && !st.parked && !st.hasWaitingPhase && fresh
         return st
+    }
+
+    func waitingDescription(_ status: ProjStatus) -> String {
+        guard status.waiting && !status.parked else { return "" }
+        let next: String
+        if status.nextRunAt > Date().timeIntervalSince1970 {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "HH:mm"
+            next = formatter.string(from: Date(timeIntervalSince1970: status.nextRunAt))
+        } else {
+            next = ""
+        }
+        switch status.phase {
+        case "waiting_window": return next.isEmpty ? "等待运行时段" : "等待\(next)"
+        case "waiting_quota": return next.isEmpty ? "配额耗尽，等待额度恢复" : "配额耗尽 · 下次检查 \(next)"
+        case "backoff": return next.isEmpty ? "重试等待" : "重试等待 · \(next) 后重试"
+        default: return ""
+        }
+    }
+
+    func waitingSummary(_ statuses: [ProjStatus]) -> String {
+        guard !statuses.contains(where: { $0.running }) else { return "" }
+        let reasons = Set(statuses.filter { $0.waiting && !$0.parked }.map(waitingDescription))
+        if reasons.count == 1 { return reasons.first ?? "" }
+        return reasons.isEmpty ? "" : "等待恢复"
     }
 
     // 任务文本剥掉状态前缀 — 状态由卡片色点表达, 不重复
@@ -250,16 +355,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func duration(_ startedAt: TimeInterval) -> String {
-        guard startedAt > 0 else { return "—" }
-        let d = max(0, Int(Date().timeIntervalSince1970 - startedAt))
+        let now = Date().timeIntervalSince1970
+        guard startedAt.isFinite, startedAt > 0, startedAt <= now else { return "—" }
+        let d = Int(now - startedAt)
         if d < 60 { return "\(d)s" }
         if d < 3600 { return "\(d / 60)m" }
         return "\(d / 3600)h\(String(format: "%02d", d % 3600 / 60))m"
     }
 
     func completionTime(_ ts: TimeInterval) -> String {
-        guard ts > 0 else { return "—" }
-        let d = Date().timeIntervalSince1970 - ts
+        let now = Date().timeIntervalSince1970
+        guard ts.isFinite, ts > 0, ts <= now + 5 else { return "—" }
+        let d = now - ts
         if d < 60 { return "刚刚" }
         let f = DateFormatter()
         f.dateFormat = d < 86400 ? "HH:mm" : "MM-dd HH:mm"
@@ -312,6 +419,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 图标两侧用细空格对称留白: 此前左缘仅靠 icon 内边距 (~1.5px) 前贴后宽
     func rebuildCountsBanner() {
         let m = NSMutableAttributedString()
+        if !lastWaitingSummary.isEmpty {
+            m.append(NSAttributedString(string: lastWaitingSummary + "  ·  ",
+                attributes: [.foregroundColor: NSColor.white]))
+        }
         let thin = NSAttributedString(string: "\u{2009}")
         for (i, c) in lastCountsModel.enumerated() {
             if i > 0 { m.append(NSAttributedString(string: "  ·  ", attributes: [.foregroundColor: NSColor.secondaryLabelColor])) }
@@ -340,12 +451,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 缺省绘制品牌色圆角章 + 白色首字母
     func toolChip(_ tool: String) -> NSAttributedString {
         let size = NSSize(width: 18, height: 14)   // 14px 章体 + 4px 呼吸空间
-        var image: NSImage?
+        var image: NSImage? = toolImages[tool]
         let assetPath = NSHomeDirectory() + "/.codingkeeper/assets/\(tool).png"
-        if FileManager.default.fileExists(atPath: assetPath),
-           let img = NSImage(contentsOfFile: assetPath) {
+        if image == nil, let data = boundedFile(assetPath, limit: 1024 * 1024),
+           let img = NSImage(data: data) {
             image = img
-        } else {
+        }
+        if image == nil {
             let (color, glyph): (NSColor, String) = {
                 switch tool {
                 case "codex":    return (NSColor(srgbRed: 0x10/255.0, green: 0xA3/255.0, blue: 0x7F/255.0, alpha: 1), "C")
@@ -370,6 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return true
             }
         }
+        toolImages[tool] = image
         let att = NSTextAttachment()
         att.image = image
         att.bounds = NSRect(x: 0, y: -2, width: size.width, height: size.height)
@@ -377,7 +490,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func refresh() {
-        let projects = registry()
+        // Hover/spinner/UI events reuse the last snapshot. At most one disk
+        // scan is in flight, on a utility queue rather than the AppKit thread.
+        if !statusReadPending && Date().timeIntervalSince(lastStatusRead) >= 2 {
+            statusReadPending = true
+            lastStatusRead = Date()
+            statusQueue.async { [weak self] in
+                guard let self = self else { return }
+                let statuses = self.registry().map { ($0, self.readStatus($0)) }
+                DispatchQueue.main.async {
+                    self.cachedStatuses = statuses
+                    self.statusReadPending = false
+                    self.renderSnapshot()
+                }
+            }
+        }
+        renderSnapshot()
+    }
+
+    func renderSnapshot() {
+        lastFlashAt = lastFlashAt.filter { Date().timeIntervalSince1970 - $0.value < 10 }
         var running: [ProjStatus] = []
         var attention: [(name: String, tool: String, reason: String)] = []
         var doneItems: [(name: String, tool: String, task: String, ts: TimeInterval)] = []
@@ -386,14 +518,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var nowRunningKeys = Set<String>()
         var nowDoneKeys = Set<String>()
-        for proj in projects {
-            let st = readStatus(proj)
+        for (proj, st) in cachedStatuses {
             if st.parked {
                 events.append(("⏸ \(st.name) 自动循环已暂停", "加任务到 queue.md 或 rm loop.halt 复燃"))
                 attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
                                   reason: "自动循环已暂停 (rm loop.halt 复燃)"))
+            } else if st.waiting {
+                attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
+                                  reason: waitingDescription(st)))
             } else if st.task.hasPrefix("⛔") {
-                let fresh = Date().timeIntervalSince1970 - st.ts < freshWindow
+                let age = Date().timeIntervalSince1970 - st.ts
+                let fresh = st.ts.isFinite && st.ts > 0 && age >= -5 && age < freshWindow
                 if fresh {
                     attention.append((name: st.name, tool: st.tool.isEmpty ? "codex" : st.tool,
                                       reason: String(st.task.dropFirst("⛔ codex 停了: ".count)).trimmingCharacters(in: .whitespaces)))
@@ -401,14 +536,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if st.running {
                 running.append(st)
-                let key = "\(st.name)|\(st.task)"
+                let key = "\(proj)|\(st.task)"
                 nowRunningKeys.insert(key)
                 if didBaseline && !lastRunningKeys.contains(key) {
                     flashCandidate = (kind: "start", title: "▶️ \(st.tool.isEmpty ? "codex" : st.tool) · \(st.name)", body: st.task)
                 }
-            } else if st.task.hasPrefix("✅") {
+            } else if !st.waiting && st.task.hasPrefix("✅") {
                 doneItems.append((name: st.name, tool: st.tool, task: st.task, ts: st.ts))
-                let key = "\(st.name)|\(st.task)"
+                let key = "\(proj)|\(st.task)"
                 nowDoneKeys.insert(key)
                 if didBaseline && !lastDoneKeys.contains(key) && flashCandidate == nil {
                     flashCandidate = (kind: "done", title: "✅ \(st.tool.isEmpty ? "codex" : st.tool) · \(st.name)", body: st.task)
@@ -417,9 +552,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         lastRunningKeys = nowRunningKeys
         lastDoneKeys = nowDoneKeys
-        didBaseline = true
+        if !statusReadPending { didBaseline = true }
 
-        // 小横幅: 按客户端分段 — logo 章 + 名称 + 转圈运行数 + 暂停待处理数
+        // 小横幅直接说明等待原因；混有运行任务时保留运行计数，避免误称全局等待。
+        lastWaitingSummary = waitingSummary(cachedStatuses.map { $0.1 })
+        // 按客户端分段 — logo 章 + 名称 + 转圈运行数 + 暂停待处理数
         var counts: [String: (run: Int, pend: Int)] = [:]
         for st in running { counts[st.tool.isEmpty ? "codex" : st.tool, default: (0, 0)].run += 1 }
         for a in attention { counts[a.tool, default: (0, 0)].pend += 1 }
@@ -471,7 +608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.async {
             guard let screen = NSScreen.screens.first else { return }
-            let bx = (screen.frame.width - self.barW) / 2
+            let bx = screen.frame.minX + (screen.frame.width - self.barW) / 2
             let now = Date()
 
             // ── 单一状态机: expanded > flash > (hover∨attention)=counts > idle ──
@@ -529,6 +666,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 h = self.hIdle
             }
             self.detailScroll.frame = NSRect(x: 10, y: 6, width: self.barW - 20, height: max(h - 12, 1))
+            self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
 
             // ── 背景色 (与状态一致) ──
             let bg: NSColor

@@ -11,6 +11,7 @@
 #   ck status             跨项目总览
 #   ck fuel [tool]        燃料表
 #   ck init [tool]        项目脚手架
+#   ck leaves [args]      离线审计叶子队列 (--registry 查看全部登记项目)
 #   ck --help             本帮助
 set -u
 
@@ -19,7 +20,7 @@ REPO="$(dirname "$SELF")"
 
 case "${1:-help}" in
     codex)
-        shift; exec "$REPO/codexc" "$@" ;;
+        shift; exec env CODEXC_TOOL=codex "$REPO/codexc" "$@" ;;
     claude)
         shift; exec env CODEXC_TOOL=claude "$REPO/codexc" "$@" ;;
     pi)
@@ -32,6 +33,8 @@ case "${1:-help}" in
         shift; exec "$REPO/dshc" "$@" ;;     # 语义单点在 dshc: 裸=说明, run=自动
     status)
         shift; exec "$REPO/codexc-headless" status "$@" ;;
+    leaves)
+        shift; exec python3 "$REPO/ck-leaves.py" "$@" ;;
     fuel)
         shift; exec "$REPO/codexc" fuel "$@" ;;
     init)
