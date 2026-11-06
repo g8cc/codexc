@@ -66,8 +66,15 @@ alert() {  # $1=proj $2=text — 同因当日去重 (动态变量, bash 3.2 兼�
     return 0
 }
 
+PROBE_TTL=1800   # 探测失败后 30 分钟内不再建新探测会话 (39 个 replyOK 堆积教训)
 cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"凭证真死"
-    local out try ok
+    local out try ok failts now
+    # TTL: 刚探测失败过 → 沿用失败结论, 不再建新探测会话
+    failts="$(cat "$HOME/.codingkeeper/cli-probe-fail-ts" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    if [ "${failts:-0}" -gt 0 ] && [ $((now - failts)) -lt "$PROBE_TTL" ]; then
+        return 1
+    fi
     watch_window_open || return 125
     out="$(mktemp "${TMPDIR:-/tmp}/watch-probe.XXXXXX")" || return 1
     ok=0
@@ -79,8 +86,11 @@ cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"
         [ "$try" = 2 ] || sleep 5
     done
     rm -f "$out"
-    # bash 约定 return 0=成功 — ok=1(活) 必须映射为 return 0 (语义反转回归锁)
-    [ "$ok" = "1" ] && return 0
+    if [ "$ok" = "1" ]; then
+        rm -f "$HOME/.codingkeeper/cli-probe-fail-ts"
+        return 0
+    fi
+    date +%s > "$HOME/.codingkeeper/cli-probe-fail-ts"
     return 1
 }
 
