@@ -90,6 +90,35 @@ printf 'turns=%s' "$turns"
         self.assertFalse((self.state / 'journal').exists())
         self.assertTrue((self.state / 'loop.halt').exists())
 
+    def test_empty_submodule_is_rejected_instead_of_snapshotting_parent(self):
+        self.repo()
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-index', '--add', '--cacheinfo', '160000,' + head + ',module')
+        self.git('commit', '-qm', 'add uninitialized module')
+        (self.world / 'module').mkdir()
+        result = self.helper('begin', 'dGFzaw==', check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('submodule', result.stderr)
+
+    def test_initialized_submodule_is_snapshotted_and_hidden_untracked_file_rejected(self):
+        self.repo()
+        self.git('init', '-q', 'module')
+        (self.world / 'module/source.txt').write_text('module content\n')
+        self.git('-C', 'module', 'add', 'source.txt')
+        self.git('-C', 'module', 'commit', '-qm', 'module baseline')
+        head = self.git('-C', 'module', 'rev-parse', 'HEAD')
+        self.git('update-index', '--add', '--cacheinfo', '160000,' + head + ',module')
+        self.git('commit', '-qm', 'add initialized module')
+        directory = Path(self.helper('begin', 'dGFzaw==').stdout.strip())
+        baseline = json.loads((directory / 'baseline.json').read_text())
+        self.assertEqual(baseline['files']['module']['kind'], 'gitlink')
+        self.assertEqual((directory / 'blobs' / baseline['files']['module']['sha256']).read_text().strip(), head)
+        self.git('-C', 'module', 'config', 'status.showUntrackedFiles', 'no')
+        (self.world / 'module/hidden.txt').write_text('unverified module change\n')
+        result = self.helper('candidate', directory, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('dirty submodule', result.stderr)
+
     def test_committed_leaf_has_exact_diff_and_keeps_original_baseline(self):
         self.repo()
         original = self.git('rev-parse', 'HEAD')

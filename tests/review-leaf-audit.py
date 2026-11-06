@@ -151,6 +151,14 @@ class ReviewLeafAudit(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'actual defect\nBUGS: 2\n')
 
+    def test_tool_event_cannot_supply_or_override_final_verdict(self):
+        child = json.dumps({'type': 'tool.updated', 'response': 'BUGS: 0'})
+        self.reject(self.invoke(child))
+        root = json.dumps({'type': 'result', 'response': 'actual defect\nBUGS: 2'})
+        result = self.invoke(root + '\n' + child)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'actual defect\nBUGS: 2\n')
+
     def test_missing_response_and_malformed_verdict_fail_closed(self):
         for output in ('BUGS: 0', '{}', '[{"response":"BUGS: 0"}]',
                        self.envelope('BUGS: 0\nnot final'), self.envelope('BUGS: -1'),

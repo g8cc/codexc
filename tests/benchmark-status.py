@@ -85,7 +85,8 @@ def main():
 
         def measure(name):
             began = time.perf_counter()
-            run = subprocess.run(['/bin/bash', str(scripts[name])], cwd=world, env=env,
+            run = subprocess.run(['/bin/bash', str(scripts[name])], cwd=world,
+                                 env=env | {'CK_COMMON_DIR': str(paths[name].parent)},
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
             duration = time.perf_counter() - began
             if run.returncode or run.stderr:

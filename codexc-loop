@@ -192,7 +192,8 @@ import json, os, sqlite3, sys
 cwd, db = sys.argv[1], sys.argv[2]
 target = os.path.realpath(cwd)
 try:
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    from pathlib import Path
+    conn = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     rows = conn.execute("SELECT id, directory, time_updated FROM session_v2").fetchall()
 except (sqlite3.Error, OSError):
     raise SystemExit(0)
@@ -419,7 +420,8 @@ import json, sqlite3, sys
 sid, db, msg_out = sys.argv[1], sys.argv[2], sys.argv[3]
 status = "none"
 try:
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    from pathlib import Path
+    conn = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     row = conn.execute(
         "SELECT data, seq FROM session_message WHERE session_id=? AND type='assistant' "
         "ORDER BY seq DESC LIMIT 1", (sid,)).fetchone()

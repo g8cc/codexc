@@ -51,6 +51,6 @@ queue.md(## ready) → 投喂 → worker 回合 → gate.sh(真实退出码)
 | 错误源（watcher） | codexc 内 `watch_and_run_*` | 子进程 stdout/exit code |
 
 现有实现: codex(sqlite→rollout尾)、claude(JSONL isApiErrorMessage)、pi(stopReason)、
-opencode(session_v2/message 表)、zcode(--prompt/--resume, 会话文件)、dsh(--session-id, zstd 存储)。
+opencode(session_v2/message 表)、zcode(--prompt/--resume, 会话文件)、dsh(--json session/final 事件与 --session-id)。
 
 工程燃料：`ck-prompts.py` 内置十类工程指令，按项目持久化轮换并支持动态追加；任务入队与验收共用 acceptance.lock。worker/gate/review 共享进程组监护，owner 消失后停止本组，验收在获得事务锁后再检查候选。

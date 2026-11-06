@@ -41,11 +41,14 @@ link "$HERE/ck-common.sh" "$CODEX_BIN_DIR/ck-common.sh"   # 三车道共享底�
 link "$HERE/ck-config.py" "$CODEX_BIN_DIR/ck-config.py"
 link "$HERE/ck-window.py" "$CODEX_BIN_DIR/ck-window.py"
 link "$HERE/ck-leaf.py" "$CODEX_BIN_DIR/ck-leaf.py"
+link "$HERE/ck-zcode-session.py" "$CODEX_BIN_DIR/ck-zcode-session.py"
+link "$HERE/ck-dsh-session.py" "$CODEX_BIN_DIR/ck-dsh-session.py"
 link "$HERE/ck-prompts.py" "$CODEX_BIN_DIR/ck-prompts.py"
 link "$HERE/ck-leaves.py" "$CODEX_BIN_DIR/ck-leaves.py"
 link "$HERE/ck-review-process.py" "$CODEX_BIN_DIR/ck-review-process.py"
 link "$HERE/ck-watch-tools.sh" "$CODEX_BIN_DIR/ck-watch-tools.sh"
 link "$HERE/ck-watcher.py" "$CODEX_BIN_DIR/ck-watcher.py"
+link "$HERE/ck-night-loop.py" "$CODEX_BIN_DIR/ck-night-loop.py"
 link "$HERE/codexc" "$CODEX_BIN_DIR/codexc"   # backward compat
 # 内部实现脚本（ck 通过绝对路径调用）
 link "$HERE/codexc-loop" "$CODEX_BIN_DIR/codexc-loop"

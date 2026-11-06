@@ -116,14 +116,14 @@ class StartupTests(unittest.TestCase):
         env.pop('TMPDIR',None)
         marker=self.p/'started'
         inherited=self.p/'client-env'
-        self.mock('codex','pwd -P > '+shlex.quote(str(marker))+'\nprintf "WORKER_STARTED\\n"\nprintf "%s\\n" "$CODEXC_NOTIFY" "$CODEXC_REVIEW_CMD" "$PI_DIR" > '+shlex.quote(str(inherited))+'\nexec sleep 60\n')
+        self.mock('codex','pwd -P > '+shlex.quote(str(marker))+'\nprintf "WORKER_STARTED\\n"\nprintf "%s\\n" "$CODEXC_NOTIFY" "$CODEXC_REVIEW_CMD" "$PI_DIR" "$CODEXC_NIGHT_IDLE" "$CODEXC_NIGHT_WINDOW" "$CODEXC_NIGHT_TZ" > '+shlex.quote(str(inherited))+'\nexec sleep 60\n')
         project=self.p/"project '空 格;$(touch OWNED)"; project.mkdir()
         def tmux(*args):
             return subprocess.run([str(self.p/'bin/tmux'),*args],env=env,text=True,capture_output=True,timeout=10)
         self.addCleanup(lambda: tmux('kill-server'))
         r=tmux('-f','/dev/null','new-session','-d','-s','unrelated','sleep 60')
         self.assertEqual(r.returncode,0,r.stderr)
-        env.update(CODEXC_NOTIFY='0', CODEXC_REVIEW_CMD='review --specific', PI_DIR=str(self.p/'client-pi'))
+        env.update(CODEXC_NOTIFY='0', CODEXC_REVIEW_CMD='review --specific', PI_DIR=str(self.p/'client-pi'), CODEXC_NIGHT_IDLE='723', CODEXC_NIGHT_WINDOW='01:00-07:00', CODEXC_NIGHT_TZ='Asia/Tokyo')
         master, slave=pty.openpty()
         child=subprocess.Popen([str(ROOT/'codexc'),'-n','startup-audit'],cwd=project,env=env,
                                stdin=slave,stdout=slave,stderr=slave,start_new_session=True)
@@ -135,7 +135,7 @@ class StartupTests(unittest.TestCase):
             self.assertTrue(marker.exists(),tmux('capture-pane','-p','-t','=startup-audit:').stdout)
             self.assertEqual(marker.read_text().strip(),str(project))
             self.assertFalse((project/'OWNED').exists())
-            self.assertEqual(inherited.read_text().splitlines(),['0','review --specific',str(self.p/'client-pi')])
+            self.assertEqual(inherited.read_text().splitlines(),['0','review --specific',str(self.p/'client-pi'),'723','01:00-07:00','Asia/Tokyo'])
             r=tmux('show-option','-p','-v','-t','=startup-audit:','@codexc_tool'); self.assertEqual(r.stdout.strip(),'codex', r.stderr + tmux('list-panes','-a','-F','#{pane_id} #{pane_current_command} #{@codexc_tool}').stdout + tmux('capture-pane','-p','-t','=startup-audit:').stdout)
             self.assertEqual(tmux('show-option','-p','-v','-t','=unrelated:','@codexc_tool').stdout.strip(),'')
         finally:

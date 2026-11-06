@@ -24,7 +24,7 @@ class ZcodeQuotaAudit(unittest.TestCase):
         self.cjs = self.root / "fake.cjs"
         self.cjs.touch()
         self.session = self.root / "session"
-        self.session.write_text("ses_previous\n")
+        self.session.write_text("sess_previous\n")
         self.out = self.root / "out"
         self.err = self.root / "err"
         self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -40,17 +40,17 @@ class ZcodeQuotaAudit(unittest.TestCase):
         return subprocess.run([str(REPO / "codexc-zcode-worker")], input="offline test task", text=True,
                               cwd=self.root, env=dict(self.env, AUDIT_EXIT=str(rc)), capture_output=True, timeout=10)
 
-    def response(self, text):
-        return json.dumps(dict(sessionId="ses_new", response=text), ensure_ascii=False)
+    def response(self, text, sid="sess_previous"):
+        return json.dumps(dict(sessionId=sid, response=text), ensure_ascii=False)
 
     def assert_error(self, result, kind):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         markers = [line for line in result.stdout.splitlines() if line.startswith("CK_ERROR_CLASS:")]
         self.assertEqual(markers, ["CK_ERROR_CLASS: " + kind])
-        self.assertEqual(self.session.read_text(), "ses_previous\n")
+        self.assertEqual(self.session.read_text(), "sess_previous\n")
 
     def test_gateway_success_notice_is_quota_and_preserves_previous_session(self):
-        self.assert_error(self.run_worker(self.response(NOTICE)), "quota")
+        self.assert_error(self.run_worker(self.response(NOTICE, "sess_new")), "quota")
 
     def test_gateway_notice_amount_and_time_variations(self):
         for amount in ("1", "999", "1,234,567"):

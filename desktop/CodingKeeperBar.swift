@@ -40,20 +40,48 @@ final class KeyablePanel: NSPanel {
 }
 
 // 穿透视图: 空白区域鼠标穿透，内容区域可点击
-final class KeeperContentView: NSVisualEffectView {
+final class KeeperContentView: NSView {
+    let backdrop = NSVisualEffectView()
     var contentRect: NSRect = .zero
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        backdrop.frame = bounds
+        backdrop.autoresizingMask = [.width, .height]
+        backdrop.material = .hudWindow
+        backdrop.state = .active
+        backdrop.isHidden = true
+        addSubview(backdrop)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    func setExpandedAppearance(_ expanded: Bool) {
+        wantsLayer = true
+        backdrop.isHidden = !expanded
+        // Fully clear pixels can pass through WindowServer before hitTest runs.
+        // Keep a barely visible click surface without blurring menu-bar icons.
+        layer?.backgroundColor = expanded
+            ? NSColor.systemGray.withAlphaComponent(0.22).cgColor
+            : NSColor(white: 0, alpha: 0.01).cgColor
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard contentRect.contains(local) else { return nil }
+        // Compact labels are display-only: route their first click to this view.
+        if backdrop.isHidden { return self }
         return super.hitTest(point)
     }
 }
 
 // CodingKeeperBar — 任务面板 (双屏模式):
-//   空闲   → 3px 绿色细线贴在菜单栏行 (无文字)
+//   空闲   → 顶边透明悬停区域 (无文字)
 //   悬停   → 光标进入细线条带, 弹出状态计数 (logo+客户端+运行数+待处理数)
-//   闪现   → 新任务蓝闪 4s / 完成绿闪 4s (10s 去重), 自动收回
-//   待处理 → ⛔ 停止 / ⏸ 自动循环暂停: 琥珀计数常驻
+//   闪现   → 透明背景任务提示 4s (10s 去重), 自动收回
+//   待处理 → ⛔ 停止 / ⏸ 自动循环暂停: 透明背景计数常驻
 //   点击   → 任务卡片表格, 高度随行数封顶半屏, 超出滚动; 点别处 resignKey 收起
 // 渲染为单一状态机: expanded > flash > (hover∨attention)=counts > idle,
 // 每轮刷新只走一个分支, 子视图 frame 按状态显式设置, 动画仅在高度变化时发生。
@@ -94,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastStatusRead = Date.distantPast
     private var cachedStatuses: [(String, ProjStatus)] = []
 
-    let hIdle: CGFloat = 3        // 空闲: 细线
+    let hIdle: CGFloat = 3        // 空闲: 透明悬停区域
     let hSmall: CGFloat = 22      // 小横幅: 状态计数
     let hFlash: CGFloat = 48      // 闪现横幅
     let barW: CGFloat = 480
@@ -128,11 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
 
         contentView = KeeperContentView(frame: NSRect(x: 0, y: 0, width: barW, height: hIdle))
-        contentView.material = .hudWindow
-        contentView.state = .active
         contentView.wantsLayer = true
         contentView.layer?.cornerRadius = 0
-        contentView.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
+        contentView.setExpandedAppearance(false)
 
         bannerText = NSTextField(labelWithString: "⚙︎")
         bannerText.font = NSFont.systemFont(ofSize: 13, weight: .medium)
@@ -669,16 +695,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.detailScroll.frame = NSRect(x: 10, y: 6, width: self.barW - 20, height: max(h - 12, 1))
             self.contentView.contentRect = NSRect(x: 0, y: 0, width: self.barW, height: h)
 
-            // ── 背景色 (与状态一致) ──
-            let bg: NSColor
-            switch state {
-            case "flashStart": bg = NSColor.systemBlue.withAlphaComponent(0.35)
-            case "flashDone":  bg = NSColor.systemGreen.withAlphaComponent(0.35)
-            case "counts":     bg = attention.isEmpty ? NSColor.systemGreen.withAlphaComponent(0.18) : NSColor.systemOrange.withAlphaComponent(0.32)
-            case "expanded":   bg = NSColor.systemGray.withAlphaComponent(0.22)
-            default:           bg = NSColor.systemGreen.withAlphaComponent(0.3)
-            }
-            self.contentView.layer?.backgroundColor = bg.cgColor
+            // Compact banners leave menu-bar icons visible through the window.
+            // Disable the material as well as the tint: clear tint alone still blurs.
+            let expanded = state == "expanded"
+            self.contentView.setExpandedAppearance(expanded)
 
             // ── 位置: 菜单栏行顶边; 高度没变就不重发动画 ──
             let y = screen.frame.maxY - h

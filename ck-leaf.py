@@ -86,16 +86,26 @@ def queue_items(data):
             if task:
                 indent = len(line) - len(line.lstrip())
                 continuation = []
-                for j, following in enumerate(lines[i + 1:], i + 1):
+                for j in range(i + 1, len(lines)):
+                    following = lines[j]
                     stripped = following.strip()
                     depth = len(following) - len(following.lstrip())
                     if not stripped:
+                        continuation.append('')
                         continue
                     if depth <= indent:
                         break
-                    continuation.append(stripped)
+                    continuation.append(following.rstrip('\r\n'))
                     consumed = j
-                entries.append((i, '\n'.join([task, *continuation]), text.startswith('- [ ]'), section))
+                # Remove only the queue's common indentation. Code indentation
+                # and internal blank lines are part of the task contract.
+                while continuation and not continuation[-1]:
+                    continuation.pop()
+                margin = min([indent + 2] + [len(item) - len(item.lstrip())
+                                             for item in continuation if item.strip()])
+                body = '\n'.join(item[margin:] if item else '' for item in continuation)
+                contract = task + ('\n' + body if continuation else '')
+                entries.append((i, contract, text.startswith('- [ ]'), section))
             elif section == 'ready' and text.startswith('- [ ]'):
                 raise ValueError('empty ready checkbox on line ' + str(i + 1))
         elif section == 'ready' and re.match(r'^-\s*\[', text):
@@ -196,8 +206,12 @@ def snapshot(directory, save=False):
             kind = 'file'
         elif stat.S_ISDIR(info.st_mode):
             # Gitlinks need their checkout identity as well as the parent index.
+            checkout = subprocess.run(['git', '-C', name, 'rev-parse', '--show-toplevel'], capture_output=True)
+            if checkout.returncode or Path(os.fsdecode(checkout.stdout).strip()).resolve() != path.resolve():
+                raise ValueError('uninitialized or unverifiable submodule: ' + name)
             child = subprocess.run(['git', '-C', name, 'rev-parse', 'HEAD'], capture_output=True)
-            dirty = subprocess.run(['git', '-C', name, 'status', '--porcelain'], capture_output=True)
+            dirty = subprocess.run(['git', '-C', name, 'status', '--porcelain',
+                                    '--untracked-files=all', '--ignore-submodules=none'], capture_output=True)
             if child.returncode or dirty.returncode or dirty.stdout:
                 raise ValueError('unverifiable or dirty submodule: ' + name)
             data = child.stdout

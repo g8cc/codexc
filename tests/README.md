@@ -15,6 +15,10 @@
 
 `tests/run-all` 自动创建私有 HOME、状态目录、tmux socket 和进程组；退出清理自建进程与服务。输出中的 `Test artifacts` 目录保留各阶段完整日志。Swift 首次编译取决于本机缓存，完整集成需要数分钟以上。
 
+`status-audit.py` 覆盖状态/注册表 FIFO 不阻塞、大 journal 尾读、超大状态拒绝、4 万条队列解析和状态基准入口。`benchmark-status.py` 可单独比较两个版本；每个版本使用自己目录中的共享 helper，基准会验证队列计数和测试文件未被修改。
+
+`dsh-session-audit.py` 按已安装 dsh-headless 的 --json 事件协议，覆盖会话归属、续接、失败/超时、退出码、损坏状态文件和最终回答隔离；ZCode 由 zcode-session 等专用套件覆盖。两类 headless 工具均使用假 CLI，不调用模型。
+
 规则:
 - 任何阶段失败即整体失败（CI 可直接用作门禁）。
 - integration 阶段零 API 依赖（假 worker/假审查），可在无网环境跑；

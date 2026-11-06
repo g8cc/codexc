@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location('leaves', Path(__file__).resolve().parents[1]/'ck-leaves.py')
@@ -37,8 +40,20 @@ class Audit(unittest.TestCase):
     def test_unclosed_fence_rejected(self):
         self.assertIn('unclosed-code-fence', self.codes('## ready\n```md\n- [ ] ENG-01 example\n'))
 
+    def test_fence_with_info_is_not_a_closing_fence(self):
+        self.codes('## ready\n```md\n```example\n- [ ] ENG-01 example\n```\n')
+        result = leaves.audit(self.root)
+        self.assertEqual(result['ready'], 0)
+        self.assertEqual(result['findings'], [])
+
     def test_multiline_with_spaces_and_blocked(self):
         self.assertEqual(set(), self.codes('## ready\n- [ ]   FP-IOS-01 task\n  - 验收: actual request succeeds\n## blocked\n- [ ] FP-IOS-02 task\n'))
+
+    def test_nested_acceptance_checkboxes_are_not_ready_tasks(self):
+        self.codes('## ready\n- [ ] ENG-01 implement\n  - [ ] ENG-01 acceptance step\n    ## done\n- [ ] ENG-02 next\n')
+        result = leaves.audit(self.root)
+        self.assertEqual(result['ready'], 2)
+        self.assertEqual(result['findings'], [])
 
     def test_placeholder_gate(self):
         (self.state/'gate.sh').write_text('echo "gate placeholder"\nexit 0\n')
@@ -49,6 +64,22 @@ class Audit(unittest.TestCase):
 
     def test_invalid_checkbox(self):
         self.assertIn('malformed-checkbox', self.codes('## ready\n- [] lost\n'))
+
+    def test_special_queue_and_gate_files_fail_without_blocking(self):
+        for name, code in (('queue.md', 'queue-unreadable'), ('gate.sh', 'gate-unreadable')):
+            with self.subTest(name=name):
+                (self.state / 'queue.md').write_text('## ready\n- [ ] ENG-01 task\n')
+                target = self.state / name
+                target.unlink()
+                os.mkfifo(target)
+                try:
+                    result = subprocess.run([sys.executable, str(Path(leaves.__file__)),
+                                             str(self.root), '--json'],
+                                            capture_output=True, text=True, timeout=2)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(code, result.stdout)
+                finally:
+                    target.unlink()
 
 
 if __name__ == '__main__':

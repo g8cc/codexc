@@ -68,6 +68,9 @@
 #   CODEXC_AUTO_YES        auto-approve mode: 1 = full-auto (default: skip all
 #                          approval prompts, no sandbox), 2 = skip prompts but
 #                          keep the workspace sandbox, 0 = off (codex asks)
+#   CODEXC_NIGHT_IDLE      night idle takeover seconds (default 600; 0 disables)
+#   CODEXC_NIGHT_WINDOW    takeover window (default 00:00-08:00)
+#   CODEXC_NIGHT_TZ        window timezone (default Asia/Singapore)
 #
 # Notes:
 #   - Auto-continue fires on transient errors: 429 storms, dropped streams,
@@ -1071,6 +1074,7 @@ if [ -n "${TMUX:-}" ]; then
     fi
     watcher="${SPAWNED_WATCHER_PID:-}"
     loop_pid=""
+    night_pid=""
     if [ "${CODEXC_LOOP:-0}" = "1" ] && [ -n "$CODEXC_AT" ]; then
         echo "codexc: warning — scheduled prompt (-t) and the delivery loop both feed this TUI; they can interleave. Prefer one." >&2
     fi
@@ -1089,6 +1093,10 @@ if [ -n "${TMUX:-}" ]; then
             echo "codexc: CODEXC_LOOP=1 but codexc-loop not found — running without the delivery loop" >&2
         fi
     else
+        if [ "$NO_LOOP" != "1" ] && [ -z "$CODEXC_AT" ] && [ "${CODEXC_NIGHT_IDLE:-600}" != "0" ]; then
+            python3 "$SCRIPT_DIR/ck-night-loop.py" "$PANE" "$$" "$CODEXC_TOOL" >> "$WATCHLOG" 2>&1 &
+            night_pid=$!
+        fi
         if [ -f ".codingkeeper/queue.md" ]; then
             ready_q="$(python3 "$SCRIPT_DIR/ck-leaf.py" count .codingkeeper/queue.md 2>/dev/null || true)"
             echo "codexc: delivery loop off — ${ready_q:-0} 个就绪任务未投喂 (codexc loop 显式开启)" >&2
@@ -1129,6 +1137,7 @@ if [ -n "${TMUX:-}" ]; then
     [ -n "$watcher" ] && kill "$watcher" 2>/dev/null
     [ -n "$sched_pid" ] && kill "$sched_pid" 2>/dev/null
     [ -n "$loop_pid" ] && kill "$loop_pid" 2>/dev/null
+    [ -n "$night_pid" ] && kill "$night_pid" 2>/dev/null
     exit $rc
 fi
 
@@ -1177,7 +1186,7 @@ codex_args=""
 # A long-lived tmux server carries the environment from its first client.
 # Clear supported settings there, then apply this invocation's values explicitly.
 inner_env=""
-for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_NIGHT_IDLE CODEXC_NIGHT_WINDOW CODEXC_NIGHT_TZ CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
     inner_env="$inner_env -u $setting"
 done
 inner="env$inner_env PATH=$(printf '%q' "$PATH") \
@@ -1195,11 +1204,12 @@ CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") \
 CODEXC_LOOP=$(printf '%q' "${CODEXC_LOOP:-}") \
 CODEXC_TOOL=$(printf '%q' "$CODEXC_TOOL") \
 CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_DIR")"
-for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_NIGHT_IDLE CODEXC_NIGHT_WINDOW CODEXC_NIGHT_TZ CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
     if declare -p "$setting" >/dev/null 2>&1; then
         inner="$inner $setting=$(printf '%q' "${!setting}")"
     fi
 done
+[ "$NO_LOOP" != "1" ] || inner="$inner CODEXC_NIGHT_IDLE=0"
 inner="$inner OPENCODE_DATA_DIR=$(printf '%q' "$OPENCODE_DIR") $(printf '%q' "$SELF") $codex_args"
 
 if [ -n "$CODEXC_AT" ]; then

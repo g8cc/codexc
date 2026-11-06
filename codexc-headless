@@ -814,14 +814,29 @@ cmd_status() {
     # One reader process for the whole registry; status scales with projects,
     # not a dozen shell subprocesses per row. All paths/text stay data.
     python3 - "$HOME/.codingkeeper/projects" "$CK_COMMON_DIR/ck-leaf.py" <<'PYSTATUS'
-import importlib.util, json, os, re, sys, time
+import importlib.util, json, os, re, stat, sys, time
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("leaf", sys.argv[2])
 leaf = importlib.util.module_from_spec(spec); spec.loader.exec_module(leaf)
 
-def read(path):
-    try: return Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError: return ""
+def read(path, limit=1024 * 1024, tail=False):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or (not tail and info.st_size > limit):
+                return ""
+            offset = max(0, info.st_size - limit) if tail else 0
+            source.seek(offset)
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
+            return ""
+        if offset:
+            # The first record may start before the bounded tail.
+            raw = raw.partition(b"\n")[2]
+        return raw.decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 def clean(text, limit):
     text = " ".join(str(text).split())
@@ -829,7 +844,7 @@ def clean(text, limit):
     return text[:limit-1] + "…" if len(text) > limit else text
 
 def alive(path):
-    pid = read(path).strip()
+    pid = read(path, 32).strip()
     if not pid.isascii() or not pid.isdecimal() or len(pid) > 10 or int(pid) <= 1:
         return False
     try: os.kill(int(pid), 0); return True
@@ -870,7 +885,7 @@ for project in projects:
         ready, done = counts["ready"], counts["done"]
     except (OSError, ValueError, UnicodeError):
         pass
-    journal = read(state / "journal").splitlines()
+    journal = read(state / "journal", tail=True).splitlines()
     last = journal[-1].split(" | ")[1] if journal and " | " in journal[-1] else "(无验收)"
     task = snapshot.get("task") if running or parked or waiting else None
     print(f"{icon:<4} {name:<20} {label:<8} {str(ready)+'/'+str(done):>7}  {clean(task or last, 40)}")

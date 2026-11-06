@@ -49,16 +49,16 @@ class EdgesAudit(unittest.TestCase):
 
     def test_large_zcode_response(self):
         response = "x" * (2 * 1024 * 1024) + "\nTASK_RESULT: DONE"
-        result, _ = self.zcode(json.dumps({"sessionId": "ses_large", "response": response}))
+        result, _ = self.zcode(json.dumps({"sessionId": "sess_large", "response": response}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, response)
 
     def test_ndjson_session_and_response_in_separate_events(self):
-        result, session = self.zcode('\n'.join([json.dumps({"sessionId": "ses_separate"}),
+        result, session = self.zcode('\n'.join([json.dumps({"sessionId": "sess_separate"}),
                                                json.dumps({"response": "TASK_RESULT: DONE"})]))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(session.exists(), "session continuity was lost")
-        self.assertEqual(session.read_text(), "ses_separate\n")
+        self.assertEqual(session.read_text(), "sess_separate\n")
         self.assertEqual(session.stat().st_mode & 0o777, 0o600)
 
     def test_empty_final_response_does_not_reuse_earlier_done(self):
@@ -68,9 +68,9 @@ class EdgesAudit(unittest.TestCase):
 
     def test_invalid_session_does_not_truncate_existing(self):
         result, session = self.zcode(json.dumps({"sessionId": ["bad"], "response": "TASK_RESULT: DONE"}),
-                                    "ses_previous\n")
+                                    "sess_previous\n")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(session.read_text(), "ses_previous\n")
+        self.assertEqual(session.read_text(), "sess_previous\n")
 
     def test_worker_entry_paths_are_shell_quoted(self):
         folder = self.root / "repo with spaces"

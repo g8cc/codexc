@@ -138,7 +138,21 @@ def enqueue(text):
         # Locate only real headings outside fences, using the same fence rules.
         fence = None
         start = end = None
+        task_lines = {i for i, _, _, _ in leaf.queue_items(before)}
+        consumed = -1
         for i, line in enumerate(lines):
+            if i <= consumed:
+                continue
+            if i in task_lines:
+                indent = len(line) - len(line.lstrip())
+                for j in range(i + 1, len(lines)):
+                    following = lines[j]
+                    if not following.strip():
+                        continue
+                    if len(following) - len(following.lstrip()) <= indent:
+                        break
+                    consumed = j
+                continue
             token = re.match(r'^(`{3,}|~{3,})', line.strip())
             if token:
                 marker = token[1]
@@ -165,7 +179,8 @@ def enqueue(text):
         if not prefix.endswith('\n'):
             prefix += '\n'
         after = (prefix + inserted + ''.join(lines[end:])).encode()
-        leaf.queue_entries(after)
+        if not any(task == text for _, task in leaf.queue_entries(after)):
+            raise ValueError('new task did not roundtrip through the queue parser; queue unchanged')
         leaf.atomic(queue, after, stat.S_IMODE(queue.stat().st_mode) if queue.exists() else 0o600)
 
     leaf.locked(append)

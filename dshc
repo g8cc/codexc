@@ -12,7 +12,7 @@
 #
 # Env:
 #   CODEXC_HEADLESS_CMD    覆盖 worker 命令 (默认本仓库 codexc-dsh-worker)
-#   DSH_DIR                dsh 数据目录 (默认 ~/.dsh)
+#   DSH_SESSION_FILE       会话 ID 文件 (默认 .codingkeeper/dsh-session-id)
 
 set -u
 

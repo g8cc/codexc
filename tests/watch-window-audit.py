@@ -235,7 +235,9 @@ class WatchWindowAudit(unittest.TestCase):
     def wait_for_patrol(self, process):
         account = self.root / ".codingkeeper/burn-log.txt"
         child_fd = self.root / "child-lock-fd"
-        until = time.monotonic() + 5
+        # Real exec transitions include multiple Python shim startups; a
+        # measured cold start can take over 7 seconds on a loaded host.
+        until = time.monotonic() + 15
         while time.monotonic() < until and process.poll() is None:
             if account.exists() and child_fd.exists():
                 return

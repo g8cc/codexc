@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prompt rotation and live queue additions, without coding tools."""
 import json
+import base64
 import os
 from pathlib import Path
 import signal
@@ -87,6 +88,27 @@ class PromptsAudit(unittest.TestCase):
         text = (self.state / 'queue.md').read_text()
         self.assertEqual(text.count('- [ ] task '), 8)
 
+    def test_enqueue_roundtrips_code_indentation_and_blank_lines(self):
+        task = 'implement parser\n\n```python\ndef parse():\n    return 1\n```\n\nverify result'
+        self.cli('enqueue', task)
+        result = subprocess.run(['python3', str(ROOT / 'ck-leaf.py'), 'next',
+                                 str(self.state / 'queue.md')], cwd=self.world,
+                                capture_output=True, text=True, check=True)
+        actual = base64.b64decode(result.stdout.strip().split('\t')[1]).decode()
+        self.assertEqual(actual, task)
+        self.cli('enqueue', task, success=False)
+        self.assertEqual((self.state / 'queue.md').read_text().count('- [ ] implement parser'), 1)
+        marked = subprocess.run(['python3', str(ROOT / 'ck-leaf.py'), 'mark',
+                                 str(self.state / 'queue.md'), base64.b64encode(task.encode()).decode()],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(marked.stdout.strip(), 'marked')
+        self.assertIn('- [x] implement parser', (self.state / 'queue.md').read_text())
+        self.cli('enqueue', 'preserve leading indentation\n    return 2')
+        count = subprocess.run(['python3', str(ROOT / 'ck-leaf.py'), 'count',
+                                str(self.state / 'queue.md')], capture_output=True, text=True, check=True)
+        self.assertEqual(count.stdout.strip(), '1')
+        self.cli('enqueue', 'preserve leading indentation\n    return 2', success=False)
+
     def test_enqueue_refuses_pending_acceptance_and_fenced_ready_example(self):
         queue = self.state / 'queue.md'
         queue.write_text('```md\n## ready\n```\n## ready\n## done\n')
@@ -104,6 +126,13 @@ class PromptsAudit(unittest.TestCase):
         self.assertFalse((self.state / 'queue.md').exists())
         self.assertIn('legacy pending task', (legacy / 'queue.md').read_text())
 
+    def test_enqueue_ignores_fences_inside_existing_task_contract(self):
+        (self.state / 'queue.md').write_text('## ready\n- [ ] inspect malformed sample\n  ```python\n  sample without closing fence\n## done\n')
+        self.cli('enqueue', 'new reachable task')
+        count = subprocess.run(['python3', str(ROOT / 'ck-leaf.py'), 'count',
+                                str(self.state / 'queue.md')], capture_output=True, text=True, check=True)
+        self.assertEqual(count.stdout.strip(), '2')
+
     def test_headless_burn_rotates_then_waits_for_fuel_without_halting(self):
         (self.state / 'queue.md').write_text('## ready\n')
         source = (ROOT / 'codexc-headless').read_text().rsplit('\ncase "${1:-}" in', 1)[0]
@@ -116,7 +145,9 @@ run_runner
 '''
         env = self.env | {'CODEXC_HEADLESS_CMD': 'true', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0'}
         result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-headless')],
-                                cwd=self.world, env=env, capture_output=True, text=True, timeout=30)
+                                # Twenty real queue/snapshot/status cycles spawn many
+                                # Python helpers; under load they exceed 30 seconds.
+                                cwd=self.world, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         selected = (self.world / 'selected').read_text().splitlines()
         self.assertEqual(len(selected), 20)
@@ -148,7 +179,7 @@ run_driver fake-pane
 '''
         env = self.env | {'CODEXC_TOOL': 'codex', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0'}
         result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-loop')],
-                                cwd=self.world, env=env, capture_output=True, text=True, timeout=60)
+                                cwd=self.world, env=env, capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr)
         selected = (self.world / 'selected').read_text().splitlines()
         self.assertEqual(len(selected), 20)

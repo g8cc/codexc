@@ -174,7 +174,7 @@ def final_zcode_response(raw):
         whole = json.loads(text)
     except (ValueError, RecursionError):
         whole = None
-    if isinstance(whole, dict) and 'response' in whole:
+    if isinstance(whole, dict) and whole.get('type') in (None, 'result') and 'response' in whole:
         response = whole['response']
     else:
         for line in text.splitlines():
@@ -182,7 +182,7 @@ def final_zcode_response(raw):
                 event = json.loads(line)
             except (ValueError, RecursionError):
                 continue
-            if isinstance(event, dict) and 'response' in event:
+            if isinstance(event, dict) and event.get('type') in (None, 'result') and 'response' in event:
                 # Empty/null/non-string final responses deliberately replace any
                 # older success. Never search backwards for a convenient answer.
                 response = event['response']

@@ -111,7 +111,10 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 |---|---|
 | worker 回合超时（`CODEXC_HEADLESS_TIMEOUT`=3600s） | 整树 kill → 失败计数，连续 `CODEXC_TURN_RETRIES`(3) 次 park |
 | worker 空输出（认证失效等） | 失败计数，连续 3 次 park + 通知（日志含输出尾迹） |
-| 会话连续性 | zcode: sessionId 存 `.codingkeeper/zcode-session-id` 每轮 `--resume`；dsh: `.codingkeeper/dsh-session-id`（从 zstd 会话文件提取） |
+| 会话连续性 | zcode: sessionId 存 `.codingkeeper/zcode-session-id` 每轮 `--resume`；dsh: `.codingkeeper/dsh-session-id`（从本次 --json session 事件原子保存，每轮 --session-id；失败/超时保留） |
+| zcode 首次失败/空响应/超时 | stream-json 的 `turn.started` 提前将 `sess_...` 保存至 `.codingkeeper/zcode-session-id.retry`，下一轮续接；成功后提升为主会话并移除 retry。已有主会话始终优先，失败不覆盖有效上下文 |
+| zcode 本地 ID 损坏/恢复 ID 突变 | 报错并阻止继续建会话。新建上下文前同时备份并移走 `zcode-session-id` 和 `zcode-session-id.retry`；手动 halt 不受此机制影响 |
+| dsh 会话恢复失败 | 保留已保存 ID 并明确报错，不静默新建上下文；dsh 自身校验持久化历史、项目目录及 profile。确需重建时先备份并移走 `dsh-session-id`。适配器不再依赖 DSH_DIR/zstd 查找目录，数据位置由 dsh 自身配置决定 |
 | zcode 升级后 | 重跑 `codexc-headless selftest-integration` + 一次冒烟（文档声明过版本间行为差异） |
 
 ## 五、燃料（provider/token 管理）
@@ -143,13 +146,14 @@ runner 运行时在所在 tmux 窗格顶部常驻一行横幅，随状态机实�
 
 屏幕顶边居中的任务面板，渲染状态按优先级: **展开 > 闪现 > (悬停∨待处理)=计数 > 空闲**:
 
-1. **空闲** — 3px 绿色细线贴在菜单栏行（无文字，不干扰）
+1. **空闲** — 透明收起（保留顶边悬停区域，无文字）
 2. **悬停/待处理** — 弹出状态计数（品牌 logo + 转圈运行数 + 暂停待处理数）
-3. **闪现** — 新任务蓝闪 4s / 完成绿闪 4s（同一事件 10s 去重），自动收回
-4. **待处理常驻** — ⛔ 停止 / ⏸ 循环挂起时琥珀色计数常驻，直到处理
-5. **点击展开** — 任务卡片表格（状态色点 + 工具·项目 + 时长/完成时刻 + 任务文本），封顶半屏滚动
+3. **闪现** — 透明背景任务提示 4s（同一事件 10s 去重），自动收回
+4. **待处理常驻** — ⛔ 停止 / ⏸ 循环挂起时计数常驻，背景透明，直到处理
+5. **点击展开** — 任务卡片表格（状态色点 + 工具·项目 + 时长/完成时刻 + 任务文本），封顶半屏滚动；仅展开时显示毛玻璃底板
 
 install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
+收起时不启用模糊，保留 1% 不透明度的点击底层，确保透明横幅也能在未激活时单击展开。
 每 2 秒从各项目的 `status.json` 与 `loop.pid` 刷新（活跃回合另有 30s 心跳保活）。
 不占 Dock、不抢焦点、空白区域可点穿。
 
@@ -177,6 +181,12 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 - watcher.pid 是兼容状态文件；新版按 pane 保存 watcher 元数据，不按未经验证的 PID 杀进程。
 - 定时发送绑定 owner/项目/tool，每次提交前复验；`-t` 与 loop 同时使用会报错。
 - 详细修复与测试结果：[深度审计](AUDIT-2026-11-05.md)。
+
+## 交互会话的夜间空闲接管
+
+`codexc` 的交互 TUI 可在新加坡时间 00:00–08:00 内，连续空闲 600 秒后接入已有队列循环。`CODEXC_NIGHT_IDLE=0` 或 `--no-loop` 关闭；`CODEXC_NIGHT_IDLE`、`CODEXC_NIGHT_WINDOW`、`CODEXC_NIGHT_TZ` 分别设置空闲秒数、接管时段和时区。已有显式 loop 或定时投喂时不启动该监视器。
+
+接管要求 pane 所有者、项目及工具匹配、Git 项目有真实 gate、没有 `loop.halt`、输入框为空且画面持续稳定；Codex、Claude、Pi 的已知输入框布局可识别，OpenCode 与未知布局暂不接管。交接前再次检查；每个交互会话只交接一次，不自动重启已暂停的循环。这里的时段限制控制交接时机，循环运行时段仍由 `CODEXC_ACTIVE_WINDOW` 和 `CODEXC_ACTIVE_TZ` 控制。
 
 ## ZCode 夜间套餐
 

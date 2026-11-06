@@ -2,13 +2,26 @@
 """Offline queue audit. Never invokes a worker, a gate, or a model."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 LIMIT = 2 * 1024 * 1024
 CHECK = re.compile(r'^\s*-\s+\[([ xX])\]\s+(.+?)\s*$')
 IDENT = re.compile(r'^([A-Za-z]+(?:-[A-Za-z0-9]+)+|M\d+[A-Za-z0-9-]*)\b')
+
+
+def read_regular(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError('audit input must be a regular file')
+        raw = source.read(LIMIT + 1)
+    if len(raw) > LIMIT:
+        raise ValueError('audit input exceeds 2 MiB')
+    return raw
 
 
 def audit(project):
@@ -20,10 +33,7 @@ def audit(project):
 
     queue = project / '.codingkeeper/queue.md'
     try:
-        with queue.open('rb') as f:
-            raw = f.read(LIMIT + 1)
-        if len(raw) > LIMIT:
-            raise ValueError('queue exceeds 2 MiB')
+        raw = read_regular(queue)
         source = raw.decode('utf-8')
         if '\0' in source:
             raise ValueError('queue contains NUL')
@@ -32,14 +42,19 @@ def audit(project):
         return result
     section, fence = '', None
     ids, headings, tasks = {}, {}, []
-    for number, line in enumerate(source.splitlines(), 1):
+    lines = source.splitlines()
+    consumed = 0
+    for number, line in enumerate(lines, 1):
+        if number <= consumed:
+            continue
         stripped = line.strip()
         match = re.match(r'^(`{3,}|~{3,})', stripped)
         if match:
             token = match[1]
             if fence is None:
                 fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
+            elif (token[0] == fence[0] and len(token) >= len(fence)
+                  and not stripped[len(token):].strip()):
                 fence = None
             continue
         if fence:
@@ -57,6 +72,16 @@ def audit(project):
                 finding('error', 'malformed-checkbox', number, 'use - [ ] task or - [x] task')
             continue
         checked, task = m[1].lower() == 'x', m[2]
+        # Nested checkboxes/headings belong to this task's acceptance contract,
+        # matching the dispatch parser rather than inflating the ready count.
+        indent = len(line) - len(line.lstrip())
+        for following_number in range(number + 1, len(lines) + 1):
+            following = lines[following_number - 1]
+            if not following.strip():
+                continue
+            if len(following) - len(following.lstrip()) <= indent:
+                break
+            consumed = following_number
         count_key = section + (':checked' if checked else ':pending')
         result['counts'][count_key] = result['counts'].get(count_key, 0) + 1
         tasks.append((number, section, checked, task))
@@ -82,10 +107,7 @@ def audit(project):
     gate = project / '.codingkeeper/gate.sh'
     if any(section == 'ready' and not checked for _, section, checked, _ in tasks):
         try:
-            with gate.open('rb') as f:
-                body = f.read(LIMIT + 1).decode('utf-8')
-            if len(body) > LIMIT:
-                raise ValueError('gate too large')
+            body = read_regular(gate).decode('utf-8')
             if re.search(r'gate placeholder|CK_GATE_PLACEHOLDER', body, re.I):
                 finding('error', 'placeholder-gate', 0, 'ready tasks have an official placeholder gate')
             if re.search(r'(?:grep|rg).*\\?\[x', body) and 'phase=' in body:

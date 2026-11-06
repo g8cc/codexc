@@ -151,6 +151,23 @@ if [ -f .codingkeeper/journal ]; then cat .codingkeeper/journal; fi
             db.execute("INSERT INTO session_message VALUES ('s','assistant',100,'{}')")
         self.assertEqual(self.shell("codexc-loop", 'terminal_count s', CODEXC_TOOL="opencode", OPENCODE_DATA_DIR=str(self.world)), "100")
 
+    def test_opencode_database_path_with_uri_characters(self):
+        import sqlite3
+        for dirname in ('data?mode=other', 'data#fragment', 'data % 中文'):
+            with self.subTest(dirname=dirname):
+                folder = self.world / dirname
+                folder.mkdir()
+                with sqlite3.connect(folder / 'opencode.db') as db:
+                    db.execute('CREATE TABLE session_v2 (id TEXT, directory TEXT, time_updated INTEGER)')
+                    db.execute('INSERT INTO session_v2 VALUES (?,?,?)', ('s', str(self.world), 1))
+                    db.execute('CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT)')
+                    db.execute('INSERT INTO session_message VALUES (?,?,?,?)',
+                               ('s', 'assistant', 7, json.dumps(dict(finish='stop', content=[dict(type='text', text='TASK_RESULT: DONE')]))))
+                env = dict(CODEXC_TOOL='opencode', OPENCODE_DATA_DIR=str(folder))
+                self.assertEqual(self.shell('codexc-loop', 'opencode_active_session "$PWD"', **env), 's')
+                self.assertEqual(self.shell('codexc-loop', 'turn_status_opencode s .codingkeeper/msg', **env), 'clean')
+                self.assertEqual((self.world / '.codingkeeper/msg').read_text(), 'TASK_RESULT: DONE')
+
     def test_opencode_in_place_stream_completion_changes_cache_key(self):
         import sqlite3
         path = self.world / "opencode.db"

@@ -70,7 +70,22 @@ case "hit":
     view.contentRect = view.bounds
     let child = NSView(frame: NSRect(x: 0, y: 80, width: 100, height: 100))
     view.addSubview(child)
+    view.setExpandedAppearance(true)
     check(view.hitTest(NSPoint(x: 20, y: 100)) === child, "expanded panel must deliver scroll/click to children")
+    check(view.acceptsFirstMouse(for: nil), "inactive compact banner must accept the first click")
+    view.wantsLayer = true
+    view.setExpandedAppearance(false)
+    check(view.hitTest(NSPoint(x: 20, y: 100)) === view, "compact labels must route the first click to the banner")
+    check(view.hitTest(NSPoint(x: 190, y: 20)) === view, "compact blank pixels must remain clickable")
+    check(view.hitTest(NSPoint(x: 210, y: 20)) == nil, "outside the banner must pass through")
+    let alpha = view.layer!.backgroundColor!.alpha
+    check(alpha > 0 && alpha <= 0.01, "compact surface needs near-transparent pixels for WindowServer mouse delivery")
+    check(view.backdrop.isHidden, "compact surface must not blur menu icons")
+    view.setExpandedAppearance(true)
+    check(!view.backdrop.isHidden, "expanded details keep their readable backdrop")
+    check(view.hitTest(NSPoint(x: 20, y: 100)) === child, "expanding must restore child input")
+    view.setExpandedAppearance(false)
+    check(view.backdrop.isHidden, "collapsing must remove the blur again")
 default: exit(2)
 }
 print("PASS " + CommandLine.arguments[1])
