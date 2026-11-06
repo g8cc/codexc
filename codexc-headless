@@ -34,7 +34,7 @@
 #   CODEXC_TURN_RETRIES    consecutive failed turns before parking (default 3)
 #   CODEXC_LOOP_IDLE       burn mode (default ON, same prompt as codexc-loop;
 #                          "0" disables; other text replaces the prompt)
-#   CODEXC_IDLE_PARK       consecutive no-op idle turns before parking (default 2)
+#   CODEXC_IDLE_PARK       no-op sweeps of the fuel catalog before parking (default 2)
 #   CODEXC_GATE_TIMEOUT    gate.sh hard timeout seconds (default 900)
 #   CODEXC_REVIEW_TIMEOUT  review hard timeout seconds   (default 1800)
 #   CODEXC_REVIEW_CMD      override reviewer (must print BUGS: <n>)
@@ -42,7 +42,7 @@
 #   CODEXC_REVIEW_ROUNDS   max total review runs/task   (default 6)
 #   CODEXC_REVIEW_PASS     consecutive zero-bug reviews to accept (default 2)
 #   CODEXC_LOOP_DRY        1 = log actions, never run the worker
-#   CODEXC_ACTIVE_WINDOW   HH:MM-HH:MM; unset = unrestricted (zcodec run sets 23:00-09:00)
+#   CODEXC_ACTIVE_WINDOW   HH:MM-HH:MM; unset = unrestricted (all headless entrypoints)
 #   CODEXC_ACTIVE_TZ       IANA timezone for the window (default Asia/Shanghai)
 
 set -u
@@ -91,21 +91,22 @@ headless_turn() {  # $1=task text $2=outfile
     require_gate_check || return 1
     deadline="${CK_WINDOW_DEADLINE:-0}"
     printf '%s' "$1" > "$instrfile" || return 1
-    ( eval "$CODEXC_HEADLESS_CMD" ) < "$instrfile" > "$outfile" 2>/dev/null &
+    review_groups_prepare || return 1
+    command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" /bin/bash -c "$CODEXC_HEADLESS_CMD" < "$instrfile" > "$outfile" 2>&1 &
     rpid=$!
     while kill -0 "$rpid" 2>/dev/null; do
         if [ -e .codingkeeper/loop.halt ] || { [ "$deadline" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ]; }; then
-            kill_tree "$rpid"
+            review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
             printf '\n[turn stopped: availability window closed or manual halt]\n' >> "$outfile"
-            rm -f "$instrfile"
+            headless_save_turn "$instrfile" "$outfile" || return 1
             return 125
         fi
         if [ "$waited" -ge "$CODEXC_HEADLESS_TIMEOUT" ]; then
-            kill_tree "$rpid"
+            review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
             printf '\n[turn timed out after %ss]\n' "$CODEXC_HEADLESS_TIMEOUT" >> "$outfile"
-            rm -f "$instrfile"
+            headless_save_turn "$instrfile" "$outfile" || return 1
             return 124
         fi
         # 回合心跳 (每 30s): 子进程活着=真在烧, status.json 保活让面板显示真实
@@ -117,11 +118,18 @@ headless_turn() {  # $1=task text $2=outfile
         waited=$((waited + 1))
     done
     wait "$rpid" 2>/dev/null; rc=$?
-    rm -f "$instrfile"
+    review_group_stop "$rpid" || return 1
+    headless_save_turn "$instrfile" "$outfile" || return 1
     ck_run_check || return 125
     [ "$deadline" -eq 0 ] || [ "$(date +%s)" -lt "$deadline" ] || return 125
     LC_ALL=C tr -d '\000' < "$outfile" > "$outfile.n" && mv "$outfile.n" "$outfile"
     return "$rc"
+}
+
+headless_save_turn() {
+    leaf_save_output "$1" worker-prompt || return 1
+    leaf_save_output "$2" worker || return 1
+    rm -f "$1"
 }
 
 # one-time state-dir migration (v2.0: .codexc -> .codingkeeper). Runs before
@@ -301,9 +309,24 @@ run_runner() {
                 sleep "$CODEXC_LOOP_POLL"
                 continue
             fi
+            burn_fuel_check; rc=$?
+            if [ "$rc" = 1 ]; then
+                headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
+                sleep "$CODEXC_LOOP_POLL"
+                continue
+            elif [ "$rc" != 0 ]; then
+                park "燃料状态无效 — 请检查 burn-exhausted.json" "invalid fuel exhaustion state"
+                continue
+            fi
+            [ "$BURN_FUEL_STATE" != renewed ] || idle_count=0
             task_kind="idle"; task="(idle 持续改进)"; task_b64=""
             head_at_feed="$(git rev-parse HEAD 2>/dev/null || echo none)"
-            prompt="$IDLE_PROMPT"
+            if ! burn_prompt_prepare; then
+                park "燃料库或轮换状态无效 — 请检查 prompts 和 burn-cursor.json" "invalid prompt fuel"
+                continue
+            fi
+            prompt="$BURN_PROMPT"
+            task="(idle 持续改进: $BURN_PROMPT_ID)"
         else
             empty_logged=0
             task_kind="queue"; task_b64="${line#*$TAB}"
@@ -377,9 +400,16 @@ run_runner() {
             changed="$(leaf_changed)" || { park "无法验证本轮产出" "leaf snapshot failed"; continue; }
             if [ "$changed" = 0 ]; then
                 idle_count=$((idle_count + 1))
-                log "idle turn $idle_count/$CODEXC_IDLE_PARK: nothing to do"
-                if [ "$idle_count" -ge "$CODEXC_IDLE_PARK" ]; then
+                log "idle turn $idle_count/$BURN_NOOP_LIMIT: nothing to do"
+                if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
+                    if burn_rotating; then
+                        burn_exhaust || { park "无法保存燃料状态" "fuel state write failed"; continue; }
+                        CK_TURN_TS=0
+                        headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
+                        notify "工程燃料已扫描完，等待新任务或新 Prompt"
+                    else
                     park "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
+                    fi
                 fi
                 continue
             fi
@@ -503,8 +533,9 @@ run_runner() {
             notify "任务通过验收: $task"
             banner_set "✅ 已验收: $task ｜ 燃烧继续"
             log "task accepted: $task"
-            mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0
+            mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0; idle_count=0
             auto_resume=0; fail_streak=0
+            rm -f .codingkeeper/burn-exhausted.json
             CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)
             break
         done
@@ -569,18 +600,18 @@ cmd_selftest() {
     rc="$(result_marker "$d/m1")"; [ "$rc" = "DONE" ] && rc=0 || rc=1
     [ "$rc" = 0 ] && echo "  ok: DONE" || { echo "  FAIL: DONE"; return 1; }
     printf 'output without marker\n' > "$d/m2"
-    [ "$(result_marker "$d/m2")" = "none" ] && echo "  ok: none" || echo "  FAIL: none"
+    [ "$(result_marker "$d/m2")" = "none" ] && echo "  ok: none" || { echo "  FAIL: none"; fails=$((fails+1)); }
     echo "== BUGS parse (NUL-laden) =="
-    printf '无问题\n\nBUGS: 0\nTASK_RESULT: DONE\n' > "$d/r1"
+    printf '无问题\n\nBUGS: 0\n' > "$d/r1"
     printf '\000' >> "$d/r1"
     bugs="$(parse_bugs "$d/r1")"
-    [ "$bugs" = "0" ] && echo "  ok: NUL output parses 0" || echo "  FAIL: got [$bugs]"
+    [ "$bugs" = "0" ] && echo "  ok: NUL output parses 0" || { echo "  FAIL: got [$bugs]"; fails=$((fails+1)); }
     printf '发现:\n- x.py:1 崩溃\nBUGS: 3\n' > "$d/r2"
     bugs="$(parse_bugs "$d/r2")"
-    [ "$bugs" = "3" ] && echo "  ok: nonzero parses 3" || echo "  FAIL: got [$bugs]"
+    [ "$bugs" = "3" ] && echo "  ok: nonzero parses 3" || { echo "  FAIL: got [$bugs]"; fails=$((fails+1)); }
     printf 'no verdict\n' > "$d/r3"
     bugs="$(parse_bugs "$d/r3")"
-    [ "$bugs" = "parse-fail" ] && echo "  ok: verdict-less -> parse-fail" || echo "  FAIL: got [$bugs]"
+    [ "$bugs" = "parse-fail" ] && echo "  ok: verdict-less -> parse-fail" || { echo "  FAIL: got [$bugs]"; fails=$((fails+1)); }
     echo "== normalize_uint 溢出防护 =="
     v="$(normalize_uint T 99999999999999999999 900 5 86400 2>/dev/null)"
     [ "$v" = "900" ] && echo "  ok: 20 位数字回落 fallback (bash 64 位算术会回绕)" || { echo "  FAIL: got [$v]"; return 1; }
@@ -782,9 +813,11 @@ cmd_selftest_integration() {
 cmd_status() {
     # One reader process for the whole registry; status scales with projects,
     # not a dozen shell subprocesses per row. All paths/text stay data.
-    python3 - "$HOME/.codingkeeper/projects" <<'PYSTATUS'
-import json, os, re, sys, time
+    python3 - "$HOME/.codingkeeper/projects" "$CK_COMMON_DIR/ck-leaf.py" <<'PYSTATUS'
+import importlib.util, json, os, re, sys, time
 from pathlib import Path
+spec = importlib.util.spec_from_file_location("leaf", sys.argv[2])
+leaf = importlib.util.module_from_spec(spec); spec.loader.exec_module(leaf)
 
 def read(path):
     try: return Path(path).read_text(encoding="utf-8", errors="replace")
@@ -823,23 +856,20 @@ for project in projects:
     live = alive(state / "loop.pid") or alive(state / "watcher.pid")
     try: fresh = 0 <= time.time() - float(snapshot.get("ts", 0)) <= 120
     except (TypeError, ValueError, OverflowError): fresh = False
-    waiting = snapshot.get("phase") in ("waiting_window", "waiting_quota", "backoff") and live and fresh
+    waiting = snapshot.get("phase") in ("waiting_window", "waiting_quota", "backoff", "waiting_fuel") and live and fresh
     running = live and fresh and snapshot.get("active") is True and not waiting
     if parked:
         icon, label = "⏸", "已挂起"
     elif waiting:
-        icon, label = "◷", {"waiting_window": "等待时段", "waiting_quota": "等待配额", "backoff": "等待重试"}[snapshot["phase"]]
+        icon, label = "◷", {"waiting_window": "等待时段", "waiting_quota": "等待配额", "backoff": "等待重试", "waiting_fuel": "等待燃料"}[snapshot["phase"]]
     else:
         icon, label = ("🔥", "任务执行中") if running else ("·", "空闲")
     ready = done = 0
-    section = ""
-    for line in read(state / "queue.md").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("##"):
-            section = stripped.lstrip("#").strip().lower()
-        elif section == "ready" and stripped.startswith("- [ ]") and stripped[5:].strip():
-            ready += 1
-        if re.match(r"^- \[x\]", stripped, re.I): done += 1
+    try:
+        counts = leaf.queue_stats(leaf.read_queue(state / "queue.md"))
+        ready, done = counts["ready"], counts["done"]
+    except (OSError, ValueError, UnicodeError):
+        pass
     journal = read(state / "journal").splitlines()
     last = journal[-1].split(" | ")[1] if journal and " | " in journal[-1] else "(无验收)"
     task = snapshot.get("task") if running or parked or waiting else None
@@ -850,7 +880,7 @@ PYSTATUS
 case "${1:-}" in
     status)  shift; cmd_status "$@" ;;
     init)    shift; cmd_init ;;
-    run)     shift; run_runner ;;
+    run)     export CODEXC_REQUIRE_GATE="${CODEXC_REQUIRE_GATE:-1}"; shift; run_runner ;;
     selftest) cmd_selftest ;;
     selftest-integration) shift; cmd_selftest_integration ;;
     -h|--help|help) usage ;;

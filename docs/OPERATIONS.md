@@ -30,9 +30,9 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
    │                        │ gate 连续失败 / 审查出 bug 回灌      │
    │                        ▼ (回灌后回 work, 计数清零)           │
    └──── 队列空 + burn 开 ──▶ 空闲投喂(持续改进指令) ◀────────────┘
-                                │ 连续 2 轮无事可做 (idle 标记+git 干净)
+                                │ 燃料库连续两遍无产出后等待新料 (idle 标记+git 干净)
                                 ▼
-                             park(挂起): 写 loop.halt + 系统通知 → 等人
+                             waiting_fuel: 在线等待 → 新任务/新 Prompt 自动复燃
 ```
 
 任何 park 都可以复燃：`rm .codingkeeper/loop.halt`（runner 若在运行会自动继续；
@@ -47,7 +47,7 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 | 队列有任务 | 从 `## ready` 顶部逐条投喂；完成后勾选进 `## done` |
 | 队列空（burn 默认开） | 投喂持续改进指令: 先按 worker 自己说的下一步做，否则做十维收尾审查（正确性/安全/性能/可靠/鲁棒/可维护/测试/依赖/可观测/文档），发现问题小步 commit 修复 |
 | worker 自评的后续任务 | 写进 `## review-needed`，**人工确认**挪到 `## ready` 才会执行 |
-| worker 报"无事可做"(idle) 连续 2 轮 | 熄火: park + 通知"没有可烧的活了" |
+| 内置燃料库连续两遍无产出 | 在线 waiting_fuel，不请求模型；新任务或 Prompt 变更自动复燃 |
 | worker 完成但无 TASK_RESULT 标记 | park + 通知（防止半成品当交付） |
 | worker 报 TASK_RESULT: BLOCKED | park + 通知（等人工解锁） |
 | 队列行被 worker 中途改写 | 验收时勾选失配 → park 等人工核对（不会无限重投） |
@@ -59,7 +59,7 @@ idle(队列取任务) ──投喂──▶ task(work → gate → review) ─�
 |---|---|
 | gate 失败 | 输出尾部回灌 worker 修复，最多 `CODEXC_GATE_RETRIES`(3) 次 |
 | gate 超时（`CODEXC_GATE_TIMEOUT`=900s） | 整个进程树 kill → 回灌/挂起 |
-| gate.sh 不存在 | 视为跳过（放行）——想强制测试必须提供 gate.sh |
+| gate.sh 不存在/官方占位 | 自动入口默认停止，先配置真实门禁；非 ZCode 可显式 CODEXC_REQUIRE_GATE=0 使用旧兼容行为 |
 | gate.sh 是任意代码 | 信任边界 = 你自己写的 CI 脚本；爆炸半径 = 用户权限 |
 
 ### 独立审查（双零收敛）
@@ -180,7 +180,7 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 
 ## ZCode 夜间套餐
 
-`zcodec run` 默认运行窗口是 Asia/Shanghai 的 `[23:00, 次日09:00)`。到期停止受管子进程，队列只有完整验收后才修改；等待期间 runner 保持存活，但 `active=false`，不是正在执行模型任务。
+`zcodec run` 默认全天可运行；显式 `CODEXC_ACTIVE_WINDOW=23:00-09:00` 才限制为夜间，时区默认 Asia/Shanghai。到期停止受管子进程，队列只有完整验收后才修改；等待期间 runner 保持存活，但 `active=false`，不是正在执行模型任务。
 
 配额耗尽时 `.codingkeeper/quota-until` 持久化下一次开放的 epoch；复开服务不会清除此标记。`loop.halt` 仍为人工/不可恢复错误暂停，优先于自动时段。无效时段、时区或配额标记会停止执行；排查后才清理对应状态。`burn-watch` 同样遵守窗口并保留项目 halt；它不负责清除人工暂停。
 
@@ -189,9 +189,19 @@ ZCode 的窗口不改变 `codexc-daily`（该入口仅负责 Codex）的调度�
 ## 叶子队列审计与恢复
 
 - `ck leaves --registry`：离线结构检查。错误返回非零，质量提示需要结合源码判断；不会跑 gate/worker。
-- `zcodec run`：默认没有 idle burn，空队列等待；占位 gate 直接挂起。正式 gate 的业务覆盖仍由项目维护者负责，不能从任意 shell 代码自动证明。
+- `zcodec run`：默认轮换工程 Prompt 持续 burn；CODEXC_LOOP_IDLE=0 时空队列等待，占位 gate 直接挂起。正式 gate 的业务覆盖仍由项目维护者负责，不能从任意 shell 代码自动证明。
 - 续行必须缩进；待依赖的任务放 `## blocked`，已实现但缺验收的任务放 `## review-needed`。runner 不自动把依赖当完成。
 - `.codingkeeper/acceptance.pending.json` 是未提交完的验收事务。恢复会核对队列前/后内容并幂等补齐 journal/receipt；队列已被外部修改则停住供核对。不要随意删除它或手工勾选以绕过失败。
 - `.codingkeeper/evidence/<id>/` 保留任务基线、候选、输出与 receipt；blobs 按内容去重复用。默认源文件上限 16 MiB/文件、128 MiB/快照、50,000 路径，超出会明确停止；大型仓库应先界定可信验证范围，不能静默忽略文件。
 - ZCode `review-lane=auto` 现在直接选择 Codex；不会 ping 模型或自动换渠道。`zcode` 与 `codex` 明确选择车道。审查失败/空响应不算 BUGS: 0。
 - gate 输出中的 SKIP 不是 PASS，设备与真实浏览器结果必须独立记录。队列归档前核对 gate 是否依赖勾选数量；本次已解除 sale 的此类耦合。
+
+## 工程燃料与受管进程
+
+`ck prompts list/show/add` 管理内置十类指令及 `.codingkeeper/prompts/*.md` 项目燃料；`ck enqueue` 接受文本、`--file` 或 `--prompt`，与验收共享锁。轮换游标持久化，任务优先于 burn；默认两遍燃料库无源文件产出后在线等待新料，不发送模型请求；新任务或项目 Prompt 变更自动恢复。验收一个队列任务后重置空转计数。自定义 CODEXC_LOOP_IDLE 文本不轮换；CODEXC_PROMPT_ROTATION=0 保留单条通用指令。
+
+headless worker、gate、reviewer 使用独立的受管进程组。阶段结束先清理后台组成员再验证源码；runner 被 SIGKILL 后，监护进程发现 owner 消失会停止本组。主动创建新 session 的守护进程不属于这个进程组；需要由项目 gate/工具自身管理。headless evidence 保留 worker Prompt、输出及 burn 目标。
+
+本轮审计与验证范围：[2026-11-06 审计](AUDIT-2026-11-06.md)。
+
+默认审查器通过 Codex --output-last-message 提取最终回答，日志单独保存；最后非空行必须为 BUGS: <n>。自定义审查命令同样需遵守最终行契约，较早的 BUGS: 0 不再放行。

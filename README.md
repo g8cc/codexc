@@ -49,7 +49,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `codexc -T claude` | drive **Claude Code** (loop, gate, reviews all work the same) |
 | `codexc -T opencode` | drive **opencode** (same pipeline; sessions read from opencode.db) |
 | `ck zcode run` | drive **ZCode's CLI** on the headless lane: one blocking turn per task via `zcode --prompt --mode yolo`, session continuity persisted to `.codingkeeper/zcode-session-id`. Queue/gate auto-scaffold on first run; needs Node >= 24 and the app's `zcode.cjs` (auto-detected) |
-| `zcodec` | product-name entry mirroring `codexc`: bare = wake the ZCode app (interactive, never auto-runs), `zcodec run` = the night runner, other verbs (`init`/`status`/`selftest`) or zcode CLI args pass through. **`dshc`** mirrors it for dsh (bare prints usage) |
+| `zcodec` | product-name entry mirroring `codexc`: bare = wake the ZCode app (interactive, never auto-runs), `zcodec run` = the unattended runner, other verbs (`init`/`status`/`selftest`) or zcode CLI args pass through. **`dshc`** mirrors it for dsh (bare prints usage) |
 | `ck status` | **all-projects overview**: burning/parked/queue/last-acceptance for every registered project |
 | `ck fuel [tool]` | shorthand for `codexc fuel` |
 | `codexc -T pi` | drive **pi** (same pipeline; auto-continue keys off `stopReason: "error"`) |
@@ -58,7 +58,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `codexc-daily pause` / `resume` | disable / re-enable the daily job |
 | `codexc-daily status` / `uninstall` | inspect / remove the daily job |
 
-`zcodec run` / `ck zcode run` execute automatically only during **23:00–09:00 the next day (Asia/Shanghai, UTC+8)** by default. Outside that window they wait without submitting model requests. At 09:00, managed worker, gate, and reviewer processes stop; unaccepted tasks stay queued. Exhausted quota waits until the next opening, including across runner restarts. Status distinguishes window/quota waits, backoff, and execution. Configure `CODEXC_ACTIVE_WINDOW=HH:MM-HH:MM` and `CODEXC_ACTIVE_TZ`; invalid settings block execution. Manual `loop.halt` always wins; `CODEXC_AUTO_RESUME=0` disables automatic quota recovery. This policy covers ZCode automatic runners; interactive launch and other tools keep their existing behavior.
+`zcodec run` / `ck zcode run` default to **24/7 availability and continuous engineering fuel**. Set `CODEXC_LOOP_IDLE=0` for queue-only work. An explicit `CODEXC_ACTIVE_WINDOW=23:00-09:00` and `CODEXC_ACTIVE_TZ=Asia/Shanghai` restores overnight scheduling; managed headless worker, gate and review groups stop at its deadline. Invalid policies stop execution, manual `loop.halt` takes priority, and quota waits persist across restarts. Without a configured window, quota errors park for manual recovery rather than inventing a reset time.
 
 
 ### Per-project sessions
@@ -101,8 +101,25 @@ codexc-loop init     # explicit scaffold (same thing, for scripted setups)
 - `.codingkeeper/gate.sh` — your project's real test command. The loop runs it in the shell and only trusts its exit code; failures are fed back to codex (bounded by `CODEXC_GATE_RETRIES`).
 - Each finished task is reviewed by a separate read-only `codex exec --ephemeral` reviewer context. `CODEXC_REVIEW_PASS` (default 2) consecutive zero-bug reviews accept the task; any found bug goes back to codex for fixing. Exhausted retries park the loop (touch `.codingkeeper/loop.halt` pauses; `rm` it resumes) and send a notification.
 - `CODEXC_LOOP_DRY=1 codexc loop` — log every action without touching the TUI.
-- **Desktop panel**: the runners publish `status.json` on every state change; the menubar app (`desktop/CodingKeeperBar.swift`, built by install) shows all projects' tasks/park state in one place. **Burn mode (default ON)**: when the queue runs dry, the loop feeds a standing improve-and-harden prompt — proceed with the worker's own stated next step, else a professional closure review (correctness, security, performance, reliability, robustness/edge-cases, maintainability, test coverage, dependency health, observability, docs consistency), fixing findings in small commits. When the worker reports genuinely nothing to do twice in a row, the boiler parks itself and notifies you. `CODEXC_LOOP_IDLE=0` disables; any other value replaces the prompt; `CODEXC_IDLE_PARK` tunes the no-op limit.
+- **Burn mode (default ON)**: rotate ten engineering recipes when the queue is empty. Each recipe requires a demonstrated gap, a small change and real verification. Two complete sweeps without source changes enter inactive `waiting_fuel` (20 no-op turns with the built-in catalog). `CODEXC_LOOP_IDLE=0` disables burn; custom text replaces the recipe rotation. `CODEXC_IDLE_PARK` controls the number of empty sweeps, or empty turns for a custom prompt; `CODEXC_PROMPT_ROTATION=0` restores the single standing prompt. The desktop panel consumes runner status and heartbeat snapshots.
 - Tool notes: `codexc-daily` cold-starts codex sessions only. Claude's watcher keys off session JSONL (`isApiErrorMessage`, post-retry-exhaustion); pi's off `stopReason: "error"`; opencode's off errored assistant rows in `opencode.db`. Reviews run in independent Codex contexts; the underlying model may be the same as the worker. Tools without a terminal TUI run on the **headless lane** instead: `codexc-headless` runs one blocking subprocess per task with the same queue/gate/review/burn semantics. `ck zcode run` is the bridge to ZCode's CLI this way; `dsh --profile headless` works the same once its credentials are configured (`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`).
+
+## Engineering prompt fuel
+
+CodingKeeper is an outer runtime for coding tools: it chooses work, manages lifetime and verifies acceptance; the coding tool implements the changes. `ck fuel` remains the provider/token usage report. Engineering fuel is managed with:
+
+```bash
+ck prompts list
+ck prompts show reliability
+ck prompts add recovery --file ./recovery-prompt.md
+ck enqueue --prompt reliability
+ck enqueue "Fix the reproduced restart bug and add a regression"
+ck enqueue --file ./task.md
+ck zcode run              # headless burn, 24/7 by default
+ck codex loop             # supervised Codex TUI burn
+```
+
+Recipes cover correctness, reliability, security, edge cases, behavior tests, performance, observability, dependencies, maintainability and documentation. Project additions live in `.codingkeeper/prompts/`; `burn-cursor.json` persists rotation. Ready tasks always take priority. Enqueue preserves multiline text and serializes with acceptance so concurrent additions are retained. Exhausted fuel leaves the runner online without model requests; new ready tasks or changed project prompts resume it automatically. A manual halt still requires removing `loop.halt` and restarting an exited headless runner. Run `ck init` and review `.codingkeeper/gate.sh` before starting.
 
 ## Auto-yes
 
@@ -168,7 +185,7 @@ rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 
 ### Leaf acceptance and bounded ZCode work
 
-`zcodec run` now defaults to queue-only work (`CODEXC_LOOP_IDLE=0`), keeps the 23:00–09:00 Asia/Shanghai window, and refuses missing/official placeholder gates before invoking a worker. Empty queues publish an inactive `idle` state. Explicit `CODEXC_LOOP_IDLE=1` enables idle improvement; other entrypoints keep their compatibility defaults.
+Automatic `codexc-loop run` and `codexc-headless run` require a real gate and a Git repository by default; missing or official placeholder gates stop before work. `zcodec run` always requires them. Explicit `CODEXC_REQUIRE_GATE=0` keeps legacy behavior for other lanes; a skipped gate provides no test evidence. Queue-only mode publishes inactive `idle` when empty.
 
 `ck leaves --registry` (or `zcodec leaves . --json`) audits queues offline without invoking any model. Indented task continuation lines are included in the worker contract. Only unchecked tasks in `## ready` run; `review-needed` and `blocked` require reconciliation before promotion.
 

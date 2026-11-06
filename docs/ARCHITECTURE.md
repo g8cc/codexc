@@ -1,6 +1,6 @@
 # 架构（Architecture）
 
-CodingKeeper = 编码 Agent 的无人值守运行时。核心命题: **智能全部在 Agent 内，机械全部在 Keeper 内，且机械层零智能**（bash + tmux + 退出码），因此可审查、可测试、不会被上游 Agent 的快速迭代碾掉。
+CodingKeeper = 编码 Agent 的无人值守运行时。核心命题: **智能全部在 Agent 内，机械全部在 Keeper 内，且机械层零智能**（Bash/Python + tmux + 退出码），因此可审查、可测试、不会被上游 Agent 的快速迭代碾掉。
 
 ## 两条驱动通道
 
@@ -26,7 +26,7 @@ queue.md(## ready) → 投喂 → worker 回合 → gate.sh(真实退出码)
 1. 验收只认真实证据: gate 退出码 + 独立审查 BUGS 行；worker 自述不算数。
 2. 失败方向是 park: 无法判定即挂起等人，绝不虚假验收。
 3. 完成事件一次性消费: 水位 + 活动门 + 新鲜度令牌三层防陈旧误收。
-4. 每层都有上限: 续命 30 / gate 3 / 审查 6 / 空转 2 / 回合 3600s / 审查 1800s。
+4. 每层都有上限: 续命 30 / gate 3 / 审查 6 / 空转 2 遍燃料库 / 回合 3600s / 审查 1800s。
 5. 外环零智能: 不做任何"聪明"的推断，机械规则全部可测试。
 6. **keeper 自医必带回归锁**: 修 keeper 自身的 bug 必须附对应回归测试（selftest/conformance
    相应套件），无测试不入库（pre-commit 强制）；测试不可达的层（真 TTY 交互/浏览器 API）
@@ -52,3 +52,5 @@ queue.md(## ready) → 投喂 → worker 回合 → gate.sh(真实退出码)
 
 现有实现: codex(sqlite→rollout尾)、claude(JSONL isApiErrorMessage)、pi(stopReason)、
 opencode(session_v2/message 表)、zcode(--prompt/--resume, 会话文件)、dsh(--session-id, zstd 存储)。
+
+工程燃料：`ck-prompts.py` 内置十类工程指令，按项目持久化轮换并支持动态追加；任务入队与验收共用 acceptance.lock。worker/gate/review 共享进程组监护，owner 消失后停止本组，验收在获得事务锁后再检查候选。

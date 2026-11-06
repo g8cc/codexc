@@ -51,7 +51,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc -T claude` | 驱动 **Claude Code**（循环/门禁/审查完全一致） |
 | `codexc -T opencode` | 驱动 **opencode**（同一管线；会话从 opencode.db 读取） |
 | `ck zcode run` | 在 headless 通道驱动 **ZCode 的 CLI**：每任务一次阻塞回合（`zcode --prompt --mode yolo`），会话接力持久化到 `.codingkeeper/zcode-session-id`。队列/门禁首次运行自动生成；需 Node >= 24 与桌面应用自带的 `zcode.cjs`（自动探测） |
-| `zcodec` | 与 `codexc` 同构的产品入口：裸命令 = 唤起 ZCode 应用（交互界面，绝不自动跑），`zcodec run` = 夜间 runner，其余保留动词（`init`/`status`/`selftest`）或 zcode CLI 参数透传。**`dshc`** 同构（裸命令打印说明） |
+| `zcodec` | 与 `codexc` 同构的产品入口：裸命令 = 唤起 ZCode 应用（交互界面，绝不自动跑），`zcodec run` = 无人值守 runner，其余保留动词（`init`/`status`/`selftest`）或 zcode CLI 参数透传。**`dshc`** 同构（裸命令打印说明） |
 | `ck status` | **跨项目总览**：所有已登记项目的燃烧/挂起/队列/最近验收 |
 | `ck fuel [tool]` | `codexc fuel` 的简写 |
 | `codexc -T pi` | 驱动 **pi**（同一管线；429 续命基于 `stopReason: "error"`） |
@@ -60,7 +60,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc-daily pause` / `resume` | 暂停 / 恢复每日任务 |
 | `codexc-daily status` / `uninstall` | 查看状态 / 移除注册 |
 
-`zcodec run` / `ck zcode run` 默认只在 **23:00 至次日 09:00（Asia/Shanghai，UTC+8）** 执行自动任务。白天等待，不发送模型请求；09:00 停止受管的 worker、门禁与独立审查子进程，未验收任务留在队列。配额耗尽等待下一次开放时段，重启 runner 也保留这个等待。面板区分等待时段、等待配额、退避和任务执行。可通过 `CODEXC_ACTIVE_WINDOW=HH:MM-HH:MM` / `CODEXC_ACTIVE_TZ` 调整；无效配置停止执行。人工 `loop.halt` 始终优先，`CODEXC_AUTO_RESUME=0` 禁止配额自动恢复。此规则适用于 ZCode 自动 runner，裸命令和其它工具入口保持原用法。
+`zcodec run` / `ck zcode run` 默认 **全天可运行，并持续投喂工程 Prompt 燃料**。`CODEXC_LOOP_IDLE=0` 改为只执行队列。需要夜间运行时，显式设置 `CODEXC_ACTIVE_WINDOW=23:00-09:00`、`CODEXC_ACTIVE_TZ=Asia/Shanghai`；截止会停止 headless worker、gate 和 reviewer 的受管进程组。无效配置停止执行，人工 `loop.halt` 优先，配额等待跨重启保留。未配置时段时，额度耗尽会停炉等待人工恢复，不推测重置时间。
 
 
 ### 会话命名规则
@@ -103,8 +103,25 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 - `.codingkeeper/gate.sh` — 项目真实的测试命令。外环在 shell 里运行它、只认退出码；失败会把输出回灌给 codex 修复（次数受 `CODEXC_GATE_RETRIES` 限制）。
 - 每个完成的任务由独立的只读 `codex exec --ephemeral` 审查上下文。连续 `CODEXC_REVIEW_PASS`（默认 2）次零 bug 才算通过；发现 bug 就回灌修复。重试耗尽会挂起循环（`touch .codingkeeper/loop.halt` 暂停，`rm` 恢复）并发通知。
 - `CODEXC_LOOP_DRY=1 codexc loop` — 只记录动作、不触碰 TUI 的安全试跑。
-- **桌面面板**：两个 runner 每次状态变化即发布 `status.json`；菜单栏应用（`desktop/CodingKeeperBar.swift`，install 自动编译）一屏显示所有项目的任务与挂起状态。**burn 模式（默认开启）**：队列烧干后，循环自动投喂持续改进指令——先按 worker 自己说的下一步做，否则做一轮专业收尾审查（正确性、安全、性能、可靠、鲁棒/边界、可维护、测试完整性、依赖健康、可观测、文档一致性），发现问题小步提交修复。worker 连续两轮报告无事可做，锅炉自动熄火并通知你。`CODEXC_LOOP_IDLE=0` 关闭；其他值替换内置指令；`CODEXC_IDLE_PARK` 调整空转上限。
+- **burn 模式（默认开启）**：队列空时轮换 10 类工程 Prompt，每轮要求真实问题、小步修改与验证。完整扫描燃料库两遍仍无源文件变化时进入不请求模型的 `waiting_fuel`（内置库为 20 个空转回合）。`CODEXC_LOOP_IDLE=0` 关闭；自定义文本替换轮换；`CODEXC_IDLE_PARK` 设置无产出的扫描遍数（自定义 Prompt 则为回合数）。`CODEXC_PROMPT_ROTATION=0` 恢复单条通用指令。桌面面板读取状态与回合心跳。
 - 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查使用独立的 Codex 上下文；底层模型可能与 worker 相同。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`ck zcode run` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
+
+## 工程 Prompt 燃料
+
+CodingKeeper 是编码工具外面的运行管控层：选择任务、管理生命周期、校验交付；工程实现交给编码工具。`ck fuel` 保留 provider/token 消耗查询，工程 Prompt 燃料使用：
+
+```bash
+ck prompts list
+ck prompts show reliability
+ck prompts add recovery --file ./recovery-prompt.md
+ck enqueue --prompt reliability
+ck enqueue "修复已复现的重启问题，并补行为回归"
+ck enqueue --file ./task.md
+ck zcode run              # headless 持续燃烧，默认全天
+ck codex loop             # Codex TUI 监督循环
+```
+
+内置正确性、可靠性、安全、边界、行为测试、性能、可观测、依赖、可维护、文档十类指令。项目级追加保存在 `.codingkeeper/prompts/`，`burn-cursor.json` 保留轮换进度。`ready` 任务优先；入队保留多行合同，与验收共享锁，并发加料不会覆盖彼此。燃料耗尽后 runner 在线等待，不请求模型；新队列任务或新增/修改项目 Prompt 会自动恢复。人工停炉标记仍保留；解除人工暂停需清除 `loop.halt`，已退出的 headless runner 还需重新启动。首次使用先 `ck init` 并核对 `.codingkeeper/gate.sh`。
 
 ## 自动 Yes
 
@@ -169,7 +186,7 @@ rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 
 ### 叶子任务与额度保护（2026-11）
 
-`zcodec run` 默认只执行 `## ready` 内未勾选的任务；队列空时进入 `idle` 等待，不再自动持续改进。它仍受 23:00–09:00（Asia/Shanghai）时段约束，并在调用 worker 前拒绝缺失或官方占位的 gate。其他入口保留原有兼容行为；明确设置 `CODEXC_LOOP_IDLE=1` 才会给 ZCode 开启空闲改进。
+自动 `codexc-loop run` / `codexc-headless run` 默认要求真实 gate 与 Git 仓库；缺失或官方占位 gate 在执行前停炉。`zcodec run` 始终要求门禁。其他车道显式 `CODEXC_REQUIRE_GATE=0` 可保留旧兼容模式，跳过门禁不提供测试证据。关闭 burn 后，空队列显示非活跃 `idle`。
 
 运行 `ck leaves --registry` 或 `zcodec leaves . --json` 可离线检查队列结构、重复 ID、藏在错误分区的待办和占位门禁，不调用模型。每条任务可以带缩进的目标/范围/验收/依赖续行，完整合同会一起投喂。`review-needed`、`blocked` 和归档分区不自动执行。结构检查不能替代源码审计或业务价值判断。
 

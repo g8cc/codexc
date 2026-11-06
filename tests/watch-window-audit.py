@@ -140,12 +140,27 @@ class WatchWindowAudit(unittest.TestCase):
                     self.assertEqual(result.stdout, "rc=125")
                     self.assertFalse((self.root / "launches").exists())
 
-    def test_watchdog_defaults_to_night_window(self):
+    def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")
         self.clock.write_text(str(epoch("2026-11-06T16:00:00")))
         self.shell("patrol_once\n", fake_revive=True)
-        self.assertFalse((self.root / "revived").exists())
+        self.assertTrue((self.root / "revived").exists())
+
+    def test_explicit_empty_window_allows_patrol_and_probe(self):
+        self.env['CODEXC_ACTIVE_WINDOW'] = ''
+        self.clock.write_text(str(epoch('2026-11-06T16:00:00')))
+        self.shell('patrol_once\ncli_alive\n', fake_revive=True)
+        self.assertTrue((self.root / 'revived').exists())
+        self.assertTrue((self.root / 'probes').exists())
+
+    def test_revive_preserves_custom_timezone(self):
+        self.env['CODEXC_ACTIVE_TZ'] = 'Asia/Singapore'
+        self.shell('revive fingerprint\n')
+        deadline = time.monotonic() + 2
+        while not (self.root / 'launches').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertIn('23:00-09:00|Asia/Singapore|', (self.root / 'launches').read_text())
 
     def test_invalid_policy_or_helper_failure_fails_closed(self):
         for config in ({"CODEXC_ACTIVE_WINDOW": "bad"}, {"CODEXC_ACTIVE_TZ": "invalid/timezone"},

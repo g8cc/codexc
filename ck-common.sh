@@ -190,6 +190,7 @@ kill_tree() {  # stop parents before walking so they cannot fork during cleanup
 }
 
 review_groups_prepare() {
+    export CK_PROCESS_OWNER_PID="$$"
     [ -n "${CK_REVIEW_GROUP_DIR:-}" ] && return 0
     CK_REVIEW_GROUP_DIR="$(mktemp -d .codingkeeper/.review-groups.XXXXXX)" || return 1
     CK_REVIEW_GROUP_TOKEN="${CK_LOCK_TOKEN:-$$-$RANDOM-$RANDOM}"
@@ -246,9 +247,41 @@ queue_mark_done() {  # compatibility API; runners use leaf_accept transaction
     python3 "$CK_COMMON_DIR/ck-leaf.py" mark "$1" "$2"
 }
 
+burn_rotating() {
+    [ "${CODEXC_PROMPT_ROTATION:-1}" != 0 ] && [ "$IDLE_PROMPT" = "$IDLE_PROMPT_DEFAULT" ]
+}
+
+burn_fuel_check() {  # 0=ready; 1=exhausted; 2=invalid; renewed resets no-op count
+    BURN_FUEL_STATE=ready
+    burn_rotating || return 0
+    BURN_FUEL_STATE="$(python3 "$CK_COMMON_DIR/ck-prompts.py" available)" || return 2
+    case "$BURN_FUEL_STATE" in ready|renewed) return 0 ;; waiting) return 1 ;; *) return 2 ;; esac
+}
+
+burn_exhaust() {
+    python3 "$CK_COMMON_DIR/ck-prompts.py" exhaust >/dev/null
+}
+
+burn_prompt_prepare() {
+    BURN_PROMPT="$IDLE_PROMPT"; BURN_PROMPT_ID=custom
+    BURN_NOOP_LIMIT="$CODEXC_IDLE_PARK"
+    burn_rotating || return 0
+    local answer count encoded extra
+    answer="$(python3 "$CK_COMMON_DIR/ck-prompts.py" next --format tsv)" || return 1
+    IFS="$TAB" read -r BURN_PROMPT_ID count encoded extra <<< "$answer"
+    case "$count" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$count" -ge 1 ] && [ "$count" -le 64 ] && [ -n "$encoded" ] && [ -z "$extra" ] || return 1
+    BURN_PROMPT="$(python3 -c 'import base64,sys; print(base64.b64decode(sys.argv[1],validate=True).decode("utf-8"),end="")' "$encoded")" || return 1
+    BURN_NOOP_LIMIT=$((CODEXC_IDLE_PARK * count))
+    return 0
+}
+
 leaf_begin() {
     CODEXC_LEAF_EVIDENCE_DIR="$(python3 "$CK_COMMON_DIR/ck-leaf.py" begin "$1")" || return 1
     export CODEXC_LEAF_EVIDENCE_DIR
+    if [ -z "$1" ] && [ -n "${BURN_PROMPT:-}" ]; then
+        printf '%s' "$BURN_PROMPT" > "$CODEXC_LEAF_EVIDENCE_DIR/goal.txt" || return 1
+    fi
 }
 
 leaf_candidate() {
@@ -314,6 +347,7 @@ journal_append() {
 
 gate_run() {  # $1=outfile; 0=pass
     local outfile="$1" gpid waited=0 rc
+    review_groups_prepare || return 126
     : > "$outfile" || return 1
     if ! ck_run_check; then
         printf '[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
@@ -324,17 +358,17 @@ gate_run() {  # $1=outfile; 0=pass
         printf 'no gate.sh — gate skipped\n' > "$outfile"
         return 0
     fi
-    bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
+    command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" /bin/bash ".codingkeeper/gate.sh" > "$outfile" 2>&1 &
     gpid=$!
     while kill -0 "$gpid" 2>/dev/null; do
         if ! ck_run_check; then
-            kill_tree "$gpid"
+            review_group_stop "$gpid"
             wait "$gpid" 2>/dev/null
             printf '\n[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
             return 125
         fi
         if [ "$waited" -ge "$CODEXC_GATE_TIMEOUT" ]; then
-            kill_tree "$gpid"
+            review_group_stop "$gpid"
             wait "$gpid" 2>/dev/null
             printf '\n[gate timed out after %ss]\n' "$CODEXC_GATE_TIMEOUT" >> "$outfile"
             return 124
@@ -346,6 +380,7 @@ gate_run() {  # $1=outfile; 0=pass
     done
     wait "$gpid" 2>/dev/null
     rc=$?
+    review_group_stop "$gpid" || return 126
     if ! ck_run_check; then
         printf '\n[gate interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$outfile"
         return 125
@@ -363,15 +398,40 @@ try:
         text = fh.read().replace(b"\x00", b"").decode("utf-8", "replace")
 except OSError:
     print("parse-fail", end=""); raise SystemExit(0)
-lines = [line.strip() for line in text.splitlines() if "BUGS:" in line]
+lines = [line.strip() for line in text.splitlines() if line.strip()]
 match = re.fullmatch(r"BUGS:[ \t]*([0-9]+)", lines[-1]) if lines else None
 value = match.group(1).lstrip("0") or "0" if match else ""
 print(value if value and len(value) <= 6 else "parse-fail", end="")
 PYBUGS
 }
 
+review_capture_output() {  # defaults use the CLI's final-message file only
+    [ -n "${cli_out:-}" ] || return 0
+    local capture_rc=0
+    leaf_save_output "$cli_out" review-cli || capture_rc=1
+    if [ "$1" = 0 ]; then
+        python3 - "$final_out" > "$out" <<'PYFINAL'
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        raise ValueError("review final message is not a regular file")
+    data = f.read(16 * 1024 * 1024 + 1)
+if not data.strip() or len(data) > 16 * 1024 * 1024:
+    raise ValueError("review final message is empty or exceeds 16 MiB")
+sys.stdout.buffer.write(data)
+PYFINAL
+        [ "$?" = 0 ] || capture_rc=1
+    else
+        cat "$cli_out" > "$out" 2>/dev/null || capture_rc=1
+    fi
+    rm -f "$cli_out" "$final_out"
+    return "$capture_rc"
+}
+
 review_run() {  # -> decimal / parse-fail / timeout; window-closed returns rc 125
-    local out="$2" instrfile="$2.instr" rpid waited=0 rc instr
+    local out="$2" instrfile="$2.instr" rpid waited=0 rc instr goal="$1" cli_out="" final_out=""
+    [ "${task_kind:-}" != idle ] || goal="${BURN_PROMPT:-$1}"
     review_groups_prepare || { printf 'parse-fail'; return 0; }
     : > "$out" || { printf 'parse-fail'; return 0; }
     if ! ck_run_check; then
@@ -379,21 +439,24 @@ review_run() {  # -> decimal / parse-fail / timeout; window-closed returns rc 12
         printf 'window-closed'
         return 125
     fi
-    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $1 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
+    instr="你是独立代码审查员, 与实现者是两个互不相干的会话。本任务目标: $goal 。请先用 git status --short 和 git diff HEAD 查看当前仓库的全部未提交改动, 再阅读相关文件。只报告真实的 bug(错误行为/数据损坏/安全问题/明确的逻辑错误), 忽略风格和主观建议。先列出发现的问题(文件:行号 + 一句话说明), 最后一行必须是 BUGS: <数量>; 没有问题就写 无问题 并输出 BUGS: 0。"
     if [ -n "${CODEXC_LEAF_EVIDENCE_DIR:-}" ]; then
-        instr="你是独立验收审查员。本叶目标: $1 。本叶基线 HEAD=${CODEXC_LEAF_BASE_HEAD:-unborn}；候选 HEAD=${CODEXC_LEAF_CANDIDATE_HEAD:-unborn}。先读取 $CODEXC_LEAF_EVIDENCE_DIR/changes.diff 和 baseline.json/candidate.json；它们给出本叶开工前到本次候选的精确变化（包括 worker 已提交改动，勿只看 git diff HEAD）。按目标检查实现和证据，再阅读相关源文件。只读审查，不修改源码、测试、门禁或队列。只有目标已满足、未发现真实bug才输出 BUGS: 0；否则列出文件:行号及真实问题，最后一行 BUGS: <数量>。"
+        instr="你是独立验收审查员。本叶目标: $goal 。本叶基线 HEAD=${CODEXC_LEAF_BASE_HEAD:-unborn}；候选 HEAD=${CODEXC_LEAF_CANDIDATE_HEAD:-unborn}。先读取 $CODEXC_LEAF_EVIDENCE_DIR/changes.diff 和 baseline.json/candidate.json；它们给出本叶开工前到本次候选的精确变化（包括 worker 已提交改动，勿只看 git diff HEAD）。按目标检查实现和证据，再阅读相关源文件。只读审查，不修改源码、测试、门禁或队列。只有目标已满足、未发现真实bug才输出 BUGS: 0；否则列出文件:行号及真实问题，最后一行 BUGS: <数量>。"
     fi
     printf '%s' "$instr" > "$instrfile" || { printf 'parse-fail'; return 0; }
     if [ -n "${CODEXC_REVIEW_CMD:-}" ]; then
         command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" /bin/bash -c "$CODEXC_REVIEW_CMD" < "$instrfile" > "$out" 2>&1 &
     else
-        command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" codex exec --ephemeral -s read-only - < "$instrfile" > "$out" 2>&1 &
+        cli_out="$out.cli"; final_out="$out.final"
+        rm -f "$cli_out" "$final_out"
+        command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" codex exec --ephemeral -s read-only --output-last-message "$final_out" - < "$instrfile" > "$cli_out" 2>&1 &
     fi
     rpid=$!
     while kill -0 "$rpid" 2>/dev/null; do
         if ! ck_run_check; then
             review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
+            review_capture_output 1 || true
             printf '\n[review interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$out"
             rm -f "$instrfile"
             printf 'window-closed'
@@ -402,6 +465,7 @@ review_run() {  # -> decimal / parse-fail / timeout; window-closed returns rc 12
         if [ "$waited" -ge "$CODEXC_REVIEW_TIMEOUT" ]; then
             review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
+            review_capture_output 1 || true
             printf '\n[review timed out after %ss]\n' "$CODEXC_REVIEW_TIMEOUT" >> "$out"
             rm -f "$instrfile"
             printf 'timeout'
@@ -412,7 +476,11 @@ review_run() {  # -> decimal / parse-fail / timeout; window-closed returns rc 12
         waited=$((waited + 1))
     done
     wait "$rpid" 2>/dev/null; rc=$?
-    review_group_stop "$rpid" || { printf 'parse-fail'; return 0; }
+    review_group_stop "$rpid" || { review_capture_output 1 || true; printf 'parse-fail'; return 0; }
+    if ! review_capture_output "$rc"; then
+        rm -f "$instrfile"
+        printf 'parse-fail'; return 0
+    fi
     rm -f "$instrfile"
     if ! ck_run_check; then
         printf '\n[review interrupted: %s]\n' "$CK_WINDOW_REASON" >> "$out"
@@ -522,8 +590,8 @@ status_write() {  # text tool active started_at [phase] [next_run_at]
     # 记录最近载荷供 status_touch 心跳复用 (gate/review 阶段保活)
     _ST_TASK="$1"; _ST_TOOL="${2:-}"; _ST_ACTIVE="${3:-0}"; _ST_STARTED="${4:-0}"
     _ST_PHASE="${5:-}"; _ST_NEXT="${6:-0}"
-    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" "${5:-}" "${6:-0}" <<'PYEOF'
-import json, os, sys, tempfile
+    python3 - "$pdir" "$PWD" "$1" "${2:-}" "${3:-0}" "${4:-0}" "${5:-}" "${6:-0}" "$CK_COMMON_DIR/ck-leaf.py" <<'PYEOF'
+import importlib.util, json, os, sys, tempfile
 pdir, project, task = sys.argv[1], sys.argv[2], sys.argv[3]
 task = " ".join(str(task).split())
 if len(task) > 32:
@@ -537,15 +605,12 @@ except (ValueError, OverflowError):
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 # ready 计数口径 = 仅 ## ready 区 (review-needed 的自评任务不计入)
 ready = 0
-if os.path.exists(os.path.join(pdir, "queue.md")):
-    sec = ""
-    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8", errors="replace"):
-        s = line.strip()
-        if s.startswith("##"):
-            sec = s.lstrip("#").strip().lower()
-            continue
-        if sec == "ready" and s.startswith("- [ ]"):
-            ready += 1
+try:
+    spec = importlib.util.spec_from_file_location("leaf", sys.argv[9])
+    leaf = importlib.util.module_from_spec(spec); spec.loader.exec_module(leaf)
+    ready = len(leaf.queue_entries(leaf.read_queue(os.path.join(pdir, "queue.md"))))
+except (OSError, ValueError, UnicodeError):
+    pass
 snap = {"project": project, "task": task, "phase": phase, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
         "next_run_at": next_run_at, "ready": ready,

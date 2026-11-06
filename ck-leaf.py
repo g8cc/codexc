@@ -54,7 +54,7 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def queue_entries(data):
+def queue_items(data):
     if len(data) > 4 * 1024 * 1024 or b'\0' in data:
         raise ValueError('queue exceeds 4 MiB or contains NUL')
     section = ''
@@ -67,19 +67,21 @@ def queue_entries(data):
         if i <= consumed:
             continue
         text = line.strip()
-        if text.startswith(('```', '~~~')):
-            marker = text[:3]
+        match = re.match(r'^(`{3,}|~{3,})', text)
+        if match:
+            marker = match[1]
             if fence is None:
                 fence = marker
-            elif marker == fence:
+            elif marker[0] == fence[0] and len(marker) >= len(fence) and not text[len(marker):].strip():
                 fence = None
             continue
         if fence is not None:
             continue
-        if text.startswith('##'):
-            section = text.lstrip('#').strip().lower()
+        heading = re.match(r'^##\s+(.+?)\s*#*\s*$', line)
+        if heading:
+            section = heading[1].strip().lower()
             ready = ready or section == 'ready'
-        elif section == 'ready' and (text.startswith('- [ ]') or text.startswith('- [x]') or text.startswith('- [X]')):
+        elif text.startswith('- [ ]') or text.startswith('- [x]') or text.startswith('- [X]'):
             task = text[5:].strip()
             if task:
                 indent = len(line) - len(line.lstrip())
@@ -89,13 +91,12 @@ def queue_entries(data):
                     depth = len(following) - len(following.lstrip())
                     if not stripped:
                         continue
-                    if stripped.startswith('#') or depth <= indent:
+                    if depth <= indent:
                         break
                     continuation.append(stripped)
                     consumed = j
-                if text.startswith('- [ ]'):
-                    entries.append((i, '\n'.join([task, *continuation])))
-            elif text.startswith('- [ ]'):
+                entries.append((i, '\n'.join([task, *continuation]), text.startswith('- [ ]'), section))
+            elif section == 'ready' and text.startswith('- [ ]'):
                 raise ValueError('empty ready checkbox on line ' + str(i + 1))
         elif section == 'ready' and re.match(r'^-\s*\[', text):
             raise ValueError('malformed ready checkbox on line ' + str(i + 1))
@@ -104,6 +105,16 @@ def queue_entries(data):
     if fence is not None:
         raise ValueError('queue has an unclosed code fence')
     return entries
+
+
+def queue_entries(data):
+    return [(i, task) for i, task, pending, section in queue_items(data) if pending and section == 'ready']
+
+
+def queue_stats(data):
+    items = queue_items(data)
+    return {'ready': sum(pending and section == 'ready' for _, _, pending, section in items),
+            'done': sum(not pending for _, _, pending, _ in items)}
 
 
 def read_queue(path):
@@ -357,6 +368,8 @@ def accept(directory, task_b64, detail):
         # No unresolved old transaction may be overwritten.
         if read_queue(queue) != before:
             raise ValueError('queue changed during acceptance; retry from current queue')
+        if snapshot(directory) != manifest(directory, 'candidate'):
+            raise ValueError('candidate changed while waiting for acceptance lock')
         atomic(STATE / 'acceptance.pending.json', encode(tx))
         recover_locked()
     locked(commit)
@@ -369,6 +382,8 @@ def main():
         for i, task in queue_entries(data):
             print(str(i + 1) + '\t' + base64.b64encode(task.encode()).decode())
             break
+    elif command == 'count':
+        print(queue_stats(read_queue(Path(sys.argv[2])))['ready'])
     elif command == 'mark':
         path = Path(sys.argv[2]); data = read_queue(path)
         try:

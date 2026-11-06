@@ -9,8 +9,8 @@ LOCKDIR="$HOME/.codingkeeper/watchdog.lock"
 DAY="$(date +%F)"
 GREP=/usr/bin/grep
 ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-# This watchdog serves ZCode only. Empty/unset configuration must retain its
-# nighttime policy even when the invoking shell has no project environment.
+# This watchdog serves ZCode only. Empty/unset configuration permits 24/7;
+# an explicit availability policy is forwarded unchanged to every restart.
 CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-}"   # 默认不限制 (全天燃烧)
 CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
 WATCH_DIR="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]:-$0}" 2>/dev/null)"
@@ -21,9 +21,14 @@ watch_window_open() {
     result="$(CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
         python3 "$WATCH_DIR/ck-window.py" --format tsv 2>/dev/null)" || return 125
     IFS=$'\t' read -r allowed deadline next_open reason extra <<< "$result"
-    [ "$allowed" = 1 ] && [ "$reason" = allowed ] && [ -z "$extra" ] || return 125
-    case "$deadline:$next_open" in *[!0-9:]*|:*) return 125 ;; esac
-    [ "$deadline" -gt 0 ] 2>/dev/null || return 125
+    [ "$allowed" = 1 ] && [ -z "$extra" ] || return 125
+    case "$result" in *$'\n'*) return 125 ;; esac
+    case "$deadline:$next_open" in *[!0-9:]*|:*|*:) return 125 ;; esac
+    case "$reason" in
+        disabled) [ -z "$CODEXC_ACTIVE_WINDOW" ] && [ "$deadline:$next_open" = 0:0 ] || return 125 ;;
+        allowed) [ "$deadline" -gt 0 ] 2>/dev/null || return 125 ;;
+        *) return 125 ;;
+    esac
     return 0
 }
 
@@ -102,7 +107,7 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
     [ -d "$d" ] || return 1
     ( cd "$d" || exit 1
       # The resumed runner enforces the same policy for the full child lifetime.
-      CODEXC_ACTIVE_WINDOW="" CODEXC_ACTIVE_TZ="Asia/Shanghai" \
+      CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
       CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 & )
 }
 

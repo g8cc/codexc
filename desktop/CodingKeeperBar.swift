@@ -287,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var running = false
         var phase = ""
         var nextRunAt: TimeInterval = 0
-        var hasWaitingPhase: Bool { ["waiting_window", "waiting_quota", "backoff"].contains(phase) }
+        var hasWaitingPhase: Bool { ["waiting_window", "waiting_quota", "backoff", "waiting_fuel"].contains(phase) }
         var waiting = false
         var startedAt: TimeInterval = 0
         var ts: TimeInterval = 0
@@ -335,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "waiting_window": return next.isEmpty ? "等待运行时段" : "等待\(next)"
         case "waiting_quota": return next.isEmpty ? "配额耗尽，等待额度恢复" : "配额耗尽 · 下次检查 \(next)"
         case "backoff": return next.isEmpty ? "重试等待" : "重试等待 · \(next) 后重试"
+        case "waiting_fuel": return "等待新任务或工程 Prompt"
         default: return ""
         }
     }

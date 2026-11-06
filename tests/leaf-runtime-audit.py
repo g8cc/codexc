@@ -84,7 +84,7 @@ headless_turn() {
 }
 run_runner
 printf 'turns=%s' "$turns"
-''', CODEXC_LOOP_IDLE='1')
+''', CODEXC_LOOP_IDLE='1', CODEXC_PROMPT_ROTATION='0')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('turns=2', result.stdout)
         self.assertFalse((self.state / 'journal').exists())

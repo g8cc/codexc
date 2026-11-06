@@ -722,8 +722,8 @@ write_status() {  # $1=任务文本 $2=active(1/0) $3=started_at epoch(0=未知)
     driver="$(cat .codingkeeper/loop.pid 2>/dev/null || true)"
     case "$driver" in ''|*[!0-9]*) ;; *) kill -0 "$driver" 2>/dev/null && return 0 ;; esac
     mkdir -p ".codingkeeper" 2>/dev/null
-    python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" "${3:-0}" <<'PYEOF3'
-import json, os, sys, time, tempfile
+    python3 - "$PWD" "$1" "${CODEXC_TOOL:-codex}" "${2:-0}" "${3:-0}" "$SCRIPT_DIR/ck-leaf.py" <<'PYEOF3'
+import importlib.util, json, os, sys, time, tempfile
 pdir, project, task = ".codingkeeper", sys.argv[1], sys.argv[2]
 # 口喷长文只留标识头: 32 字符 + … (bash 3.2 的 ${v:0:N} 按字节切会碎多字节,
 # 截断必须在 python 按字符做)
@@ -734,15 +734,12 @@ tool, active, started_at = sys.argv[3], sys.argv[4] == "1", int(sys.argv[5] or 0
 parked = os.path.exists(os.path.join(pdir, "loop.halt"))
 # ready 口径 = 仅 ## ready 区 (与 ck-common status_write 一致)
 ready = 0
-if os.path.exists(os.path.join(pdir, "queue.md")):
-    sec = ""
-    for line in open(os.path.join(pdir, "queue.md"), encoding="utf-8"):
-        s = line.strip()
-        if s.startswith("##"):
-            sec = s.lstrip("#").strip().lower()
-            continue
-        if sec == "ready" and s.startswith("- [ ]"):
-            ready += 1
+try:
+    spec = importlib.util.spec_from_file_location("leaf", sys.argv[6])
+    leaf = importlib.util.module_from_spec(spec); spec.loader.exec_module(leaf)
+    ready = leaf.queue_stats(leaf.read_queue(os.path.join(pdir, "queue.md")))["ready"]
+except (OSError, ValueError, UnicodeError):
+    pass
 snap = {"project": project, "task": task, "phase": task, "parked": parked,
         "tool": tool, "active": active, "started_at": started_at,
         "ready": ready,
@@ -981,7 +978,7 @@ if [ "$ACTION" = "fuel" ]; then
     if [ -e ".codingkeeper/loop.halt" ]; then
         echo "codexc 循环: 挂起 (.codingkeeper/loop.halt 存在 — rm 后复燃)"
     elif [ -f ".codingkeeper/queue.md" ]; then
-        ready="$(grep -c '^- \[ \]' .codingkeeper/queue.md 2>/dev/null)"
+        ready="$(python3 "$SCRIPT_DIR/ck-leaf.py" count .codingkeeper/queue.md 2>/dev/null)"
         echo "codexc 循环: 队列就绪 (${ready:-0} 个待投喂任务)"
     fi
     exit 0
@@ -1093,7 +1090,7 @@ if [ -n "${TMUX:-}" ]; then
         fi
     else
         if [ -f ".codingkeeper/queue.md" ]; then
-            ready_q="$(grep -c '^- \[ \]' .codingkeeper/queue.md 2>/dev/null || true)"
+            ready_q="$(python3 "$SCRIPT_DIR/ck-leaf.py" count .codingkeeper/queue.md 2>/dev/null || true)"
             echo "codexc: delivery loop off — ${ready_q:-0} 个就绪任务未投喂 (codexc loop 显式开启)" >&2
         fi
     fi
@@ -1180,7 +1177,7 @@ codex_args=""
 # A long-lived tmux server carries the environment from its first client.
 # Clear supported settings there, then apply this invocation's values explicitly.
 inner_env=""
-for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER PI_DIR OPENCODE_DATA_DIR; do
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
     inner_env="$inner_env -u $setting"
 done
 inner="env$inner_env PATH=$(printf '%q' "$PATH") \
@@ -1198,7 +1195,7 @@ CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") \
 CODEXC_LOOP=$(printf '%q' "${CODEXC_LOOP:-}") \
 CODEXC_TOOL=$(printf '%q' "$CODEXC_TOOL") \
 CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_DIR")"
-for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER PI_DIR OPENCODE_DATA_DIR; do
+for setting in CODEXC_NOTIFY CODEXC_NOTIFY_SECS CODEXC_NOTIFY_GAP CODEXC_LOOP_NOTIFY CODEXC_LOOP_POLL CODEXC_LOOP_STALL CODEXC_TURN_TIMEOUT CODEXC_LOOP_DRY CODEXC_LOOP_IDLE CODEXC_IDLE_PARK CODEXC_LOOP_ROLLOUT CODEXC_GATE_TIMEOUT CODEXC_GATE_RETRIES CODEXC_REVIEW_CMD CODEXC_REVIEW_PASS CODEXC_REVIEW_ROUNDS CODEXC_REVIEW_TIMEOUT CODEXC_BANNER CODEXC_PROMPT_ROTATION CODEXC_REQUIRE_GATE CODEXC_ACTIVE_WINDOW CODEXC_ACTIVE_TZ PI_DIR OPENCODE_DATA_DIR; do
     if declare -p "$setting" >/dev/null 2>&1; then
         inner="$inner $setting=$(printf '%q' "${!setting}")"
     fi

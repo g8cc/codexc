@@ -58,7 +58,7 @@
 #   CODEXC_LOOP_IDLE      burn mode (default ON): when the queue runs dry,
 #                         feed a standing improve/harden prompt; "0" disables;
 #                         any other text replaces the built-in prompt
-#   CODEXC_IDLE_PARK      consecutive no-op idle turns before the boiler parks
+#   CODEXC_IDLE_PARK      no-op sweeps of the fuel catalog before the boiler parks
 #                         itself and notifies (default 2)
 #   CODEXC_REVIEW_CMD     override reviewer command (reads instructions on
 #                         stdin; must print BUGS: <n>; default uses a
@@ -609,14 +609,30 @@ run_driver() {  # $1=pane
                     fi
                     continue
                 fi
+                burn_fuel_check; rc=$?
+                if [ "$rc" = 1 ]; then
+                    status_write "燃料已扫描完，等待新任务或新 Prompt" "$CODEXC_TOOL" 0 0 waiting_fuel 0
+                    continue
+                elif [ "$rc" != 0 ]; then
+                    log "parked: invalid fuel exhaustion state"
+                    mode="halt"; touch .codingkeeper/loop.halt
+                    continue
+                fi
+                [ "$BURN_FUEL_STATE" != renewed ] || idle_count=0
                 # burn mode: feed the standing prompt instead of idling
                 task_kind="idle"; task="(idle 持续改进)"; task_b64=""
+                if ! burn_prompt_prepare; then
+                    log "parked: invalid prompt fuel"
+                    mode="halt"; touch .codingkeeper/loop.halt
+                    continue
+                fi
+                task="(idle 持续改进: $BURN_PROMPT_ID)"
                 if ! leaf_begin ""; then
                     log "parked: leaf baseline failed"
                     mode="halt"; touch .codingkeeper/loop.halt
                     continue
                 fi
-                if ! feed_turn "$IDLE_PROMPT"; then
+                if ! feed_turn "$BURN_PROMPT"; then
                     log "failed to feed idle prompt, retrying next poll"
                     continue
                 fi
@@ -650,7 +666,7 @@ run_driver() {  # $1=pane
             mode="task"; phase="work"
             gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
             done_path=""; done_size=0
-            ready_n="$(grep -c '^\- \[ \]' ".codingkeeper/queue.md" 2>/dev/null || true)"
+            ready_n="$(python3 "$CK_COMMON_DIR/ck-leaf.py" count .codingkeeper/queue.md 2>/dev/null || true)"
             ready_n="${ready_n:-0}"   # grep -c 无匹配时打 0 但退出 1, 不能再 || echo 0 (会变成两行)
             CK_TURN_TS=$(date +%s)
             banner_set "📋 $task ｜ 队列剩余 ${ready_n} │ 执行中"
@@ -748,14 +764,24 @@ run_driver() {  # $1=pane
                         # genuinely nothing to do: corroborated by the worker's
                         # idle claim AND a clean tree at the same commit
                         idle_count=$((idle_count + 1))
-                        if [ "$idle_count" -ge "$CODEXC_IDLE_PARK" ]; then
+                        if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
+                            if burn_rotating; then
+                                if ! burn_exhaust; then
+                                    mode="halt"; touch .codingkeeper/loop.halt
+                                    continue
+                                fi
+                                CK_TURN_TS=0; mode="idle"; phase=""
+                                status_write "燃料已扫描完，等待新任务或新 Prompt" "$CODEXC_TOOL" 0 0 waiting_fuel 0
+                                notify "工程燃料已扫描完，等待新任务或新 Prompt"
+                                continue
+                            fi
                             notify "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃"
                             log "parked: $idle_count consecutive idle turns — nothing left to burn"
                             mode="halt"; phase=""
                             touch ".codingkeeper/loop.halt"
                             continue
                         fi
-                        log "idle turn $idle_count/$CODEXC_IDLE_PARK: nothing to do — burning the standing prompt again"
+                        log "idle turn $idle_count/$BURN_NOOP_LIMIT: nothing to do — burning the standing prompt again"
                         mode="idle"; phase=""
                         continue
                     fi
@@ -878,7 +904,8 @@ run_driver() {  # $1=pane
                 notify "任务通过验收: $task"
                 banner_set "✅ 已验收: $task ｜ 燃烧继续"
             log "task accepted: $task (queue line: ${marked:-not-found})"
-                mode="idle"; phase=""
+                mode="idle"; phase=""; idle_count=0
+                rm -f .codingkeeper/burn-exhausted.json
                 CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)
             fi
             # streak < PASS -> loop runs the next review on the following poll
@@ -981,7 +1008,7 @@ EOF
 - 每个 .codingkeeper/queue.md 里 ## ready 的任务由外部循环自动投喂; 完成实现并自测后 git commit(不要 push), 最后一条消息以 TASK_RESULT: DONE 结尾; 受阻用 TASK_RESULT: BLOCKED: 原因。
 - 独立审查发现 bug 时会回灌给你修复, 修复后同样以 TASK_RESULT: DONE 结尾。
 - 自评产生的后续任务写入 ## review-needed 分区(不要直接写 ## ready), 人工确认后才会执行。
-- burn 模式(默认开启): 队列空闲时循环会投喂持续改进指令; 确实无事可做时以 TASK_RESULT: DONE (idle) 结尾, 连续空转两次锅炉自动熄火。
+- burn 模式(默认开启): 队列空闲时循环会投喂持续改进指令; 确实无事可做时以 TASK_RESULT: DONE (idle) 结尾, 连续两遍燃料库无产出后自动熄火。
 EOF
         echo "  appended conventions to $agents_file"
     fi
@@ -1056,23 +1083,23 @@ EOF
     echo "== BUGS line parsing =="
     d="$(tmpd)"
     printf 'found:\n- src/x.py:10 off-by-one\nBUGS: 2\n' > "$d/r1"
-    bugs="$(grep -oE 'BUGS:[[:space:]]*[0-9]+' "$d/r1" | tail -1 | grep -oE '[0-9]+')"
+    bugs="$(parse_bugs "$d/r1")"
     assert_eq "two bugs parsed" "2" "$bugs"
     printf '无问题\nBUGS: 0\n' > "$d/r2"
-    bugs="$(grep -oE 'BUGS:[[:space:]]*[0-9]+' "$d/r2" | tail -1 | grep -oE '[0-9]+')"
+    bugs="$(parse_bugs "$d/r2")"
     assert_eq "zero bugs parsed" "0" "$bugs"
     printf 'review text without marker\n' > "$d/r3"
-    bugs="$(grep -an 'BUGS:' "$d/r3" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    bugs="$(parse_bugs "$d/r3")"
     case "$bugs" in ''|*[!0-9]*) bugs="parse-fail" ;; esac
     assert_eq "unparseable -> parse-fail" "parse-fail" "$bugs"
 
     printf 'codex\n无问题\n\nBUGS: 0\nTASK_RESULT: DONE\ntokens used\n64,877\n' > "$d/r4"
     printf '\000' >> "$d/r4"   # codex exec mixes NUL bytes into stdout
-    bugs="$(grep -an 'BUGS:' "$d/r4" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
-    assert_eq "NUL-laden output parses 0" "0" "$bugs"
+    bugs="$(parse_bugs "$d/r4")"
+    assert_eq "CLI transcript with stale verdict is rejected" "parse-fail" "$bugs"
 
     printf '发现:\n- x.py:1 崩溃\nBUGS: 3\n' > "$d/r5"
-    bugs="$(grep -an 'BUGS:' "$d/r5" | tail -1 | sed -E 's/.*BUGS:[[:space:]]*([0-9]+).*/\1/')"
+    bugs="$(parse_bugs "$d/r5")"
     assert_eq "nonzero count parses" "3" "$bugs"
 
     echo "== rollout turn_status =="
@@ -1826,7 +1853,7 @@ fi
 case "${1:-}" in
     init)    shift; cmd_init ;;
     run)     [ $# -ge 2 ] || { echo "codexc-loop: run needs a pane id" >&2; exit 1; }
-             shift; run_driver "$1" ;;
+             export CODEXC_REQUIRE_GATE="${CODEXC_REQUIRE_GATE:-1}"; shift; run_driver "$1" ;;
     selftest) shift; cmd_selftest ;;
     selftest-integration) shift; cmd_selftest_integration "${1:-codex}" ;;
     selftest-faultinjection) shift; cmd_faultinjection ;;

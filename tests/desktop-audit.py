@@ -19,13 +19,15 @@ case "duration":
     check(delegate.duration(1e100) == "—", "future timestamps must not overflow Int")
     check(delegate.duration(.infinity) == "—", "infinity must not overflow Int")
     check(delegate.duration(.nan) == "—", "NaN is invalid")
-case "waiting_window", "waiting_quota", "backoff":
+case "waiting_window", "waiting_quota", "backoff", "waiting_fuel":
     let status = delegate.readStatus(CommandLine.arguments[2])
     check(!status.running, "waiting phases must never count as running, even with a fresh active heartbeat")
     let message = delegate.waitingDescription(status)
-    let expected = ["waiting_window": "等待", "waiting_quota": "配额耗尽", "backoff": "重试等待"][CommandLine.arguments[1]]!
+    let expected = ["waiting_window": "等待", "waiting_quota": "配额耗尽", "backoff": "重试等待", "waiting_fuel": "等待新任务"][CommandLine.arguments[1]]!
     check(message.hasPrefix(expected), "waiting state must show its Chinese reason")
-    check(message.contains(":"), "a valid next_run_at must show its local clock time")
+    if CommandLine.arguments[1] != "waiting_fuel" {
+        check(message.contains(":"), "a valid next_run_at must show its local clock time")
+    }
     check(delegate.waitingSummary([status]) == message, "the small banner must directly explain waiting")
     var running = AppDelegate.ProjStatus()
     running.running = true
@@ -80,12 +82,12 @@ with tempfile.TemporaryDirectory(prefix='ck-desktop-test-') as temp:
     binary = root / 'desktop-audit'
     subprocess.run(['swiftc', '-module-cache-path', os.environ.get('SWIFT_MODULECACHE_PATH', str(root / 'modules')), str(swift), '-o', str(binary)], check=True)
     failures = 0
-    for mode in ('duration', 'future', 'large', 'fifo', 'hit', 'waiting_window', 'waiting_quota', 'backoff', 'waiting_invalid', 'working', 'halted', 'waiting_manual_halt', 'waiting_stale'):
+    for mode in ('duration', 'future', 'large', 'fifo', 'hit', 'waiting_window', 'waiting_quota', 'backoff', 'waiting_fuel', 'waiting_invalid', 'working', 'halted', 'waiting_manual_halt', 'waiting_stale'):
         project = root / mode
         kd = project / '.codingkeeper'
         kd.mkdir(parents=True)
         status = kd / 'status.json'
-        if mode in ('waiting_window', 'waiting_quota', 'backoff'):
+        if mode in ('waiting_window', 'waiting_quota', 'backoff', 'waiting_fuel'):
             status.write_text(json.dumps({'phase': mode, 'active': True, 'ts': time.time(), 'next_run_at': time.time()+3600}))
         elif mode in ('waiting_manual_halt', 'waiting_stale'):
             age = 180 if mode == 'waiting_stale' else 0

@@ -73,11 +73,16 @@ def main():
     if operation == 'launch':
         os.setsid()
         pid = os.getpid()
+        owner = int(os.environ.get('CK_PROCESS_OWNER_PID', os.getppid()))
+        if owner <= 1:
+            raise ValueError('managed process requires a live runner owner')
+        owner_birth = birth(owner)
         path = Path(directory) / (str(pid) + '.json')
         fd, temporary = tempfile.mkstemp(prefix='.group-', dir=directory)
         try:
             with os.fdopen(fd, 'w') as out:
-                json.dump({'pgid': pid, 'token': token, 'birth': birth(pid)}, out)
+                json.dump({'pgid': pid, 'token': token, 'birth': birth(pid),
+                           'owner': owner, 'owner_birth': owner_birth}, out)
                 out.flush()
                 os.fsync(out.fileno())
             # Publish only complete records; cleanup may run during launch.
@@ -86,7 +91,22 @@ def main():
             if os.path.exists(temporary):
                 os.unlink(temporary)
         command = sys.argv[4:]
-        os.execvp(command[0], command)
+        child = subprocess.Popen(command)
+        next_check = 0
+        while child.poll() is None:
+            if time.monotonic() >= next_check:
+                try:
+                    same_owner = birth(owner) == owner_birth
+                except (OSError, subprocess.SubprocessError):
+                    same_owner = False
+                if not same_owner:
+                    # EXIT traps cannot run after SIGKILL. The supervisor stays
+                    # in the owned group and kills itself and every member of its process group.
+                    os.killpg(pid, signal.SIGKILL)
+                next_check = time.monotonic() + 1
+            time.sleep(.05)
+        rc = child.wait()
+        raise SystemExit(rc if rc >= 0 else 128 - rc)
     elif operation == 'cleanup':
         cleanup(directory, token, sys.argv[4] if len(sys.argv) > 4 else '')
     else:

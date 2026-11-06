@@ -144,20 +144,24 @@ status_write 'idle' zcode 0 0
 cmd_status
 ''')
   self.assertEqual(rc,0,err);self.assertIn('空闲',out);self.assertNotIn('🔥',out)
- def test_zcodec_run_sets_window_defaults(self):
+ def test_zcodec_run_defaults_to_unrestricted_window(self):
   with tempfile.TemporaryDirectory(prefix='ck-zcodec-entry-') as d:
    p=Path(d);(p/'zcodec').write_bytes((ROOT/'zcodec').read_bytes());(p/'zcodec').chmod(0o755)
    hl=p/'codexc-headless';hl.write_text('#!/bin/bash\nprintf "%s|%s" "${CODEXC_ACTIVE_WINDOW:-missing}" "${CODEXC_ACTIVE_TZ:-missing}"\n');hl.chmod(0o755)
    env={k:v for k,v in os.environ.items() if not k.startswith('CODEXC_')}
    r=subprocess.run([str(p/'zcodec'),'run'],env=env,text=True,capture_output=True)
-   self.assertEqual(r.stdout,'23:00-09:00|Asia/Shanghai')
- def test_zcodec_run_defaults_to_queue_only_and_requires_gate(self):
+   self.assertEqual(r.stdout,'missing|Asia/Shanghai')
+   r=subprocess.run([str(p/'zcodec'),'run'],env=dict(env,CODEXC_ACTIVE_WINDOW='23:00-09:00',CODEXC_ACTIVE_TZ='Asia/Singapore'),text=True,capture_output=True)
+   self.assertEqual(r.stdout,'23:00-09:00|Asia/Singapore')
+ def test_zcodec_run_defaults_to_burn_and_requires_gate(self):
   with tempfile.TemporaryDirectory(prefix='ck-zcodec-safe-entry-') as d:
    p=Path(d);(p/'zcodec').write_bytes((ROOT/'zcodec').read_bytes());(p/'zcodec').chmod(0o755)
    hl=p/'codexc-headless';hl.write_text('#!/bin/bash\nprintf "%s|%s" "${CODEXC_LOOP_IDLE:-missing}" "${CODEXC_REQUIRE_GATE:-missing}"\n');hl.chmod(0o755)
    env={k:v for k,v in os.environ.items() if not k.startswith('CODEXC_')}
    r=subprocess.run([str(p/'zcodec'),'run'],env=env,text=True,capture_output=True)
-   self.assertEqual(r.stdout,'0|1')
+   self.assertEqual(r.stdout,'1|1')
    r=subprocess.run([str(p/'zcodec'),'run'],env=dict(env,CODEXC_LOOP_IDLE='1',CODEXC_REQUIRE_GATE='0'),text=True,capture_output=True)
    self.assertEqual(r.stdout,'1|1')
+   r=subprocess.run([str(p/'zcodec'),'run'],env=dict(env,CODEXC_LOOP_IDLE='0'),text=True,capture_output=True)
+   self.assertEqual(r.stdout,'0|1')
 if __name__=='__main__':unittest.main(verbosity=2)

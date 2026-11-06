@@ -1,7 +1,7 @@
 #!/bin/bash
 # dshc — dsh 入口 (产品命名, 与 codexc 家族同构)
 #
-#   dshc run                自动: headless 夜间 runner (队列/gate/审查/burn)
+#   dshc run                自动: headless 无人值守 runner (队列/gate/审查/burn)
 #   dshc init               项目脚手架
 #   dshc status             跨项目总览
 #   dshc selftest           单元自测 (selftest-integration 同理)

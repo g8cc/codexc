@@ -41,6 +41,7 @@ link "$HERE/ck-common.sh" "$CODEX_BIN_DIR/ck-common.sh"   # 三车道共享底�
 link "$HERE/ck-config.py" "$CODEX_BIN_DIR/ck-config.py"
 link "$HERE/ck-window.py" "$CODEX_BIN_DIR/ck-window.py"
 link "$HERE/ck-leaf.py" "$CODEX_BIN_DIR/ck-leaf.py"
+link "$HERE/ck-prompts.py" "$CODEX_BIN_DIR/ck-prompts.py"
 link "$HERE/ck-leaves.py" "$CODEX_BIN_DIR/ck-leaves.py"
 link "$HERE/ck-review-process.py" "$CODEX_BIN_DIR/ck-review-process.py"
 link "$HERE/ck-watch-tools.sh" "$CODEX_BIN_DIR/ck-watch-tools.sh"
@@ -52,7 +53,7 @@ link "$HERE/codexc-headless" "$CODEX_BIN_DIR/codexc-headless"
 link "$HERE/codexc-zcode-worker" "$CODEX_BIN_DIR/codexc-zcode-worker"
 link "$HERE/codexc-review-leaf" "$CODEX_BIN_DIR/codexc-review-leaf"
 link "$HERE/codexc-dsh-worker" "$CODEX_BIN_DIR/codexc-dsh-worker"
-link "$HERE/zcodec" "$CODEX_BIN_DIR/zcodec"   # 产品命名入口 (无参即 run)
+link "$HERE/zcodec" "$CODEX_BIN_DIR/zcodec"   # 产品命名入口 (无参为交互入口)
 link "$HERE/dshc" "$CODEX_BIN_DIR/dshc"
 link "$HERE/codexc-daily" "$CODEX_BIN_DIR/codexc-daily"
 link "$HERE/sync-prefix2.sh" "$CODEX_BIN_DIR/sync-prefix2.sh"

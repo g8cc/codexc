@@ -14,10 +14,12 @@ root = Path(__file__).resolve().parents[1]
 base = Path(tempfile.mkdtemp(prefix='ck-tests-', dir='/private/tmp'))
 print(f'Test artifacts: {base}', flush=True)
 env = {k:v for k,v in os.environ.items() if not k.startswith(('CODEXC_', 'CODEX_', 'TMUX', 'CK_TEST_'))}
+# Historical fake worlds are non-Git and use the single standing prompt.
+# Strict entry/default and rotation tests explicitly select production behavior.
 env.update(CK_TEST_ISOLATED='1', CK_TEST_ARTIFACTS=str(base), HOME=str(base/'home'), TMPDIR=str(base/'tmp')+'/',
            CODEX_HOME=str(base/'home/.codex'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'),
            PI_DIR=str(base/'home/.pi'), OPENCODE_DATA_DIR=str(base/'home/.opencode'),
-           CODEXC_LOOP_NOTIFY='0', CODEXC_NOTIFY='0', CODEXC_AUTO_RESUME='0', CODEXC_REVIEW_PARALLEL='0',
+           CODEXC_LOOP_NOTIFY='0', CODEXC_NOTIFY='0', CODEXC_AUTO_RESUME='0', CODEXC_REVIEW_PARALLEL='0', CODEXC_PROMPT_ROTATION='0', CODEXC_REQUIRE_GATE='0',
            GIT_AUTHOR_NAME='Codexc Test', GIT_AUTHOR_EMAIL='codexc-test@example.invalid',
            GIT_COMMITTER_NAME='Codexc Test', GIT_COMMITTER_EMAIL='codexc-test@example.invalid',
            SWIFT_MODULECACHE_PATH=os.environ.get('CK_SWIFT_TEST_CACHE', str(base/'swift-cache')), CLANG_MODULE_CACHE_PATH=os.environ.get('CK_CLANG_TEST_CACHE', str(base/'clang-cache')))
