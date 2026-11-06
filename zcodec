@@ -31,7 +31,9 @@ hl() {  # CodingKeeper headless 车道转发 (注入默认 worker)
 
 case "${1:-}" in
     run)
-        export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-23:00-09:00}"
+        # 时间窗默认关闭 (2026-11-06 用户要求全天燃烧): 未设置 = 不限制
+        # 需要夜间窗口时显式: CODEXC_ACTIVE_WINDOW=23:00-09:00 zcodec run
+        [ -n "${CODEXC_ACTIVE_WINDOW:-}" ] && export CODEXC_ACTIVE_WINDOW
         export CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
         export CODEXC_LOOP_IDLE="${CODEXC_LOOP_IDLE:-0}"
         export CODEXC_REQUIRE_GATE=1

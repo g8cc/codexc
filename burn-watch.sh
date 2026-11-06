@@ -11,7 +11,7 @@ GREP=/usr/bin/grep
 ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
 # This watchdog serves ZCode only. Empty/unset configuration must retain its
 # nighttime policy even when the invoking shell has no project environment.
-CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-23:00-09:00}"
+CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-}"   # 默认不限制 (全天燃烧)
 CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
 WATCH_DIR="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]:-$0}" 2>/dev/null)"
 
@@ -92,7 +92,7 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
     [ -d "$d" ] || return 1
     ( cd "$d" || exit 1
       # The resumed runner enforces the same policy for the full child lifetime.
-      CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
+      CODEXC_ACTIVE_WINDOW="" CODEXC_ACTIVE_TZ="Asia/Shanghai" \
       CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 & )
 }
 
