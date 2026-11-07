@@ -52,6 +52,7 @@ ck_window_check() {  # rc 0=allowed; 125=closed/invalid/unavailable
     fi
     case "$CK_WINDOW_ALLOWED:$CK_WINDOW_REASON" in
         1:allowed) [ "$CK_WINDOW_DEADLINE" != 0 ] && return 0 ;;
+        1:weekend) return 0 ;;                                # 周末全天开放, 无截止
         0:outside_window) return 125 ;;
     esac
     CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response
