@@ -90,6 +90,19 @@ cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"
         $GREP -q response "$out" && { ok=1; break; }
         [ "$try" = 2 ] || sleep 5
     done
+    # 自清理: 探测会话用完即删 (只删形如 sess_* 的 id, 防注入)
+    psid="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8', errors='replace'))
+    sid = d.get('sessionId', '')
+    print(sid if sid.startswith('sess_') else '')
+except Exception:
+    print('')
+" "$out" 2>/dev/null)"
+    case "$psid" in
+        sess_*) sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "DELETE FROM session WHERE id='$psid'" 2>/dev/null ;;
+    esac
     rm -f "$out"
     if [ "$ok" = "1" ]; then
         rm -f "$HOME/.codingkeeper/cli-probe-fail-ts"
