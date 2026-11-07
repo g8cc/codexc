@@ -74,6 +74,30 @@ python3() {
         result = self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s:%s:%s" "$?" "$CK_WINDOW_ALLOWED" "$CK_WINDOW_DEADLINE" "$CK_WINDOW_NEXT_OPEN"')
         self.assertEqual(result.stdout, f"0:1:{int(epoch('2026-11-06T09:00:00'))}:{int(epoch('2026-11-06T23:00:00'))}")
 
+    def test_weekend_exemption_all_day(self):
+        # 周末套餐全天开放 (2026-11-07 用户确认): Sat/Sun 不受 23:00-09:00 窗口限制
+        cases = [
+            ('2026-11-07T14:00:00', True, 'weekend'),   # Saturday
+            ('2026-11-08T02:00:00', True, 'weekend'),   # Sunday 凌晨
+            ('2026-11-08T14:00:00', True, 'weekend'),   # Sunday
+            ('2026-11-08T23:30:00', True, 'weekend'),   # Sunday 深夜
+        ]
+        for local, want_allowed, want_reason in cases:
+            (self.world/'clock').write_text(str(epoch(local)))
+            result = self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s" "$CK_WINDOW_ALLOWED" "$CK_WINDOW_REASON"')
+            self.assertEqual(result.stdout, f"1:{want_reason}", msg=local)
+
+    def test_weekday_window_still_applies(self):
+        cases = [
+            ('2026-11-09T08:00:00', '1', 'allowed'),        # 周一 overnight 尾
+            ('2026-11-09T14:00:00', '0', 'outside_window'),  # 周一白天禁
+            ('2026-11-06T23:30:00', '1', 'allowed'),        # 周五 overnight 头
+        ]
+        for local, want_allowed, want_reason in cases:
+            (self.world/'clock').write_text(str(epoch(local)))
+            result = self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s" "$CK_WINDOW_ALLOWED" "$CK_WINDOW_REASON"')
+            self.assertEqual(result.stdout, f"{want_allowed}:{want_reason}", msg=local)
+
     def test_shared_check_reports_next_window_at_close(self):
         (self.world/'clock').write_text(str(epoch('2026-11-06T09:00:00')))
         result = self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s:%s" "$?" "$CK_WINDOW_REASON" "$CK_WINDOW_NEXT_OPEN"')

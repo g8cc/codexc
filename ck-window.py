@@ -40,6 +40,11 @@ def evaluate(window, timezone='Asia/Shanghai', now=None):
         local = dt.datetime.fromtimestamp(instant, zone)
     except (ValueError, TypeError, OverflowError, OSError):
         return decision(False, reason='invalid_clock')
+    # 周末套餐全天开放 (2026-11-07 用户确认): Sat/Sun 不受 23:00-09:00 窗口限制;
+    # 工作日的 overnight 窗 (Fri 23:00 → Sat 09:00 / Sun 23:00 → Mon 09:00) 由下方
+    # 区间逻辑自然覆盖 — Fri/Sun 起始的 overnight 区间跨进周末早晨仍按窗口放行
+    if local.weekday() >= 5:
+        return decision(True, reason='weekend')
     overnight = (sh, sm) > (eh, em)
     intervals = []
     try:
