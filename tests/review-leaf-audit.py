@@ -66,6 +66,7 @@ class ReviewLeafAudit(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         TMPDIR=str(self.root), ZCODE_CJS=str(self.cjs), ZCODE_MODE='yolo',
                         ZCODE_SESSION_DB=str(self.root / 'zcode-db.sqlite'),
+                        ZCODE_TASKS_DB=str(self.root / 'tasks-index.sqlite'),
                         ZCODE_SESSION_FILE=str(self.root / 'must-not-read-session'),
                         CODEXC_LEAF_EVIDENCE_DIR=str(self.evidence),
                         CODEXC_LEAF_BASE_HEAD=self.baseline['head'],
@@ -142,13 +143,23 @@ class ReviewLeafAudit(unittest.TestCase):
         conn.execute("INSERT INTO session VALUES ('sess_abc123def456')")
         conn.commit()
         conn.close()
+        tasks_db = self.root / 'tasks-index.sqlite'
+        conn = sqlite3.connect(tasks_db)
+        conn.execute('CREATE TABLE tasks (task_id text primary key)')
+        conn.execute("INSERT INTO tasks VALUES ('sess_abc123def456')")
+        conn.commit()
+        conn.close()
         result = self.invoke(json.dumps(
             {'sessionId': 'sess_abc123def456', 'response': 'Reviewed paths.\nBUGS: 0'}))
         self.assertEqual(result.returncode, 0, result.stderr)
         conn = sqlite3.connect(db)
         left = conn.execute('SELECT count(*) FROM session').fetchone()[0]
         conn.close()
+        conn = sqlite3.connect(tasks_db)
+        shells = conn.execute('SELECT count(*) FROM tasks').fetchone()[0]
+        conn.close()
         self.assertEqual(left, 0, 'review must delete its own session row')
+        self.assertEqual(shells, 0, 'review must delete its sidebar task shell')
 
     def test_zcode_review_tolerates_non_sess_session_id(self):
         result = self.invoke(self.envelope('Reviewed paths.\nBUGS: 0'))

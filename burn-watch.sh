@@ -101,7 +101,8 @@ except Exception:
     print('')
 " "$out" 2>/dev/null)"
     case "$psid" in
-        sess_*) sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "DELETE FROM session WHERE id='$psid'" 2>/dev/null ;;
+        sess_*) sqlite3 "$HOME/.zcode/cli/db/db.sqlite" "DELETE FROM session WHERE id='$psid'" 2>/dev/null
+                sqlite3 "$HOME/.zcode/v2/tasks-index.sqlite" "DELETE FROM tasks WHERE task_id='$psid'" 2>/dev/null ;;
     esac
     rm -f "$out"
     if [ "$ok" = "1" ]; then
@@ -143,6 +144,14 @@ cleanup_probe_sessions() {
     [ -n "$excludes" ] && chain_clause="AND id NOT IN ($excludes)"
     sqlite3 "$HOME/.zcode/cli/db/db.sqlite" \
       "DELETE FROM session WHERE time_updated < $cutoff AND (
+         title IN ('replyOK','Reply with exactly: OK')
+         OR title LIKE 'Review the single leaf%'
+         OR title LIKE '你是独立%'
+         OR (title LIKE '[codexc-headless]%' $chain_clause))" 2>/dev/null
+    # 桌面侧栏的 tasks-index 是独立库, 同步清扫 (列名 task_id)
+    [ -n "$excludes" ] && chain_clause="AND task_id NOT IN ($excludes)"
+    sqlite3 "$HOME/.zcode/v2/tasks-index.sqlite" \
+      "DELETE FROM tasks WHERE updated_at < $cutoff AND (
          title IN ('replyOK','Reply with exactly: OK')
          OR title LIKE 'Review the single leaf%'
          OR title LIKE '你是独立%'

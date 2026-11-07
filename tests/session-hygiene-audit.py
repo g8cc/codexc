@@ -13,6 +13,8 @@ class SessionHygieneAudit(unittest.TestCase):
     def test_review_lane_deletes_its_session_rows(self):
         source = self.read('codexc-review-leaf')
         self.assertIn('drop_session_rows', source)
+        self.assertIn('tasks-index', source,
+                      'sidebar task shells must be deleted alongside session rows')
         self.assertNotIn("'--no-history'", source,
                          'zcode 0.17.1 has no such option; it fails the whole review')
 
@@ -23,6 +25,10 @@ class SessionHygieneAudit(unittest.TestCase):
         self.assertNotIn('--no-history', probe[0],
                          'zcode 0.17.1 has no such option; the probe would always fail')
         self.assertIn("DELETE FROM session WHERE id='$psid'", source)
+        self.assertIn("DELETE FROM tasks WHERE task_id='$psid'", source,
+                      'probe shell in the sidebar tasks-index must go too')
+        self.assertIn('tasks-index', source.split('cleanup_probe_sessions')[1],
+                      'hourly sweep must also cover the sidebar tasks-index')
 
     def test_watchdog_sweep_covers_every_automated_title(self):
         sweep = self.read('burn-watch.sh')

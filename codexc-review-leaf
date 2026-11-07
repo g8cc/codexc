@@ -202,6 +202,16 @@ def drop_session_rows(raw):
                 conn.execute('DELETE FROM session WHERE id=?', (sid,))
     except sqlite3.Error:
         pass
+    # 桌面侧栏读的是 tasks-index (独立库): 会话行删了, 任务壳也要删,
+    # 否则界面继续堆积
+    tasks_db = Path(os.environ.get('ZCODE_TASKS_DB')
+                    or Path.home() / '.zcode/v2/tasks-index.sqlite')
+    try:
+        with sqlite3.connect(tasks_db, timeout=5) as conn:
+            for sid in ids:
+                conn.execute('DELETE FROM tasks WHERE task_id=?', (sid,))
+    except sqlite3.Error:
+        pass
 
 
 def final_zcode_response(raw):
