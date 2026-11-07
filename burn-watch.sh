@@ -111,6 +111,15 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
       CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 & )
 }
 
+# 探测会话自动清理: 看门狗的健康探测 (replyOK) 会在 zcode db 留会话行,
+# 1 小时后自动删除 — 界面不再堆积 (级联清理消息与用量记录)
+cleanup_probe_sessions() {
+    local cutoff=$(( $(date +%s) - 3600 ))000
+    sqlite3 "$HOME/.zcode/cli/db/db.sqlite" \
+      "DELETE FROM session WHERE title IN ('replyOK','Reply with exactly: OK') AND time_updated < $cutoff" 2>/dev/null
+    return 0
+}
+
 patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
@@ -139,6 +148,7 @@ patrol_once() {
             echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
         fi
     done
+    cleanup_probe_sessions
     local day0
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
     tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
