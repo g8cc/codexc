@@ -27,7 +27,7 @@ class SessionHygieneAudit(unittest.TestCase):
     def test_watchdog_sweep_covers_every_automated_title(self):
         sweep = self.read('burn-watch.sh')
         for pattern in ("'replyOK'", "'Reply with exactly: OK'", 'Review the single leaf%',
-                        '你是独立代码审查员%', '[codexc-headless]%'):
+                        '你是独立%', '[codexc-headless]%'):
             self.assertIn(pattern, sweep, f'sweep must cover {pattern}')
 
     def test_worker_self_heals_dead_resume_chains(self):

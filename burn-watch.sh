@@ -145,7 +145,7 @@ cleanup_probe_sessions() {
       "DELETE FROM session WHERE time_updated < $cutoff AND (
          title IN ('replyOK','Reply with exactly: OK')
          OR title LIKE 'Review the single leaf%'
-         OR title LIKE '你是独立代码审查员%'
+         OR title LIKE '你是独立%'
          OR (title LIKE '[codexc-headless]%' $chain_clause))" 2>/dev/null
     return 0
 }
