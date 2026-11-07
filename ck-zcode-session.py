@@ -39,6 +39,39 @@ def saved(path):
     return sid
 
 
+def session_db():
+    override = os.environ.get('ZCODE_SESSION_DB')
+    if override:
+        return Path(override)
+    return Path.home() / '.zcode/cli/db/db.sqlite'
+
+
+def row_exists(sid):
+    import sqlite3
+    db = session_db()
+    if not db.is_file():
+        return True  # db 缺失/不可读时宁可保守, 不清链
+    try:
+        with sqlite3.connect(db, timeout=5) as conn:
+            return conn.execute('SELECT 1 FROM session WHERE id=?', (sid,)).fetchone() is not None
+    except sqlite3.Error:
+        return True
+
+
+def heal(path, sid):
+    # resume 目标行已被清理 (废弃链清扫) 时旧链不可续: 删 sid 文件,
+    # 让下一轮以全新会话起步, 不在死链上无限失败
+    if not valid(sid) or row_exists(sid):
+        return 0
+    for stale in (path, Path(str(path) + '.retry')):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+    print('zcode session chain gone; cleared for a fresh start')
+    return 0
+
+
 def write_session(path, sid):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.zcode-session-', dir=path.parent)
@@ -167,6 +200,8 @@ def main():
     if action == 'capture':
         out, err, resumed, *command = args
         return capture(path, Path(out), Path(err), resumed, command)
+    if action == 'heal':
+        return heal(path, args[0])
     if action == 'finish':
         out, resumed = args
         return finish(path, Path(out), resumed)

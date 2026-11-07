@@ -36,9 +36,12 @@ class NightTests(unittest.TestCase):
 
     def test_midnight_and_end_boundary(self):
         for hour, minute, allowed in ((23, 59, False), (0, 0, True), (7, 59, True), (8, 0, False)):
-            instant = dt.datetime(2026, 11, 7, hour, minute, tzinfo=ZoneInfo('Asia/Singapore')).timestamp()
+            instant = dt.datetime(2026, 11, 10, hour, minute, tzinfo=ZoneInfo('Asia/Singapore')).timestamp()
             result = night.window_policy.evaluate('00:00-08:00', 'Asia/Singapore', instant)
             self.assertEqual(result['allowed'], allowed)
+        # 周末豁免: 全天开放, 窗口外也不拦 (2026-11-07 是周六)
+        instant = dt.datetime(2026, 11, 7, 8, 0, tzinfo=ZoneInfo('Asia/Singapore')).timestamp()
+        self.assertTrue(night.window_policy.evaluate('00:00-08:00', 'Asia/Singapore', instant)['allowed'])
         self.assertFalse(night.window_policy.evaluate('broken', 'Asia/Singapore')['allowed'])
         self.assertFalse(night.window_policy.evaluate('00:00-08:00', 'bad-zone')['allowed'])
 

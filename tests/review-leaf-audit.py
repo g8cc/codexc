@@ -65,6 +65,7 @@ class ReviewLeafAudit(unittest.TestCase):
             path.write_text('')
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         TMPDIR=str(self.root), ZCODE_CJS=str(self.cjs), ZCODE_MODE='yolo',
+                        ZCODE_SESSION_DB=str(self.root / 'zcode-db.sqlite'),
                         ZCODE_SESSION_FILE=str(self.root / 'must-not-read-session'),
                         CODEXC_LEAF_EVIDENCE_DIR=str(self.evidence),
                         CODEXC_LEAF_BASE_HEAD=self.baseline['head'],
@@ -132,6 +133,26 @@ class ReviewLeafAudit(unittest.TestCase):
         self.assertIn('Do not run commands, tests, gates', prompt)
         self.assertEqual(call['pgid'], os.getpgrp(), 'adapter must stay in runner process group')
         self.assertFalse((self.root / 'must-not-read-session').exists())
+
+    def test_zcode_review_deletes_its_session_row(self):
+        import sqlite3
+        db = self.root / 'zcode-db.sqlite'
+        conn = sqlite3.connect(db)
+        conn.execute('CREATE TABLE session (id text primary key)')
+        conn.execute("INSERT INTO session VALUES ('sess_abc123def456')")
+        conn.commit()
+        conn.close()
+        result = self.invoke(json.dumps(
+            {'sessionId': 'sess_abc123def456', 'response': 'Reviewed paths.\nBUGS: 0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conn = sqlite3.connect(db)
+        left = conn.execute('SELECT count(*) FROM session').fetchone()[0]
+        conn.close()
+        self.assertEqual(left, 0, 'review must delete its own session row')
+
+    def test_zcode_review_tolerates_non_sess_session_id(self):
+        result = self.invoke(self.envelope('Reviewed paths.\nBUGS: 0'))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_nonzero_exit_never_revives_old_success_or_empty_final(self):
         output = self.envelope('BUGS: 0') + '\n' + self.envelope('')

@@ -33,8 +33,11 @@ class SessionAudit(unittest.TestCase):
         self.session = self.root / 'session'
         self.out = self.root / 'out'
         self.call = self.root / 'call'
+        self.dbpath = self.root / 'zcode-db.sqlite'
+        self.seed_db([])
         self.env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'],
                         ZCODE_CJS=str(self.cjs), ZCODE_SESSION_FILE=str(self.session),
+                        ZCODE_SESSION_DB=str(self.dbpath),
                         OUT=str(self.out), CALL=str(self.call), TMPDIR=str(self.root))
 
     def tearDown(self):
@@ -48,6 +51,40 @@ class SessionAudit(unittest.TestCase):
 
     def args(self):
         return json.loads(self.call.read_text())
+
+    def seed_db(self, sids):
+        import sqlite3
+        conn = sqlite3.connect(self.dbpath)
+        conn.execute('CREATE TABLE IF NOT EXISTS session (id text primary key)')
+        conn.execute('DELETE FROM session')
+        for sid in sids:
+            conn.execute('INSERT INTO session VALUES (?)', (sid,))
+        conn.commit()
+        conn.close()
+
+    def test_failed_turn_keeps_chain_while_row_still_exists(self):
+        self.seed_db([SID])
+        self.session.write_text(SID + '\n')
+        result = self.turn([dict(sessionId=SID, response='TASK_RESULT: DONE')], rc=1, err='boom')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.session.read_text(), SID + '\n',
+                         'a live chain must survive a plain failed turn')
+
+    def test_failed_turn_clears_dead_chain_for_fresh_restart(self):
+        self.seed_db([])  # 链行已被清扫删除
+        self.session.write_text(SID + '\n')
+        Path(str(self.session) + '.retry').write_text(SID + '\n')
+        result = self.turn([dict(sessionId=SID, response='TASK_RESULT: DONE')], rc=1, err='boom')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.session.exists(), 'dead chain sid file must be cleared')
+        self.assertFalse(Path(str(self.session) + '.retry').exists())
+
+    def test_missing_db_is_conservative_and_keeps_chain(self):
+        self.dbpath.unlink()
+        self.session.write_text(SID + '\n')
+        result = self.turn([dict(sessionId=SID, response='TASK_RESULT: DONE')], rc=1, err='boom')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.session.exists(), 'unreadable db must never clear a chain')
 
     def test_real_session_id_is_saved_and_resumed(self):
         result = self.turn([dict(sessionId=SID, response='TASK_RESULT: DONE')])
@@ -96,12 +133,14 @@ class SessionAudit(unittest.TestCase):
                     path.unlink()
 
     def test_failed_or_quota_turn_preserves_useful_session(self):
+        self.seed_db([SID])
         self.session.write_text(SID + '\n')
         result = self.turn([dict(sessionId=NEXT, response='')], 1, '401 Unauthorized')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.session.read_text(), SID + '\n')
 
     def test_changed_session_id_is_rejected(self):
+        self.seed_db([SID])
         self.session.write_text(SID + '\n')
         result = self.turn([dict(type='result', sessionId=NEXT, response='TASK_RESULT: DONE')])
         self.assertNotEqual(result.returncode, 0)
@@ -153,6 +192,7 @@ class SessionAudit(unittest.TestCase):
         self.assertEqual(selected.stdout, SID)
 
     def test_many_failures_allocate_one_session(self):
+        self.seed_db([SID])
         for _ in range(3):
             self.turn([dict(type='turn.started', sessionId=SID)], 1, 'ECONNRESET')
         args = self.args()

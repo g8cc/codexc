@@ -160,10 +160,48 @@ def run_cli(lane, prompt, directory):
             # Never surface a stale success verdict from a failed process.
             return (rc if rc > 0 else 128 - rc), None
         if lane == 'zcode':
-            return 0, final_zcode_response(read_bounded(stdout))
+            raw_output = read_bounded(stdout)
+            drop_session_rows(raw_output)
+            return 0, final_zcode_response(raw_output)
         if not final.is_file():
             raise ReviewError('codex did not produce its final-message file')
         return 0, read_bounded(final).decode('utf-8')
+
+
+def drop_session_rows(raw):
+    # 审核会话即用即弃: CLI 结束后删除其会话行, 界面零堆积。
+    # (zcode 0.17.1 没有 --no-history 选项, 只能在产出后自删; 解析失败或
+    # db 不可用时静默放弃, 由看门狗 1 小时清扫兜底)
+    import sqlite3
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return
+    ids = set()
+    try:
+        envelope = json.loads(text)
+        if isinstance(envelope, dict) and isinstance(envelope.get('sessionId'), str):
+            ids.add(envelope['sessionId'])
+    except ValueError:
+        for line in text.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and isinstance(record.get('sessionId'), str):
+                ids.add(record['sessionId'])
+    valid = re.compile(r'sess_[A-Za-z0-9_-]{1,200}')
+    ids = {sid for sid in ids if valid.fullmatch(sid)}
+    if not ids:
+        return
+    db = Path(os.environ.get('ZCODE_SESSION_DB')
+              or Path.home() / '.zcode/cli/db/db.sqlite')
+    try:
+        with sqlite3.connect(db, timeout=5) as conn:
+            for sid in ids:
+                conn.execute('DELETE FROM session WHERE id=?', (sid,))
+    except sqlite3.Error:
+        pass
 
 
 def final_zcode_response(raw):

@@ -92,6 +92,9 @@ PYCLASS
 # 同时带 stderr 尾, 真实死因不再不可见); CK_ERROR_CLASS 行供 runner 按类决策
 if [ "$rc" != "0" ]; then
     cls="$(classify_error "$raw" "$err")"
+    # resume 链可能已被清扫删除 (废弃链 1 小时清理): heal 检测到死链就删
+    # sid 文件, 下轮重试以全新会话起步, 不在已消失的链上无限失败
+    [ -z "$sid" ] || python3 "$SESSION_HELPER" heal "$ZCODE_SESSION_FILE" "$sid" >/dev/null 2>&1 || true
     echo "zcode turn failed (rc=$rc, class=$cls): $(printf '%s' "$raw" | tail -c 120 | tr '\n' ' ') [stderr: $(printf '%s' "$err" | tail -c 160 | tr '\n' ' ')]"
     echo "CK_ERROR_CLASS: $cls"
     exit 1
@@ -104,6 +107,7 @@ if [ "$pyrc" = "75" ]; then
 fi
 if [ "$pyrc" != "0" ]; then
     # CLI rc=0 但响应为空/不可解析 — 显式 unknown, 不让 runner 猜
+    [ -z "$sid" ] || python3 "$SESSION_HELPER" heal "$ZCODE_SESSION_FILE" "$sid" >/dev/null 2>&1 || true
     echo "CK_ERROR_CLASS: unknown"
     exit 1
 fi

@@ -127,9 +127,26 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
 # 探测会话自动清理: 看门狗的健康探测 (replyOK) 会在 zcode db 留会话行,
 # 1 小时后自动删除 — 界面不再堆积 (级联清理消息与用量记录)
 cleanup_probe_sessions() {
+    # 自动化通道会话行 (探测/审核/worker 废弃链) 1 小时后清除, 界面零堆积。
+    # worker 活链指针 (各项目 zcode-session-id) 无论多久都不清: 超长轮次
+    # 中途行不刷新, 按时间判死会误杀; 真废弃链由 worker 端 heal 在 resume
+    # 失败时自清 sid 文件换新链。
     local cutoff=$(( $(date +%s) - 3600 ))000
+    local live sid excludes="" chain_clause=""
+    for live in "$HOME"/Documents/work/code/AI/AIworkspace/*/.codingkeeper/zcode-session-id \
+                "$HOME"/Documents/work/code/AI/AIworkspace/*/.codingkeeper/zcode-session-id.retry; do
+        [ -f "$live" ] || continue
+        sid="$(head -c 64 "$live" 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
+        case "$sid" in sess_*) excludes="$excludes '$sid'," ;; esac
+    done
+    excludes="${excludes%,}"
+    [ -n "$excludes" ] && chain_clause="AND id NOT IN ($excludes)"
     sqlite3 "$HOME/.zcode/cli/db/db.sqlite" \
-      "DELETE FROM session WHERE title IN ('replyOK','Reply with exactly: OK') AND time_updated < $cutoff" 2>/dev/null
+      "DELETE FROM session WHERE time_updated < $cutoff AND (
+         title IN ('replyOK','Reply with exactly: OK')
+         OR title LIKE 'Review the single leaf%'
+         OR title LIKE '你是独立代码审查员%'
+         OR (title LIKE '[codexc-headless]%' $chain_clause))" 2>/dev/null
     return 0
 }
 
