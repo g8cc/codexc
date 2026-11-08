@@ -162,7 +162,7 @@ cleanup_probe_sessions() {
 patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
-    for proj in fingerprint sale soul2soul wechatflow; do
+    for proj in fingerprint sale soul2soul wechatflow aifinance; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
@@ -210,7 +210,7 @@ patrol_once() {
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
     tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
     # 质量退化遥测: 审核轮数/gate 重试抬头 → alert (文本固定, alert 按日去重)
-    for qproj in fingerprint sale soul2soul wechatflow; do
+    for qproj in fingerprint sale soul2soul wechatflow aifinance; do
         qjournal="$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/journal"
         [ -f "$qjournal" ] || continue
         qtrend="$(python3 "$HOME/Documents/work/code/AI/AIworkspace/codexc/ck-quality-trend.py" "$qjournal" "$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/parks.log" 2>/dev/null)"

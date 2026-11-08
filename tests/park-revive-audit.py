@@ -17,6 +17,12 @@ class ParkReviveAudit(unittest.TestCase):
         self.assertNotIn('touch ".codingkeeper/loop.halt"',
                          park, 'empty halt files cannot be classified by the watchdog')
 
+    def test_new_furnace_aifinance_is_patrolled_and_telemetered(self):
+        watch = self.read('burn-watch.sh')
+        for loop in ('for proj in fingerprint sale soul2soul wechatflow aifinance; do',
+                     'for qproj in fingerprint sale soul2soul wechatflow aifinance; do'):
+            self.assertIn(loop, watch, 'new furnaces must join patrol AND telemetry loops')
+
     def test_evidence_revert_failure_parks_instead_of_silently_continuing(self):
         headless = self.read('codexc-headless')
         self.assertIn('无证据改动回滚失败', headless)
