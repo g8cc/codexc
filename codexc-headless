@@ -157,6 +157,11 @@ headless_wait_status() {  # text phase next-run epoch [active]
     status_write "$1" "$tool" "$active" 0 "$2" "${3:-0}"
 }
 
+turn_has_evidence() {  # $1=回合输出文件 — idle 纪律: 改动必须带 '证据:' 行 (中英冒号都收)
+    [ -f "$1" ] || return 1
+    grep -aqE '证据[:：]' "$1"
+}
+
 headless_wait_ready() {
     local now quota phase next text last=""
     while [ ! -e .codingkeeper/loop.halt ]; do
@@ -327,7 +332,12 @@ run_runner() {
                 park "燃料库或轮换状态无效 — 请检查 prompts 和 burn-cursor.json" "invalid prompt fuel"
                 continue
             fi
-            prompt="$BURN_PROMPT"
+            prompt="$BURN_PROMPT
+
+[idle 纪律] 只修有证据的真问题。若本轮有改动, 最终回复必须包含一行 '证据: <依据>' —
+依据 = 失败的测试名 / 可复现的缺陷步骤 / 覆盖缺口或基准的具体数字 / 可指认的缺陷代码行。
+无证据的风格改动、重命名、文件搬移、猜测性重构一律不做。本轮若无可证明的问题:
+不改动任何文件, 回复说明无可证问题并以 TASK_RESULT: DONE 结尾。"
             task="(idle 持续改进: $BURN_PROMPT_ID)"
         else
             empty_logged=0
@@ -411,6 +421,28 @@ run_runner() {
                         notify "工程燃料已扫描完，等待新任务或新 Prompt"
                     else
                     park "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
+                    fi
+                fi
+                continue
+            fi
+            if ! turn_has_evidence "$outfile"; then
+                # idle 纪律: 无证据改动不落地 — 回滚到本叶基线并计为无事可做;
+                # 连续无可证问题走既有 idle-exhaustion 熄火路径, 而不是无限 churn。
+                # reset 不带 clean: 轮次产生的未跟踪新文件保留, 不碰用户未跟踪文件
+                base_head="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("head") or "")' "$CODEXC_LEAF_EVIDENCE_DIR/baseline.json" 2>/dev/null)"
+                if [ -n "$base_head" ] && git rev-parse --verify --quiet "$base_head" >/dev/null 2>&1; then
+                    git reset --hard "$base_head" >/dev/null 2>&1 || true
+                fi
+                idle_count=$((idle_count + 1))
+                log "idle turn $idle_count/$BURN_NOOP_LIMIT: 无证据改动 — 已回滚"
+                if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
+                    if burn_rotating; then
+                        burn_exhaust || { park "无法保存燃料状态" "fuel state write failed"; continue; }
+                        CK_TURN_TS=0
+                        headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
+                        notify "工程燃料已扫描完，等待新任务或新 Prompt"
+                    else
+                    park "锅炉熄火: 连续 $idle_count 轮无可证改进 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
                     fi
                 fi
                 continue
@@ -649,6 +681,19 @@ cmd_selftest() {
     [ "$idle_active" = "True" ] && [ "$parked_active" = "False" ] \
       && echo "  ok: idle 等待 active=true / parked active=false" \
       || { echo "  FAIL: idle=$idle_active parked=$parked_active"; fails=$((fails+1)); }
+    echo "== turn_has_evidence: 证据行判定 (中英冒号/无证据) =="
+    printf '改动说明\nTASK_RESULT: DONE\n' > "$sq/r1"
+    printf '改动说明\n证据: test_foo 失败已修复\nTASK_RESULT: DONE\n' > "$sq/r2"
+    printf '说明\n证据：基准 1.3s→0.8s\n' > "$sq/r3"
+    ( cd "$sq" && CK_LANE=t
+      turn_has_evidence "$sq/r1" && echo bad1 || echo ok1
+      turn_has_evidence "$sq/r2" && echo ok2 || echo bad2
+      turn_has_evidence "$sq/r3" && echo ok3 || echo bad3 ) >> "$sq/out.txt"
+    if grep -q '^ok1$' "$sq/out.txt" && grep -q '^ok2$' "$sq/out.txt" && grep -q '^ok3$' "$sq/out.txt"; then
+      echo "  ok: 无证据拒收 / 英冒号收 / 中冒号收"
+    else
+      echo "  FAIL: turn_has_evidence 判定错误 ($(grep -E '^(ok|bad)[123]$' "$sq/out.txt" | tr '\n' ' '))"; fails=$((fails+1))
+    fi
     rm -rf "$sq"
     [ "$fails" = "0" ] || return 1
     echo "SELFTEST PASS"

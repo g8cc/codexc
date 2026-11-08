@@ -209,6 +209,17 @@ patrol_once() {
     local day0
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
     tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
+    # 质量退化遥测: 审核轮数/gate 重试抬头 → alert (文本固定, alert 按日去重)
+    for qproj in fingerprint sale soul2soul wechatflow; do
+        qjournal="$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/journal"
+        [ -f "$qjournal" ] || continue
+        qtrend="$(python3 "$HOME/Documents/work/code/AI/AIworkspace/codexc/ck-quality-trend.py" "$qjournal" 2>/dev/null)" || continue
+        echo "quality-trend $qproj: $qtrend"
+        case "$qtrend" in
+            *'"verdict": "alert"'*)
+                alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 burn-watch.log 的 quality-trend 行" ;;
+        esac
+    done
     fp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/fingerprint/.codingkeeper/journal" 2>/dev/null | xargs)"
     sp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/sale/.codingkeeper/journal" 2>/dev/null | xargs)"
     s2_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/soul2soul/.codingkeeper/journal" 2>/dev/null | xargs)"
