@@ -213,7 +213,11 @@ patrol_once() {
     for qproj in fingerprint sale soul2soul wechatflow; do
         qjournal="$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/journal"
         [ -f "$qjournal" ] || continue
-        qtrend="$(python3 "$HOME/Documents/work/code/AI/AIworkspace/codexc/ck-quality-trend.py" "$qjournal" "$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/parks.log" 2>/dev/null)" || continue
+        qtrend="$(python3 "$HOME/Documents/work/code/AI/AIworkspace/codexc/ck-quality-trend.py" "$qjournal" "$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/parks.log" 2>/dev/null)"
+        qtrc=$?
+        # rc=1 是 alert 判定 (要照常告警), rc>=2 才是解析失败
+        [ "$qtrc" -ge 2 ] && continue
+        [ -n "$qtrend" ] || continue
         echo "quality-trend $qproj: $qtrend"
         case "$qtrend" in
             *'"verdict": "alert"'*)

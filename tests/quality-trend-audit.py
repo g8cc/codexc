@@ -129,6 +129,14 @@ class QualityTrendAudit(unittest.TestCase):
         result = self.mod.trend(days, parks, today='2026-11-08')
         self.assertEqual(result['verdict'], 'ok')
 
+    def test_alert_exit_code_is_not_treated_as_failure(self):
+        # 回归: 钩子曾用 '|| continue' 把 verdict=alert (rc=1) 当失败吞掉,
+        # 导致恰好处于告警状态的炉子看不到遥测行
+        watch = (REPO / 'burn-watch.sh').read_text(encoding='utf-8')
+        self.assertNotIn('.py" "$qjournal" "$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/parks.log" 2>/dev/null)" || continue',
+                         watch)
+        self.assertIn('[ "$qtrc" -ge 2 ] && continue', watch)
+
     def test_park_only_day_appears_in_tail_and_counts(self):
         parks = self.parks([
             '2026-11-07 01:00:00 | (park) | review rounds exhausted',
