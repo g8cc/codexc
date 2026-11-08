@@ -104,6 +104,40 @@ class QualityTrendAudit(unittest.TestCase):
         result = self.mod.trend(self.journal(['nothing here']))
         self.assertEqual(result['verdict'], 'ok')
 
+    def parks(self, rows):
+        self._parks_path = write_journal(rows)
+        return self.mod.parse_parks(self._parks_path)
+
+    def test_park_lines_count_toward_instability_alert(self):
+        days = self.journal([
+            '2026-11-08 03:00:00 | x | accepted after 2 review round(s), gate retries 0 | receipt=a',
+        ])
+        parks = self.parks([
+            '2026-11-08 01:00:00 | (park) | review rounds exhausted',
+            '2026-11-08 02:00:00 | (park) | review output unparseable',
+        ])
+        result = self.mod.trend(days, parks, today='2026-11-08')
+        self.assertEqual(result['verdict'], 'alert')
+        self.assertTrue(any('park 2 次' in a for a in result['alerts']))
+        self.assertEqual(result['today']['accepted'], 1)
+
+    def test_single_park_is_not_an_alert(self):
+        days = self.journal([
+            '2026-11-08 03:00:00 | x | accepted after 2 review round(s), gate retries 0 | receipt=a',
+        ])
+        parks = self.parks(['2026-11-08 01:00:00 | (park) | review rounds exhausted'])
+        result = self.mod.trend(days, parks, today='2026-11-08')
+        self.assertEqual(result['verdict'], 'ok')
+
+    def test_park_only_day_appears_in_tail_and_counts(self):
+        parks = self.parks([
+            '2026-11-07 01:00:00 | (park) | review rounds exhausted',
+            '2026-11-08 01:00:00 | (park) | review output unparseable',
+            '2026-11-08 02:00:00 | (park) | review output unparseable',
+        ])
+        result = self.mod.trend({}, parks, today='2026-11-08')
+        self.assertEqual(result['verdict'], 'alert')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -17,6 +17,21 @@ class ParkReviveAudit(unittest.TestCase):
         self.assertNotIn('touch ".codingkeeper/loop.halt"',
                          park, 'empty halt files cannot be classified by the watchdog')
 
+    def test_evidence_revert_failure_parks_instead_of_silently_continuing(self):
+        headless = self.read('codexc-headless')
+        self.assertIn('无证据改动回滚失败', headless)
+        self.assertNotIn('git reset --hard "$base_head" >/dev/null 2>&1 || true',
+                         headless, 'revert failures must park, not vanish')
+        self.assertIn('reverted: no-evidence change rolled back', headless,
+                      'reverts must leave a trace in parks.log')
+        self.assertIn('>> ".codingkeeper/parks.log"', headless,
+                      'park/revert observability must not pollute the receipt-only journal')
+
+    def test_evidence_check_rejects_verbatim_template_echo(self):
+        headless = self.read('codexc-headless')
+        self.assertIn("grep -qvE '证据[:：][[:space:]]*<依据>'", headless,
+                      'echoing the discipline template verbatim is not evidence')
+
     def test_watchdog_auto_revives_review_parks_within_budget(self):
         watch = self.read('burn-watch.sh')
         for needle in ('*"review rounds exhausted"*', '*"review output unparseable"*'):

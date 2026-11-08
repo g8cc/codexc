@@ -159,7 +159,7 @@ headless_wait_status() {  # text phase next-run epoch [active]
 
 turn_has_evidence() {  # $1=回合输出文件 — idle 纪律: 改动必须带 '证据:' 行 (中英冒号都收)
     [ -f "$1" ] || return 1
-    grep -aqE '证据[:：]' "$1"
+    grep -aE '证据[:：]' "$1" | grep -qvE '证据[:：][[:space:]]*<依据>'
 }
 
 headless_wait_ready() {
@@ -246,6 +246,8 @@ PYHALT
 park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_runner 的 local, 经 bash 动态作用域在此改写
     notify "$1"
     log "parked: $2"
+    # park 观察记录走 parks.log: journal 保持"只含验收回执"的纯度
+    printf '%s\n' "$(date '+%F %T') | (park) | $2" >> ".codingkeeper/parks.log" 2>/dev/null || true
     mode="halt"
     # halt 文件携带 park 原因: 看门狗据此判定审核类 park 是否有界自动复燃
     printf '%s' "$2" > ".codingkeeper/loop.halt"
@@ -312,7 +314,7 @@ run_runner() {
         if [ -z "$line" ]; then
             if [ -z "$IDLE_PROMPT" ]; then
                 [ "$empty_logged" = "0" ] && { log "queue empty — waiting for .codingkeeper/queue.md to grow"; empty_logged=1; }
-                headless_wait_status "队列为空，等待任务" idle 0 1
+                headless_wait_status "队列为空，等待任务" idle 0 "$([ -n "$IDLE_PROMPT" ] && echo 1 || echo 0)"
                 sleep "$CODEXC_LOOP_POLL"
                 continue
             fi
@@ -431,9 +433,13 @@ run_runner() {
                 # reset 不带 clean: 轮次产生的未跟踪新文件保留, 不碰用户未跟踪文件
                 base_head="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("head") or "")' "$CODEXC_LEAF_EVIDENCE_DIR/baseline.json" 2>/dev/null)"
                 if [ -n "$base_head" ] && git rev-parse --verify --quiet "$base_head" >/dev/null 2>&1; then
-                    git reset --hard "$base_head" >/dev/null 2>&1 || true
+                    if ! git reset --hard "$base_head" >/dev/null 2>&1; then
+                        park "循环挂起: 无证据改动回滚失败 — 请人工核对工作区" "no-evidence revert failed"
+                        continue
+                    fi
                 fi
                 idle_count=$((idle_count + 1))
+                printf '%s\n' "$(date '+%F %T') | (idle) | reverted: no-evidence change rolled back" >> ".codingkeeper/parks.log" 2>/dev/null || true
                 log "idle turn $idle_count/$BURN_NOOP_LIMIT: 无证据改动 — 已回滚"
                 if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
                     if burn_rotating; then
