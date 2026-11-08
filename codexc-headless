@@ -151,10 +151,10 @@ banner_set() {  # $1=横幅文本
     return 0
 }
 
-headless_wait_status() {  # text phase next-run epoch
-    local tool=headless
+headless_wait_status() {  # text phase next-run epoch [active]
+    local tool=headless active="${4:-0}"
     case "${CODEXC_HEADLESS_CMD:-}" in *zcode-worker*) tool=zcode ;; *dsh-worker*) tool=dsh ;; esac
-    status_write "$1" "$tool" 0 0 "$2" "${3:-0}"
+    status_write "$1" "$tool" "$active" 0 "$2" "${3:-0}"
 }
 
 headless_wait_ready() {
@@ -307,7 +307,7 @@ run_runner() {
         if [ -z "$line" ]; then
             if [ -z "$IDLE_PROMPT" ]; then
                 [ "$empty_logged" = "0" ] && { log "queue empty — waiting for .codingkeeper/queue.md to grow"; empty_logged=1; }
-                headless_wait_status "队列为空，等待任务" idle 0
+                headless_wait_status "队列为空，等待任务" idle 0 1
                 sleep "$CODEXC_LOOP_POLL"
                 continue
             fi
@@ -638,6 +638,17 @@ cmd_selftest() {
     [ "${swout%% *}" = "1" ] && echo "  ok: ready 口径=1 (review-needed 不虚高)" || { echo "  FAIL: got [$swout]"; fails=$((fails+1)); }
     local t1 t2; t1=$(echo "$swout" | awk '{print $2}'); t2=$(echo "$swout" | awk '{print $2}')
     echo "  ok: status_touch 保活 (task 保持: $(echo "$swout" | cut -d' ' -f2-))"
+    echo "== headless_wait_status: idle 等待报活跃, parked 等待保持不活跃 =="
+    ( cd "$sq" && CK_LANE=t; . "$PWD/ck-common.sh" >/dev/null 2>&1
+      headless_wait_status "队列为空，等待任务" idle 0 1
+      python3 -c "import json;print(json.load(open('.codingkeeper/status.json'))['active'])"
+      headless_wait_status "暂时故障，等待重试" backoff 100
+      python3 -c "import json;print(json.load(open('.codingkeeper/status.json'))['active'])" ) >> "$sq/out.txt"
+    local idle_active parked_active
+    idle_active=$(sed -n '2p' "$sq/out.txt"); parked_active=$(sed -n '3p' "$sq/out.txt")
+    [ "$idle_active" = "True" ] && [ "$parked_active" = "False" ] \
+      && echo "  ok: idle 等待 active=true / parked active=false" \
+      || { echo "  FAIL: idle=$idle_active parked=$parked_active"; fails=$((fails+1)); }
     rm -rf "$sq"
     [ "$fails" = "0" ] || return 1
     echo "SELFTEST PASS"
