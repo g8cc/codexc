@@ -167,8 +167,26 @@ patrol_once() {
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
         if [ "$halted" = 1 ]; then
-            alert "$proj" "项目已暂停 — 保留 loop.halt，等待 runner 有界恢复或人工处理"
-            continue
+            halt_reason="$(head -c 200 "$d/.codingkeeper/loop.halt" 2>/dev/null)"
+            case "$halt_reason" in
+                *"review rounds exhausted"*|*"review output unparseable"*)
+                    # 审核类 park 有界自动复燃: 夜间不再整夜停摆。
+                    # 预算与退出类复燃共用 2/日; 超限 = 同一叶子反复被拒, 留档待人。
+                    rcount="$(awk -v day="$DAY" -v key="复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+                    rcount=${rcount:-0}
+                    if [ "$rcount" -ge 2 ]; then
+                        alert "$proj" "复燃超限(2) — 审核 park 留档待人 (最后park: ${halt_reason:0:40})"
+                        continue
+                    fi
+                    rm -f "$d/.codingkeeper/loop.halt"
+                    if revive "$proj"; then
+                        echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
+                    fi
+                    continue ;;
+                *)
+                    alert "$proj" "项目已暂停 — 保留 loop.halt，等待 runner 有界恢复或人工处理"
+                    continue ;;
+            esac
         fi
         # Check each project, not only each five-minute patrol: a previous
         # project can finish just as the permitted interval closes.

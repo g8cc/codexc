@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""审核类 park 的夜间自愈: park 原因入 halt 文件, 看门狗有界自动复燃。"""
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+class ParkReviveAudit(unittest.TestCase):
+    def read(self, name):
+        return (REPO / name).read_text(encoding='utf-8')
+
+    def test_park_writes_reason_into_halt_file(self):
+        park = self.read('codexc-headless')
+        self.assertIn('printf \'%s\' "$2" > ".codingkeeper/loop.halt"',
+                      park, 'park() must carry the reason inside loop.halt')
+        self.assertNotIn('touch ".codingkeeper/loop.halt"',
+                         park, 'empty halt files cannot be classified by the watchdog')
+
+    def test_watchdog_auto_revives_review_parks_within_budget(self):
+        watch = self.read('burn-watch.sh')
+        for needle in ('*"review rounds exhausted"*', '*"review output unparseable"*'):
+            self.assertIn(needle, watch, f'sweep must auto-revive {needle}')
+        self.assertIn('rm -f "$d/.codingkeeper/loop.halt"', watch)
+        self.assertIn('复燃#$proj#', watch, 'review-park revive must share the 2/day budget')
+        self.assertIn('复燃超限(2) — 审核 park 留档待人', watch)
+
+    def test_other_halt_reasons_stay_human_only(self):
+        watch = self.read('burn-watch.sh')
+        # 提取巡逻 halted 分支 (到循环下一条语句为止, 避免内层 fi 截断)
+        start = watch.index('if [ "$halted" = 1 ]; then')
+        end = watch.index('# Check each project', start)
+        branch = watch[start:end]
+        self.assertIn('*"review rounds exhausted"*', branch)
+        self.assertIn('*"review output unparseable"*', branch)
+        self.assertIn('项目已暂停 — 保留 loop.halt', branch,
+                      'manual/other parks must never be auto-revived')
+        # 人工 halt 的 alert 必须在 *) 兜底分支里, 且不在自动复燃分支内
+        lines = branch.splitlines()
+        fallback_line = next(i for i, l in enumerate(lines) if l.strip() == '*)')
+        human_alert_line = next(i for i, l in enumerate(lines) if '项目已暂停' in l)
+        self.assertGreater(human_alert_line, fallback_line,
+                           'the human-only alert must live in the *) fallback branch')
+        fallback_body = '\n'.join(lines[fallback_line:])
+        self.assertNotIn('rm -f', fallback_body,
+                         'the *) fallback must not clear halts')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -241,7 +241,9 @@ PYHALT
 park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_runner 的 local, 经 bash 动态作用域在此改写
     notify "$1"
     log "parked: $2"
-    mode="halt"; touch ".codingkeeper/loop.halt"
+    mode="halt"
+    # halt 文件携带 park 原因: 看门狗据此判定审核类 park 是否有界自动复燃
+    printf '%s' "$2" > ".codingkeeper/loop.halt"
     headless_wait_status "$1" parked 0
     park_halt_ts="$(halt_signature)"
     # 瞬时类 park 标记 (供 run_runner 尾部决定是否自动复燃): 网关抖动/回合与审查超时
