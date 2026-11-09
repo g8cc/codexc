@@ -5,7 +5,10 @@
 # 它是 FDA 授权前的兜底监控, FDA 授权后 KeepAlive 主看门狗由 launchd 直接管。
 set -u
 hb="$HOME/.codingkeeper/watchdog.heartbeat"
-last="$(date +%s)"
+# 心跳缺失 = 看门狗从未巡逻 (launchd bootstrap 失败族: job 被 KeepAlive 三连拒
+# 移除后无人值守) — 按无限陈旧处理, fail-alarm 而非 fail-open 静默; 去重保证
+# 每小时至多一条, 不会刷屏
+last=0
 [ -f "$hb" ] && last="$(cat "$hb" 2>/dev/null || echo 0)"
 age=$(( $(date +%s) - last ))
 [ "$age" -lt 900 ] && exit 0

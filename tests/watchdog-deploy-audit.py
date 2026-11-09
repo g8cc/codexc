@@ -79,6 +79,54 @@ class WatchdogDeployAudit(unittest.TestCase):
         self.assertNotIn('/Documents/', args[1])
         self.assertTrue(args[1].endswith('/.codingkeeper/bin/ck-watchdog-alive.sh'))
 
+    # ---- 守夜员行为回归 (此前仅静态断言 — 舰队全盲的最后告警线必须真跑过) ----
+
+    def run_alive_checker(self, heartbeat_age):
+        (self.home / '.codingkeeper').mkdir(parents=True, exist_ok=True)
+        heartbeat = self.home / '.codingkeeper' / 'watchdog.heartbeat'
+        if heartbeat.exists():
+            heartbeat.unlink()
+        if heartbeat_age is not None:
+            heartbeat.write_text(str(int(time.time()) - heartbeat_age))
+        fake_bin = self.world / 'alive-fake-bin'
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        osascript = fake_bin / 'osascript'
+        osascript.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$ALIVE_NOTIFY_LOG"\n')
+        osascript.chmod(0o755)
+        env = dict(os.environ, HOME=str(self.home),
+                   PATH=str(fake_bin) + os.pathsep + os.environ['PATH'],
+                   ALIVE_NOTIFY_LOG=str(self.world / 'notify.log'))
+        result = subprocess.run([str(ROOT / 'ck-watchdog-alive.sh')], env=env,
+                                capture_output=True, text=True, timeout=30)
+        alerts = self.home / '.codingkeeper' / 'burn-ALERTS.txt'
+        notify = self.world / 'notify.log'
+        return (result,
+                alerts.read_text() if alerts.exists() else '',
+                notify.read_text() if notify.exists() else '')
+
+    def test_alive_checker_silent_on_fresh_heartbeat(self):
+        result, alerts, notify = self.run_alive_checker(heartbeat_age=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(alerts, '', '新鲜心跳不得告警')
+        self.assertEqual(notify, '')
+
+    def test_alive_checker_alerts_on_stale_heartbeat(self):
+        result, alerts, notify = self.run_alive_checker(heartbeat_age=2000)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('心跳陈旧', alerts, '陈旧心跳必须 ALERTS 留档')
+        self.assertIn('display notification', notify, '陈旧心跳必须系统通知')
+
+    def test_alive_checker_dedups_within_the_hour(self):
+        self.run_alive_checker(heartbeat_age=2000)
+        _, alerts, _ = self.run_alive_checker(heartbeat_age=2000)
+        self.assertEqual(alerts.count('心跳陈旧'), 1, '每小时去重: 同日重复陈旧只留档一次')
+
+    def test_alive_checker_alerts_on_missing_heartbeat(self):
+        # 心跳缺失 = 看门狗从未巡逻 (launchd bootstrap 失败族, 2026-11-09 事故
+        # 形态: job 被 KeepAlive 三连拒移除后无人值守) — 必须告警, 不得当新鲜
+        result, alerts, _ = self.run_alive_checker(heartbeat_age=None)
+        self.assertIn('心跳陈旧', alerts, '缺失的心跳必须告警 — fail-open 静默不可接受')
+
     def test_burn_watch_refreshes_runtime_copy(self):
         src = (ROOT / 'burn-watch.sh').read_text()
         self.assertIn('$HOME/.codingkeeper/bin/burn-watch.sh', src)
