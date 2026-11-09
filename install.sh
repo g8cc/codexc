@@ -74,6 +74,17 @@ fi
 
 echo
 echo "==== dependencies ===="
+ver_ge() {  # ver_ge <版本> <最低> — 逐段数值比较 (BSD 无 sort -V; 尾缀字母截断)
+    awk -v a="${1%[a-zA-Z]}" -v b="${2%[a-zA-Z]}" 'BEGIN {
+        n = split(a, x, "."); m = split(b, y, ".")
+        for (i = 1; i <= (n > m ? n : m); i++) {
+            xa = x[i] + 0; xb = y[i] + 0
+            if (xa > xb) exit 0
+            if (xa < xb) exit 1
+        }
+        exit 0
+    }'
+}
 missing=""
 for cmd in tmux sqlite3 python3 codex; do
     if command -v "$cmd" >/dev/null 2>&1; then
@@ -83,6 +94,25 @@ for cmd in tmux sqlite3 python3 codex; do
         missing="$missing $cmd"
     fi
 done
+# 声明的最低版本 (README): python3 3.11+ / tmux 3.5+; zcodec 通道另需 node >= 24。
+# 只查存在性会让太旧的依赖在运行深处才炸 (tomllib ImportError / CSI-u 失灵) —
+# 这里按能力/版本拦在安装时, 存在但过旧同样计入 missing。
+if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import tomllib' >/dev/null 2>&1; then
+    echo "  TOO OLD: python3 ($(python3 --version 2>&1 | sed 's/^Python //')) — 需要 3.11+ (tomllib)"
+    missing="$missing python3>=3.11"
+fi
+if command -v tmux >/dev/null 2>&1 && ! ver_ge "$(tmux -V 2>/dev/null | sed -n 's/^tmux \([0-9][0-9.]*\).*/\1/p')" 3.5; then
+    echo "  TOO OLD: tmux ($(tmux -V 2>/dev/null)) — 需要 3.5+ (extended-keys CSI-u)"
+    missing="$missing tmux>=3.5"
+fi
+if command -v node >/dev/null 2>&1; then
+    if ! ver_ge "$(node --version 2>/dev/null | sed 's/^v//')" 24; then
+        echo "  TOO OLD: node ($(node --version 2>/dev/null)) — zcodec/ck zcode 通道需要 >= 24"
+        missing="$missing node>=24"
+    fi
+else
+    echo "  note: node 未装 — zcodec/ck zcode 通道不可用 (codex 通道不受影响)"
+fi
 if [ -n "$missing" ]; then
     echo
     echo "  Install the above before using codexc, e.g.:"
