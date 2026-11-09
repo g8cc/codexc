@@ -176,6 +176,29 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertIn("sess_outsidelive0000000000000000000", sql,
                       "前缀外炉子的活链 sid 必须进 NOT IN 排除名单")
 
+    def test_registry_glob_line_cannot_expand_fleet(self):
+        # 注册表条目经 for $(fleet_furnaces) 词分割+glob 展开: 字面名含 glob 元
+        # 字符的目录 (APFS 合法) 会让未登记的同 pattern 兄弟目录绕过三件套/
+        # 排除表审查被卷进巡逻与复燃 — 注册表必须按字面路径逐行生效
+        globdir = self.root / "globtest"
+        literal = globdir / "victim-*"
+        literal.mkdir(parents=True)
+        sibling = globdir / "victim-a"
+        sibling.mkdir(parents=True)
+        for d in (literal, sibling):
+            (d / ".codingkeeper").mkdir()
+            for name in ("queue.md", "gate.sh", "review-leaf.sh"):
+                (d / ".codingkeeper" / name).touch()
+        (sibling / ".codingkeeper/loop.halt").write_text("review rounds exhausted (6)\n")
+        (self.root / ".codingkeeper/projects").write_text(str(literal) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\n")
+        self.assertTrue((sibling / ".codingkeeper/loop.halt").exists(),
+                        "未登记目录不得被 glob 展开卷进巡逻 (其 park 自愈只能来自登记)")
+        launches = self.root / "launches"
+        self.assertEqual(launches.read_text().count("\n") if launches.exists() else 0, 1,
+                         "只有登记的字面路径一个炉子被复燃")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

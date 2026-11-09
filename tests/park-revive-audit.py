@@ -22,8 +22,12 @@ class ParkReviveAudit(unittest.TestCase):
 
     def test_fleet_is_registry_discovered_not_hardcoded(self):
         watch = self.read('burn-watch.sh')
-        self.assertIn('for d in $(fleet_furnaces); do', watch,
-                      'patrol AND telemetry must iterate fleet discovery')
+        # 字面逐行消费注册表 (read -r): for $( ) 的词分割+glob 展开会把字面名
+        # 含元字符目录的同 pattern 兄弟绕过审查卷进巡逻 (glob 注入)
+        self.assertGreaterEqual(watch.count('done 3< <(fleet_furnaces)'), 3,
+                                'patrol/telemetry/accounting must consume the registry line-by-line')
+        self.assertNotIn('for d in $(fleet_furnaces)', watch,
+                         'unquoted command substitution must not iterate the registry')
         self.assertNotIn('for proj in fingerprint sale', watch,
                          'hardcoded furnace lists are unmaintainable at fleet scale')
         self.assertIn('.codingkeeper/projects', watch,

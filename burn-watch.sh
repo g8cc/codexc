@@ -161,14 +161,14 @@ cleanup_probe_sessions() {
     # 失败时自清 sid 文件换新链。
     local cutoff=$(( $(date +%s) - 3600 ))000
     local live sid excludes="" chain_clause=""
-    for fdir in $(fleet_furnaces); do
+    while IFS= read -r fdir <&3; do
         for f in "$fdir/.codingkeeper/zcode-session-id" \
                  "$fdir/.codingkeeper/zcode-session-id.retry"; do
             [ -f "$f" ] || continue
             sid="$(head -c 64 "$f" 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
             case "$sid" in sess_*) excludes="$excludes '$sid'," ;; esac
         done
-    done
+    done 3< <(fleet_furnaces)
     excludes="${excludes%,}"
     [ -n "$excludes" ] && chain_clause="AND id NOT IN ($excludes)"
     sqlite3 "$HOME/.zcode/cli/db/db.sqlite" \
@@ -201,7 +201,10 @@ patrol_once() {
             mv "$0.new.$$" "$0" && echo "$(date '+%F %T') watchdog: 运行副本已刷新自仓库真源"
         fi
     fi
-    for d in $(fleet_furnaces); do
+    # 注册表按字面路径逐行生效: for $( ) 的词分割+glob 展开会把字面名含元字符
+    # 目录的同 pattern 兄弟卷进巡逻, 绕过三件套/排除表审查 (read -r + fd3 防
+    # 循环体命令吃掉炉队行)
+    while IFS= read -r d <&3; do
         proj="${d##*/}"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
@@ -247,13 +250,13 @@ patrol_once() {
         else
             alert "$proj" "复燃失败(rc=$?) — runner 未拉起, 每 5 分钟继续重试; 检查 zcodec/时段/TCC (留档按日去重)"
         fi
-    done
+    done 3< <(fleet_furnaces)
     cleanup_probe_sessions
     local day0
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
     tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
     # 质量退化遥测: 审核轮数/gate 重试抬头 → alert (文本固定, alert 按日去重)
-    for qdir in $(fleet_furnaces); do
+    while IFS= read -r qdir <&3; do
         qproj="${qdir##*/}"
         qjournal="$qdir/.codingkeeper/journal"
         [ -f "$qjournal" ] || continue
@@ -267,12 +270,12 @@ patrol_once() {
             *'"verdict": "alert"'*)
                 alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 burn-watch.log 的 quality-trend 行" ;;
         esac
-    done
+    done 3< <(fleet_furnaces)
     local acc_line
     acc_line="$(date '+%F %T')"
-    for d in $(fleet_furnaces); do
+    while IFS= read -r d <&3; do
         acc_line="$acc_line | ${d##*/}_journal=$(wc -l < "$d/.codingkeeper/journal" 2>/dev/null | xargs)"
-    done
+    done 3< <(fleet_furnaces)
     echo "$acc_line | 今日token=$tok" >> "$ACCOUNT"
 }
 
