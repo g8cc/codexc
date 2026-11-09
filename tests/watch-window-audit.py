@@ -251,38 +251,36 @@ class WatchWindowAudit(unittest.TestCase):
                          "cwd 命中=活, 未命中=死; 一次进程只扫一次 (scans=0 = 缓存生效)")
 
     def test_patrol_rescans_runner_liveness_each_cycle(self):
-        # 缓存必须按巡逻周期重置: runner 死亡后的下一轮巡逻要能看到死并复燃 —
-        # 否则首轮流扫描缓存让死炉永远"活着" (复燃静默失效)
+        # 缓存按巡逻周期重置 — 必须在同一看门狗进程内跨两轮巡逻验证: 分进程
+        # 测试天然空缓存, 重置行删掉也照样绿 (空转断言, 独立审查 2026-11-10)。
+        # runner 由测试体自起自杀, 两轮 patrol_once 同进程, 陈旧缓存才会真实复现。
         furnace = self.scaffold(self.project("cache-furnace"))
         (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
         self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
-        process = subprocess.Popen(["/bin/bash", "-c", 'exec -a "codexc-headless run" sleep 30'],
-                                   cwd=str(furnace.parent), env=self.env, start_new_session=True)
-        self.processes.append(process)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            probe = subprocess.run(["pgrep", "-f", "codexc-headless run"], capture_output=True, text=True)
-            if process.pid in {int(x) for x in probe.stdout.split()}:
-                break
-            time.sleep(0.05)
-        self.run_lib_shell("patrol_once\n")
-        self.assertFalse((self.root / "launches").exists(), "活炉不得复燃")
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=5)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            probe = subprocess.run(["pgrep", "-f", "codexc-headless run"], capture_output=True, text=True)
-            if process.pid not in {int(x) for x in probe.stdout.split()}:
-                break
-            time.sleep(0.05)
-        self.run_lib_shell("patrol_once\n")
+        body = (
+            f'FURNACE="{furnace.parent}"\n'
+            # >/dev/null: 后台 runner 不得握住 capture 管道写端 (否则 bash 退出后
+            # subprocess 仍等 fd 关闭, 撞 30s 超时 — watchdog-deploy-audit 同款陷阱)
+            '( cd "$FURNACE" && exec -a "codexc-headless run" sleep 30 ) >/dev/null 2>&1 &\n'
+            'RUNNER=$!\n'
+            'n=0; until pgrep -f "codexc-headless run" | grep -q "^$RUNNER$"; do\n'
+            '    sleep 0.05; n=$((n+1)); [ "$n" -lt 100 ] || { echo "runner never visible"; exit 9; }\n'
+            'done\n'
+            'patrol_once\n'
+            '[ ! -e "$WATCH_ROOT/launches" ] || { echo "P1: alive furnace must not revive"; exit 8; }\n'
+            'kill -9 "$RUNNER"\n'
+            'n=0; while kill -0 "$RUNNER" 2>/dev/null; do\n'
+            '    sleep 0.05; n=$((n+1)); [ "$n" -lt 100 ] || break\n'
+            'done\n'
+            'patrol_once\n')
+        self.run_lib_shell(body)
         # revive 的 nohup 是孤儿后台进程 — bash 退出后毫秒级才落 launches, 有界轮询
         deadline = time.monotonic() + 5
         launches = self.root / "launches"
         while time.monotonic() < deadline and not launches.exists():
             time.sleep(0.05)
         self.assertTrue(launches.exists(),
-                        "新巡逻周期必须重扫 — 死炉要被复燃 (陈旧缓存=复燃静默失效)")
+                        "同进程第二轮巡逻必须重扫 — 死炉要被复燃 (陈旧缓存=复燃静默失效)")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
