@@ -295,7 +295,9 @@ patrol_once() {
         # rc=1 是 alert 判定 (要照常告警), rc>=2 才是解析失败
         [ "$qtrc" -ge 2 ] && continue
         [ -n "$qtrend" ] || continue
-        echo "quality-trend $qproj: $qtrend"
+        # 例行遥测写 watch 日志 (有界) 而非 stdout — patrol 的 stdout/stderr 全量
+        # 进 300 行轮转的 ALERT, 每炉每轮一条会把真实告警几小时内挤穿
+        echo "$(date '+%F %T') quality-trend $qproj: $qtrend" >> "$LOG"
         case "$qtrend" in
             *'"verdict": "alert"'*)
                 alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 burn-watch.log 的 quality-trend 行" ;;
@@ -304,7 +306,11 @@ patrol_once() {
     local acc_line
     acc_line="$(date '+%F %T')"
     while IFS= read -r d <&3; do
-        acc_line="$acc_line | ${d##*/}_journal=$(wc -l < "$d/.codingkeeper/journal" 2>/dev/null | xargs)"
+        # 缺 journal 的炉子: < 重定向失败由 shell 报错, 2>/dev/null 压不住 —
+        # 先验文件再重定向, 不让例行报错漏进 ALERT
+        jcount=""
+        [ -f "$d/.codingkeeper/journal" ] && jcount="$(wc -l < "$d/.codingkeeper/journal" | xargs)"
+        acc_line="$acc_line | ${d##*/}_journal=$jcount"
     done 3< <(fleet_furnaces)
     echo "$acc_line | 今日token=$tok" >> "$ACCOUNT"
 }

@@ -303,6 +303,28 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertIn("含空白", alerts, "空白路径条目必须留档")
         self.assertEqual(alerts.count("巡逻跳过"), 2, "两类跳过各留档一次 (按日去重)")
 
+    def test_patrol_alert_stream_carries_only_signals(self):
+        # 可观测性: 例行输出不得进 ALERT — 活体取证 318 行里 198 行缺 journal 的
+        # wc 重定向报错 + 119 行每炉每轮 quality-trend echo, 真实信号仅 1 行;
+        # 300 行轮转下真实告警 1-2 小时内被挤出版滚 (独立审查实测 ~5000 行/日)
+        no_journal = self.scaffold(self.project("no-journal"))
+        (no_journal / "journal").unlink()
+        with_journal = self.scaffold(self.project("with-journal"))
+        (with_journal / "journal").write_text(
+            "2026-11-05 22:00:00 | x | accepted after 2 review round(s), gate retries 0\n")
+        (self.lib / "ck-quality-trend.py").symlink_to(REPO / "ck-quality-trend.py")
+        (self.root / ".codingkeeper/projects").write_text(
+            str(no_journal.parent) + "\n" + str(with_journal.parent) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        # 按生产接线: 主循环以 >> "$ALERT" 2>&1 收巡逻输出
+        self.shell('patrol_once >> "$WATCH_ROOT/.codingkeeper/burn-ALERTS.txt" 2>&1\n'
+                   'patrol_once >> "$WATCH_ROOT/.codingkeeper/burn-ALERTS.txt" 2>&1\n')
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertNotIn("No such file", alerts, "缺 journal 的重定向报错不得进 ALERT")
+        self.assertNotIn("quality-trend", alerts, "例行遥测不得进 ALERT")
+        watchlog = (self.root / ".codex/codexc-watch.log").read_text()
+        self.assertIn("quality-trend with-journal", watchlog, "遥测改写 watch 日志 — 可观测性不丢")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")
