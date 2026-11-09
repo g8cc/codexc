@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.codexc.daily</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/wardonguo/.codingkeeper/bin/codexc-daily</string>
+		<string>run</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/wardonguo/.codex/bin:/Users/wardonguo/.codeartsdoer/installers:/Users/wardonguo/.qoder-cn/entry:/Users/wardonguo/.grok/bin:/Users/wardonguo/.qoder/entry:/Users/wardonguo/.u1s1:/Users/wardonguo/.n/bin:/Users/wardonguo/.minimax/bin:/Users/wardonguo/bin:/Users/wardonguo/.mimocode/bin:/Users/wardonguo/.npm-global/bin:/Users/wardonguo/.bun/bin:/Users/wardonguo/.cargo/bin:/usr/local/opt/node@22/bin:/Users/wardonguo/.codebuddy/bin:/Users/wardonguo/.opencode/bin:/usr/local/opt/python@3.14/libexec/bin:/usr/local/bin:/usr/local/sbin:/Library/Frameworks/Python.framework/Versions/2.7/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/X11/bin:/Applications/VMware Fusion.app/Contents/Public:/usr/local/go/bin:/opt/homebrew/bin:/Users/wardonguo/.local/bin:/Applications/ZCode.app/Contents/Resources/tools/bfs:/Applications/ZCode.app/Contents/Resources/tools/ripgrep:/Applications/ZCode.app/Contents/Resources/tools/ugrep</string>
+		<key>CODEX_HOME</key>
+		<string>/Users/wardonguo/.codex</string>
+		<key>CODEXC_MESSAGE</key>
+		<string>continue</string>
+		<key>CODEXC_EXTRA_RE</key>
+		<string></string>
+		<key>CODEXC_DAILY_IDLE</key>
+		<string>30</string>
+		<key>CODEXC_AUTO_YES</key>
+		<string>1</string>
+	</dict>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>10</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/wardonguo/.codex/codexc-daily.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/wardonguo/.codex/codexc-daily.log</string>
+</dict>
+</plist>

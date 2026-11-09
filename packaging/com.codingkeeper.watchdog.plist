@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.codingkeeper.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/wardonguo/.codingkeeper/bin/burn-watch.sh</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/wardonguo/.codex/bin:/Users/wardonguo/.codeartsdoer/installers:/Users/wardonguo/.qoder-cn/entry:/Users/wardonguo/.grok/bin:/Users/wardonguo/.qoder/entry:/Users/wardonguo/.u1s1:/Users/wardonguo/.n/bin:/Users/wardonguo/.minimax/bin:/Users/wardonguo/bin:/Users/wardonguo/.mimocode/bin:/Users/wardonguo/.npm-global/bin:/Users/wardonguo/.bun/bin:/Users/wardonguo/.cargo/bin:/usr/local/opt/node@22/bin:/Users/wardonguo/.codebuddy/bin:/Users/wardonguo/.opencode/bin:/usr/local/opt/python@3.14/libexec/bin:/usr/local/bin:/usr/local/sbin:/Library/Frameworks/Python.framework/Versions/2.7/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/X11/bin:/Applications/VMware Fusion.app/Contents/Public:/usr/local/go/bin:/opt/homebrew/bin:/Users/wardonguo/.local/bin:/Applications/ZCode.app/Contents/Resources/tools/bfs:/Applications/ZCode.app/Contents/Resources/tools/ripgrep:/Applications/ZCode.app/Contents/Resources/tools/ugrep</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>120</integer>
+  <key>StandardOutPath</key><string>/Users/wardonguo/.codingkeeper/burn-watch.log</string>
+  <key>StandardErrorPath</key><string>/Users/wardonguo/.codingkeeper/burn-watch.log</string>
+</dict>
+</plist>

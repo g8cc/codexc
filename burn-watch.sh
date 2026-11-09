@@ -163,11 +163,15 @@ patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
-    # 零点翻日 = re-exec 换血: 仓库代码更新最迟一天内自动生效 (fd 9 持锁继承, 巡逻无缝)
-    if [ -n "${WATCHDOG_DAY:-}" ] && [ "$DAY" != "$WATCHDOG_DAY" ]; then
-        exec /bin/bash "$0" __locked-run
+    # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
+    # ~/Documents), 副本漂移则从仓库真源原子刷新; 新代码由主循环的翻日 exec 加载。
+    if [ "$0" = "$HOME/.codingkeeper/bin/burn-watch.sh" ]; then
+        bw_repo="$(readlink "$HOME/.codingkeeper/burn-watch.sh" 2>/dev/null)"
+        if [ -n "$bw_repo" ] && ! cmp -s "$0" "$bw_repo" 2>/dev/null \
+                && cp "$bw_repo" "$0.new.$$" 2>/dev/null; then
+            mv "$0.new.$$" "$0" && echo "$(date '+%F %T') watchdog: 运行副本已刷新自仓库真源"
+        fi
     fi
-    WATCHDOG_DAY="$DAY"
     for proj in fingerprint sale soul2soul wechatflow aifinance; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
@@ -340,6 +344,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null' EXIT
 while :; do
+    # 零点翻日 = re-exec 换血: 仓库代码更新最迟一天内自动生效。
+    # 必须在主循环 (fd 9 开启) 做, 不能放 patrol_once — 那里以 9>&- 运行, exec 出的
+    # 新实例 fstat(9) 报 EBADF, "missing lock" 自杀 (2026-11-10 零点事故)。
+    if [ -n "${WATCHDOG_DAY:-}" ] && [ "$(date +%F)" != "$WATCHDOG_DAY" ]; then
+        exec /bin/bash "$0" __locked-run
+    fi
+    WATCHDOG_DAY="$(date +%F)"
     patrol_once 9>&- >> "$ALERT" 2>&1
     rotate_log "$ACCOUNT" 1000 9>&-
     rotate_log "$ALERT" 300 9>&-
