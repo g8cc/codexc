@@ -274,7 +274,12 @@ run_runner() {
     # Only the owner initializes or sweeps state; another lane may be active.
     if [ ! -f ".codingkeeper/queue.md" ]; then
         cmd_init >> "$WATCHLOG" 2>&1 || return 1
-        log "auto-init: 队列/门禁已生成 (gate.sh 是占位 — 请放入真实测试命令)"
+        # 与 require_gate_check 同一判据: 占位=请填真实测试; 探测成功=请核对
+        if grep -q 'CK_GATE_PLACEHOLDER' ".codingkeeper/gate.sh" 2>/dev/null; then
+            log "auto-init: 队列/门禁已生成 (gate.sh 是占位 — 请放入真实测试命令)"
+        else
+            log "auto-init: 队列/门禁已生成 (探测到测试命令 — 请核对 gate.sh 是否符合本项目)"
+        fi
     fi
     rm -f ".codingkeeper"/.hl-out.* ".codingkeeper"/.hl-in.* ".codingkeeper"/.hl-gate.* ".codingkeeper"/.hl-review.* 2>/dev/null
     local outfile=".codingkeeper/.hl-out.$$" gate_out=".codingkeeper/.hl-gate.$$" review_out=".codingkeeper/.hl-review.$$"

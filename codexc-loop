@@ -918,9 +918,6 @@ run_driver() {  # $1=pane
 
 # ---- init -------------------------------------------------------------------
 
-# Probe the project for its test toolchain and echo one runnable command per
-# detected stack (conservative: lockfiles/config files decide, not guesses).
-
 cmd_init() {
     mkdir -p ".codingkeeper"
     local agents_file="AGENTS.md"

@@ -20,7 +20,7 @@ class InitParityAudit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='ck-init-parity-')
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, CK_TEST_FAKE_HOME='1')
+        self.env = dict(os.environ)
 
     def tearDown(self):
         self.tmp.cleanup()
