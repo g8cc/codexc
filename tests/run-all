@@ -37,7 +37,7 @@ stage() {
 stage_syntax() {
     echo "════ [syntax] ════"
     local bad=0
-    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc burn-watch.sh ck-init-furnace ck-common.sh ck-watch-tools.sh install.sh sync-prefix2.sh tests/run-all tests/conformance.sh tests/keys.sh; do
+    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc burn-watch.sh ck-init-furnace ck-watchdog-alive.sh ck-common.sh ck-watch-tools.sh install.sh sync-prefix2.sh tests/run-all tests/conformance.sh tests/keys.sh; do
         bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
     done
     python3 -m compileall -q ck-config.py ck-watcher.py ck-window.py ck-leaf.py ck-leaves.py ck-prompts.py ck-review-process.py ck-zcode-session.py ck-dsh-session.py ck-night-loop.py tests || bad=1

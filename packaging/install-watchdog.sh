@@ -28,6 +28,12 @@ bootout gui/$(id -u)/com.codexc.daily 2>/dev/null || true
 cp "$here/com.codexc.daily.plist" "$HOME/Library/LaunchAgents/"
 bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.codexc.daily.plist"
 
+# 心跳守夜员: 只读 ~/.codingkeeper, 无 FDA 也能被 launchd 托管 — 主看门狗死亡的兜底监控
+cp "$repo/ck-watchdog-alive.sh" "$bin_dir/ck-watchdog-alive.sh" && chmod +x "$bin_dir/ck-watchdog-alive.sh"
+bootout gui/$(id -u)/com.codingkeeper.watchdog-alive 2>/dev/null || true
+cp "$here/com.codingkeeper.watchdog-alive.plist" "$HOME/Library/LaunchAgents/"
+bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.codingkeeper.watchdog-alive.plist"
+
 sleep 3
 if LC_ALL=C ps ax -o command | LC_ALL=C grep -q '__locked-run'; then
     echo "✓ 看门狗已由 launchd 托管 (心跳 $HOME/.codingkeeper/watchdog.heartbeat, 15 分钟不更新即异常)"

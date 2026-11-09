@@ -65,8 +65,19 @@ class WatchdogDeployAudit(unittest.TestCase):
     def test_install_script_covers_deploy_steps(self):
         script = (ROOT / 'packaging' / 'install-watchdog.sh').read_text()
         for needle in ('cp "$repo/burn-watch.sh"', 'cp "$repo/codexc-daily"',
-                       'bootout', 'bootstrap'):
+                       'cp "$repo/ck-watchdog-alive.sh"', 'bootout', 'bootstrap'):
             self.assertIn(needle, script)
+
+    def test_watchdog_alive_checker_is_fda_free(self):
+        """守夜员必须只碰 Documents 之外的东西, 否则 launchd 无 FDA 时它也瞎。"""
+        src = (ROOT / 'ck-watchdog-alive.sh').read_text()
+        self.assertNotIn('/Documents/', src, '守夜员不得依赖 Documents (TCC)')
+        self.assertIn('watchdog.heartbeat', src)
+        self.assertIn('-lt 900', src, '心跳 15 分钟陈旧阈值')
+        self.assertIn('-lt 3600', src, '告警每小时去重')
+        args = self.plist_args(ROOT / 'packaging' / 'com.codingkeeper.watchdog-alive.plist')
+        self.assertNotIn('/Documents/', args[1])
+        self.assertTrue(args[1].endswith('/.codingkeeper/bin/ck-watchdog-alive.sh'))
 
     def test_burn_watch_refreshes_runtime_copy(self):
         src = (ROOT / 'burn-watch.sh').read_text()
