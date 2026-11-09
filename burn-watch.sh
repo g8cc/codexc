@@ -220,6 +220,8 @@ patrol_once() {
                     rm -f "$d/.codingkeeper/loop.halt"
                     if revive "$d"; then
                         echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
+                    else
+                        alert "$proj" "复燃失败(rc=$?) — runner 未拉起, 每 5 分钟继续重试; 检查 zcodec/时段/TCC (留档按日去重)"
                     fi
                     continue ;;
                 *)
@@ -242,6 +244,8 @@ patrol_once() {
         fi
         if revive "$d"; then
             echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
+        else
+            alert "$proj" "复燃失败(rc=$?) — runner 未拉起, 每 5 分钟继续重试; 检查 zcodec/时段/TCC (留档按日去重)"
         fi
     done
     cleanup_probe_sessions

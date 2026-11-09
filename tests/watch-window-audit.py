@@ -230,6 +230,15 @@ class WatchWindowAudit(unittest.TestCase):
         alerts = self.root / ".codingkeeper/burn-ALERTS.txt"
         self.assertNotIn("复燃#", alerts.read_text() if alerts.exists() else "")
 
+    def test_failed_revive_alerts_bounded_per_day(self):
+        # 复燃失败必须留档: 静默的 5 分钟无限重试 (TCC 拒绝/zcodec 缺失族) 让
+        # 操作者永远不知情。alert() 按项目按日去重 → 告警有界, 重试保持自愈。
+        self.shell("revive() { return 1; }\npatrol_once\npatrol_once\n")
+        alerts_file = self.root / ".codingkeeper/burn-ALERTS.txt"
+        alerts = alerts_file.read_text() if alerts_file.exists() else ""
+        self.assertIn("复燃失败", alerts, "失败的复燃必须留档待人 — 静默重试不可接受")
+        self.assertEqual(alerts.count("复燃失败"), 1, "按项目按日去重: 同日多轮失败只留档一次")
+
     def test_accounting_outside_window_opens_database_read_only(self):
         self.clock.write_text(str(epoch("2026-11-06T16:00:00")))
         self.shell("patrol_once\n", fake_revive=True)
