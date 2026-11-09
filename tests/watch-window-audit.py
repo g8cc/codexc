@@ -213,6 +213,77 @@ class WatchWindowAudit(unittest.TestCase):
                          ["a-plain", "b-crlf"],
                          "CRLF 行与缺尾换行的注册表不得静默丢炉")
 
+    def run_lib_shell(self, body):
+        # shell() 会把 proj_alive 桩成 return 1 (巡逻测试用) — 判活行为测试必须
+        # 绕开桩, 直接 source 真实库函数
+        result = subprocess.run(["/bin/bash", "-c", f'. "$WATCH_SOURCE"\n{body}'],
+                                cwd=self.root, env=self.env, text=True,
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_proj_alive_cwd_scan_runs_once_per_process(self):
+        # 行为回归 (此前全库仅桩测): cwd 命中=活 / 未命中=死; 扫描惰性缓存 —
+        # 同进程多次判定只扫一次 (pgrep+lsof 逐炉重扫实测 2.7s/巡逻, O(炉数×活runner))
+        runner = self.root / "alive-proj"
+        runner.mkdir(parents=True)
+        other = self.root / "empty-proj"
+        other.mkdir(parents=True)
+        counter = self.root / "lsof-count"
+        self.script("lsof", '#!/bin/bash\nprintf x >> "$LSOF_COUNT"\nexec /usr/sbin/lsof "$@"\n')
+        self.env.update(LSOF_COUNT=str(counter), PROJ_A=str(runner), PROJ_B=str(other))
+        process = subprocess.Popen(["/bin/bash", "-c", 'exec -a "codexc-headless run" sleep 30'],
+                                   cwd=str(runner), env=self.env, start_new_session=True)
+        self.processes.append(process)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            probe = subprocess.run(["pgrep", "-f", "codexc-headless run"], capture_output=True, text=True)
+            if process.pid in {int(x) for x in probe.stdout.split()}:
+                break
+            time.sleep(0.05)
+        result = self.run_lib_shell('proj_alive "$PROJ_A"; a=$?\n'
+                                    'c1="$(cat "$LSOF_COUNT")"\n'
+                                    'proj_alive "$PROJ_A"; b=$?\n'
+                                    'proj_alive "$PROJ_B"; c=$?\n'
+                                    'c2="$(cat "$LSOF_COUNT")"\n'
+                                    'printf "a=%s b=%s c=%s scans=%s" "$a" "$b" "$c" "$((c2-c1))"\n')
+        self.assertEqual(result.stdout, "a=0 b=0 c=1 scans=0",
+                         "cwd 命中=活, 未命中=死; 一次进程只扫一次 (scans=0 = 缓存生效)")
+
+    def test_patrol_rescans_runner_liveness_each_cycle(self):
+        # 缓存必须按巡逻周期重置: runner 死亡后的下一轮巡逻要能看到死并复燃 —
+        # 否则首轮流扫描缓存让死炉永远"活着" (复燃静默失效)
+        furnace = self.scaffold(self.project("cache-furnace"))
+        (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        process = subprocess.Popen(["/bin/bash", "-c", 'exec -a "codexc-headless run" sleep 30'],
+                                   cwd=str(furnace.parent), env=self.env, start_new_session=True)
+        self.processes.append(process)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            probe = subprocess.run(["pgrep", "-f", "codexc-headless run"], capture_output=True, text=True)
+            if process.pid in {int(x) for x in probe.stdout.split()}:
+                break
+            time.sleep(0.05)
+        self.run_lib_shell("patrol_once\n")
+        self.assertFalse((self.root / "launches").exists(), "活炉不得复燃")
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            probe = subprocess.run(["pgrep", "-f", "codexc-headless run"], capture_output=True, text=True)
+            if process.pid not in {int(x) for x in probe.stdout.split()}:
+                break
+            time.sleep(0.05)
+        self.run_lib_shell("patrol_once\n")
+        # revive 的 nohup 是孤儿后台进程 — bash 退出后毫秒级才落 launches, 有界轮询
+        deadline = time.monotonic() + 5
+        launches = self.root / "launches"
+        while time.monotonic() < deadline and not launches.exists():
+            time.sleep(0.05)
+        self.assertTrue(launches.exists(),
+                        "新巡逻周期必须重扫 — 死炉要被复燃 (陈旧缓存=复燃静默失效)")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

@@ -63,16 +63,23 @@ watch_window_open() {
     return 0
 }
 
-proj_alive() {  # $1=project dir — pid 文件或 cwd 扫描 (双侧物理路径归一), 0=活
-    local d="$1" pid rpid rcwd dreal
+PROJ_ALIVE_CWDS=""   # 一次巡逻只扫一次 runner cwd (pgrep+lsof 是 O(炉数×活runner) 的重复成本)
+proj_alive_scan() {  # 惰性: 首个 pid 文件未命中的炉子触发; patrol_once 入口重置 — 每周期新鲜
+    local rpid rcwd
+    PROJ_ALIVE_CWDS=" "
+    for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
+        rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+        rcwd="$(cd "$rcwd" 2>/dev/null && pwd -P)" || continue
+        PROJ_ALIVE_CWDS="$PROJ_ALIVE_CWDS$rcwd "
+    done
+}
+proj_alive() {  # $1=project dir — pid 文件 (每炉新鲜) 或 cwd 扫描 (每巡逻一次缓存), 0=活
+    local d="$1" pid dreal
     pid="$(cat "$d/.codingkeeper/loop.pid" 2>/dev/null)"
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
     dreal="$(cd "$d" 2>/dev/null && pwd -P)" || dreal="$d"
-    for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
-        rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
-        rcwd="$(cd "$rcwd" 2>/dev/null && pwd -P)" || rcwd="$rcwd"
-        [ "$rcwd" = "$dreal" ] && return 0
-    done
+    [ -z "$PROJ_ALIVE_CWDS" ] && proj_alive_scan
+    case "$PROJ_ALIVE_CWDS" in *" $dreal "*) return 0 ;; esac
     return 1
 }
 
@@ -194,6 +201,7 @@ cleanup_probe_sessions() {
 
 patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
+    PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
     # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
