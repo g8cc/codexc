@@ -1,0 +1,89 @@
+#!/bin/bash
+# ck-init-furnace <proj-dir> [gate-command] — 新炉脚手架三件套 + 注册登记 (幂等)。
+# 三件套: queue.md (标准合同+引导叶) / gate.sh (省略命令时生成渐进式 gate) /
+# review-leaf.sh (指向本仓库审核器)。登记后看门狗 fleet_furnaces() 自动发现,
+# 无需改 watchdog 代码; 下架 = 从 ~/.codingkeeper/projects 删行。
+set -eu
+case "${1:-}" in
+    ""|-h|--help) echo "用法: ck-init-furnace <proj-dir> [gate-command]" >&2; exit 2 ;;
+esac
+proj="$(cd "$1" 2>/dev/null && pwd)" || { echo "✗ 项目目录不存在: $1" >&2; exit 1; }
+shift
+name="$(basename "$proj")"
+ck="$proj/.codingkeeper"
+repo="$(cd "$(dirname "$0")" && pwd)"
+[ -x "$repo/codexc-review-leaf" ] || { echo "✗ 生成器必须在 codexc 仓库内运行 (找不到 codexc-review-leaf)" >&2; exit 1; }
+mkdir -p "$ck"
+
+# 1) queue.md — 标准合同 + 引导叶 (已存在则不动)
+if [ ! -f "$ck/queue.md" ]; then
+    cat > "$ck/queue.md" <<QEOF
+# ${name} 任务队列 — codexc-headless 从 ## ready 顶部开始投喂
+# codex 每完成一个任务, 把自评后的后续任务写进 ## review-needed;
+# 你确认后把它挪到 ## ready (改成 - [ ] 即可), 循环才会执行它。
+
+只有 ready 内未勾选任务会执行; blocked 和 review-needed 由控制器核对依赖/证据后再转入 ready, 不能按列表顺序假定依赖已经满足。叶子完整合同包含首行及其缩进续行。基线已经达标则记录 no-change 证据, 不制造重复测试或空提交。保留用户已有改动, 禁止按文件整体 checkout/reset 进行回滚。
+
+## ready
+- [ ] 通读本仓库, 理解项目结构与现有测试; 然后在 ## review-needed 分区列出 3 个最有价值的改进任务
+
+## review-needed
+(空)
+QEOF
+fi
+
+# 2) gate.sh — 指定命令则用之; 否则渐进式 (有测试基建必须全绿, 否则结构基线通过)
+if [ ! -f "$ck/gate.sh" ]; then
+    if [ $# -gt 0 ]; then
+        { echo '#!/bin/bash'
+          echo "# ${name} gate: 用户指定命令"
+          echo 'set -eu'
+          echo 'cd "$(dirname "$0")/.."'
+          printf '%s\n' "$*"
+        } > "$ck/gate.sh"
+    else
+        cat > "$ck/gate.sh" <<GEOF
+#!/bin/bash
+# ${name} gate: 渐进式 — 有测试基建则必须全绿; 否则结构基线通过. 独立于队列数量.
+set -eu
+cd "\$(dirname "\$0")/.."
+fails=0
+if [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -f setup.cfg ]; then
+    if python3 -m pytest -q --collect-only >/dev/null 2>&1; then
+        python3 -m pytest -q || { echo "[gate] pytest 未全绿"; fails=\$((fails+1)); }
+    fi
+elif [ -f package.json ]; then
+    if grep -q '"test"[[:space:]]*:' package.json; then
+        npm test --silent || { echo "[gate] npm test 未全绿"; fails=\$((fails+1)); }
+    fi
+elif [ -f go.mod ]; then
+    go test ./... || { echo "[gate] go test 未全绿"; fails=\$((fails+1)); }
+elif [ -f Cargo.toml ]; then
+    cargo test -q || { echo "[gate] cargo test 未全绿"; fails=\$((fails+1)); }
+fi
+if [ "\$fails" -eq 0 ]; then echo "[gate] OK (baseline)"; else echo "[gate] \$fails 项失败"; exit 1; fi
+GEOF
+    fi
+    chmod +x "$ck/gate.sh"
+fi
+
+# 3) review-leaf.sh — 固定模板, 指向本仓库审核器
+if [ ! -f "$ck/review-leaf.sh" ]; then
+    cat > "$ck/review-leaf.sh" <<REOF
+#!/bin/bash
+# Shared leaf reviewer: exact candidate evidence, bounded parser, no paid probes.
+set -eu
+cd "\$(dirname "\$0")/.."
+exec python3 "${repo}/codexc-review-leaf" "\$@"
+REOF
+    chmod +x "$ck/review-leaf.sh"
+fi
+
+# 4) 注册登记 (去重; 看门狗 fleet_furnaces() 以此为准)
+touch "$HOME/.codingkeeper/projects"
+grep -Fqx "$proj" "$HOME/.codingkeeper/projects" 2>/dev/null || echo "$proj" >> "$HOME/.codingkeeper/projects"
+
+gate_kind="渐进式"
+[ $# -gt 0 ] && gate_kind="指定"
+echo "✓ ${name} 脚手架就绪并已登记 (gate: ${gate_kind})"
+echo "  启动: cd '$proj' && CODEXC_REVIEW_CMD='$ck/review-leaf.sh' nohup zcodec run >> ~/.codex/codexc-watch.log 2>&1 &"

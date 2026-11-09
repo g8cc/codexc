@@ -11,6 +11,7 @@
 import os
 import plistlib
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -79,6 +80,40 @@ class WatchdogDeployAudit(unittest.TestCase):
         src = (ROOT / 'burn-watch.sh').read_text()
         self.assertIn('$WATCH_DIR/ck-window.py', src)
         self.assertIn('bw_repo_dir', src)
+
+    def test_ck_init_furnace_scaffolds_and_registers(self):
+        """生成器: 三件套 + 注册登记, 幂等 (重跑不炸不重复登记)。"""
+        with tempfile.TemporaryDirectory(prefix='ck-init-furnace-', dir='/private/tmp') as tmp:
+            home = Path(tmp) / 'home'
+            (home / '.codingkeeper').mkdir(parents=True)
+            proj = Path(tmp) / 'projA'
+            proj.mkdir()
+            env = {**os.environ, 'HOME': str(home)}
+            run = subprocess.run(['bash', str(ROOT / 'ck-init-furnace'), str(proj)],
+                                 env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            ck = proj / '.codingkeeper'
+            for f in ('queue.md', 'gate.sh', 'review-leaf.sh'):
+                self.assertTrue((ck / f).exists(), f'missing {f}')
+            self.assertIn('- [ ] 通读本仓库', (ck / 'queue.md').read_text())
+            self.assertIn('渐进式', (ck / 'gate.sh').read_text())
+            self.assertIn('codexc-review-leaf', (ck / 'review-leaf.sh').read_text())
+            reg = home / '.codingkeeper' / 'projects'
+            self.assertEqual(reg.read_text().strip().splitlines(), [str(proj)])
+            run2 = subprocess.run(['bash', str(ROOT / 'ck-init-furnace'), str(proj), 'true'],
+                                  env=env, capture_output=True, text=True)
+            self.assertEqual(run2.returncode, 0, run2.stderr)
+            self.assertEqual(reg.read_text().strip().splitlines(), [str(proj)],
+                             '重复登记 = 炉队重复巡逻')
+            # 幂等语义: 已存在的 gate 不被指定命令覆盖
+            self.assertIn('渐进式', (ck / 'gate.sh').read_text())
+            proj_b = Path(tmp) / 'projB'
+            proj_b.mkdir()
+            run3 = subprocess.run(['bash', str(ROOT / 'ck-init-furnace'), str(proj_b), 'true'],
+                                  env=env, capture_output=True, text=True)
+            self.assertEqual(run3.returncode, 0, run3.stderr)
+            self.assertIn('true', (proj_b / '.codingkeeper' / 'gate.sh').read_text(),
+                          '全新项目走指定命令路径')
 
     def test_midnight_exec_lives_outside_patrol(self):
         lines = (ROOT / 'burn-watch.sh').read_text().splitlines()
