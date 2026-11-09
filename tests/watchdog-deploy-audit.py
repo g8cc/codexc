@@ -72,6 +72,14 @@ class WatchdogDeployAudit(unittest.TestCase):
         self.assertIn('$HOME/.codingkeeper/bin/burn-watch.sh', src)
         self.assertIn('cmp -s', src, '运行位自愈刷新缺失')
 
+    def test_watch_dir_falls_back_to_repo_from_bin_copy(self):
+        # 副本目录没有 ck-window.py: WATCH_DIR 必须回退仓库真源, 否则
+        # watch_window_open 对一切炉子 125, 巡逻全盲 (2026-11-10 首次从
+        # bin 副本启动时发现, soul2soul/wechatflow 停转未被复燃)
+        src = (ROOT / 'burn-watch.sh').read_text()
+        self.assertIn('$WATCH_DIR/ck-window.py', src)
+        self.assertIn('bw_repo_dir', src)
+
     def test_midnight_exec_lives_outside_patrol(self):
         lines = (ROOT / 'burn-watch.sh').read_text().splitlines()
         exec_lines = [i for i, l in enumerate(lines) if 'exec /bin/bash "$0" __locked-run' in l]

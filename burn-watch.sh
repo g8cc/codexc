@@ -14,6 +14,12 @@ ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
 CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-}"   # 默认不限制 (全天燃烧)
 CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
 WATCH_DIR="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]:-$0}" 2>/dev/null)"
+# 运行位副本 (bin/) 不随仓库携带 ck-window.py 等辅助脚本: 回退到 symlink
+# 指向的仓库真源目录, 否则 watch_window_open 对一切炉子 return 125, 巡逻全盲
+if [ ! -f "$WATCH_DIR/ck-window.py" ]; then
+    bw_repo_dir="$(dirname "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$HOME/.codingkeeper/burn-watch.sh" 2>/dev/null)" 2>/dev/null)"
+    [ -n "$bw_repo_dir" ] && [ -f "$bw_repo_dir/ck-window.py" ] && WATCH_DIR="$bw_repo_dir"
+fi
 
 watch_window_open() {
     local result allowed deadline next_open reason extra
