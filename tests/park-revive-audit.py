@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """审核类 park 的夜间自愈: park 原因入 halt 文件, 看门狗有界自动复燃。"""
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,11 +20,18 @@ class ParkReviveAudit(unittest.TestCase):
         self.assertNotIn('touch ".codingkeeper/loop.halt"',
                          park, 'empty halt files cannot be classified by the watchdog')
 
-    def test_new_furnace_aifinance_is_patrolled_and_telemetered(self):
+    def test_fleet_is_registry_discovered_not_hardcoded(self):
         watch = self.read('burn-watch.sh')
-        for loop in ('for proj in fingerprint sale soul2soul wechatflow aifinance; do',
-                     'for qproj in fingerprint sale soul2soul wechatflow aifinance; do'):
-            self.assertIn(loop, watch, 'new furnaces must join patrol AND telemetry loops')
+        self.assertIn('for d in $(fleet_furnaces); do', watch,
+                      'patrol AND telemetry must iterate fleet discovery')
+        self.assertNotIn('for proj in fingerprint sale', watch,
+                         'hardcoded furnace lists are unmaintainable at fleet scale')
+        self.assertIn('.codingkeeper/projects', watch,
+                      'fleet must be driven by the project registry')
+        self.assertIn('FLEET_EXCLUDE', watch, 'sandbox workspaces must be excludable')
+        for required in ('queue.md', 'gate.sh', 'review-leaf.sh'):
+            self.assertIn(required, watch,
+                          f'{required} must gate fleet membership (incomplete scaffolds must not burn)')
 
     def test_evidence_revert_failure_parks_instead_of_silently_continuing(self):
         headless = self.read('codexc-headless')
@@ -65,6 +75,39 @@ class ParkReviveAudit(unittest.TestCase):
         fallback_body = '\n'.join(lines[fallback_line:])
         self.assertNotIn('rm -f', fallback_body,
                          'the *) fallback must not clear halts')
+
+    def test_fleet_furnaces_discovery_semantics(self):
+        """注册表 + 三件套 + 排除表: 四类项目的判定 (进程级, 临时 world)。"""
+        with tempfile.TemporaryDirectory(prefix='ck-fleet-', dir='/private/tmp') as tmp:
+            home = Path(tmp) / 'home'
+            (home / '.codingkeeper').mkdir(parents=True)
+            reg = home / '.codingkeeper' / 'projects'
+            ws = Path(tmp) / 'ws'
+            reg.write_text('')
+            for name, files in (
+                    ('good', ['queue.md', 'gate.sh', 'review-leaf.sh']),
+                    ('incomplete', ['queue.md']),                       # 缺 gate/review
+                    ('excluded', ['queue.md', 'gate.sh', 'review-leaf.sh']),
+            ):
+                d = ws / name / '.codingkeeper'
+                d.mkdir(parents=True)
+                for f in files:
+                    (d / f).write_text('#!/bin/bash\n')
+                with open(reg, 'a') as fh:
+                    fh.write(f'{ws / name}\n')
+            (ws / 'ghost' / '.codingkeeper').mkdir(parents=True)   # 未登记 → 不烧
+
+            src = self.read('burn-watch.sh')
+            start = src.index('fleet_furnaces() {')
+            end = src.index('\n}', start)
+            func = src[start:end + 2]
+            out = subprocess.run(
+                ['bash', '-c', f'FLEET_EXCLUDE="excluded"\n{func}\nfleet_furnaces'],
+                env={**os.environ, 'HOME': str(home)},
+                capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout.split(), [str(ws / 'good')],
+                             f'只应发现齐全且登记且未排除的炉子: {out.stdout} {out.stderr}')
 
 
 if __name__ == '__main__':

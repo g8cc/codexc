@@ -21,6 +21,27 @@ if [ ! -f "$WATCH_DIR/ck-window.py" ]; then
     [ -n "$bw_repo_dir" ] && [ -f "$bw_repo_dir/ck-window.py" ] && WATCH_DIR="$bw_repo_dir"
 fi
 
+# 炉队发现: 注册表 ~/.codingkeeper/projects 登记且 scaffold 三件套齐全的项目才是炉子。
+# 加炉 = ck-init-furnace (登记+三件套); 下架 = 注册表删行。$HOME/.codingkeeper 不受
+# Documents TCC 限制, launchd 实例同样可读。缺件的已登记项目告警留档, 不盲烧。
+FLEET_EXCLUDE="test"
+fleet_furnaces() {
+    local p
+    [ -f "$HOME/.codingkeeper/projects" ] || return 0
+    while IFS= read -r p; do
+        p="${p%/}"
+        [ -d "$p" ] || continue
+        case "$p" in *[[:space:]]*) continue ;; esac
+        case " $FLEET_EXCLUDE " in *" ${p##*/} "*) continue ;; esac
+        [ -f "$p/.codingkeeper/queue.md" ] || continue
+        if [ ! -f "$p/.codingkeeper/gate.sh" ] || [ ! -f "$p/.codingkeeper/review-leaf.sh" ]; then
+            alert "${p##*/}" "scaffold 缺件 (gate.sh/review-leaf.sh) — 已登记不烧, 补齐或除名" 2>/dev/null || true
+            continue
+        fi
+        echo "$p"
+    done < "$HOME/.codingkeeper/projects"
+}
+
 watch_window_open() {
     local result allowed deadline next_open reason extra
     [ -n "$WATCH_DIR" ] && [ -f "$WATCH_DIR/ck-window.py" ] || return 125
@@ -166,7 +187,7 @@ cleanup_probe_sessions() {
 }
 
 patrol_once() {
-    local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
+    local proj d pid alive halted reason rcount tok acc_line
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
     # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
@@ -178,8 +199,8 @@ patrol_once() {
             mv "$0.new.$$" "$0" && echo "$(date '+%F %T') watchdog: 运行副本已刷新自仓库真源"
         fi
     fi
-    for proj in fingerprint sale soul2soul wechatflow aifinance; do
-        d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
+    for d in $(fleet_furnaces); do
+        proj="${d##*/}"
         [ -d "$d" ] || continue
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
         if [ "$halted" = 1 ]; then
@@ -226,10 +247,11 @@ patrol_once() {
     day0="$(date -j -f '%F %T' "$(date +%F) 00:00:00" +%s)000"
     tok="$(sqlite3 -readonly "$HOME/.zcode/cli/db/db.sqlite" "SELECT printf('%.1fM',sum(input_tokens+output_tokens)/1e6) FROM model_usage WHERE started_at>=$day0" 2>/dev/null)"
     # 质量退化遥测: 审核轮数/gate 重试抬头 → alert (文本固定, alert 按日去重)
-    for qproj in fingerprint sale soul2soul wechatflow aifinance; do
-        qjournal="$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/journal"
+    for qdir in $(fleet_furnaces); do
+        qproj="${qdir##*/}"
+        qjournal="$qdir/.codingkeeper/journal"
         [ -f "$qjournal" ] || continue
-        qtrend="$(python3 "$HOME/Documents/work/code/AI/AIworkspace/codexc/ck-quality-trend.py" "$qjournal" "$HOME/Documents/work/code/AI/AIworkspace/$qproj/.codingkeeper/parks.log" 2>/dev/null)"
+        qtrend="$(python3 "$WATCH_DIR/ck-quality-trend.py" "$qjournal" "$qdir/.codingkeeper/parks.log" 2>/dev/null)"
         qtrc=$?
         # rc=1 是 alert 判定 (要照常告警), rc>=2 才是解析失败
         [ "$qtrc" -ge 2 ] && continue
@@ -240,11 +262,12 @@ patrol_once() {
                 alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 burn-watch.log 的 quality-trend 行" ;;
         esac
     done
-    fp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/fingerprint/.codingkeeper/journal" 2>/dev/null | xargs)"
-    sp_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/sale/.codingkeeper/journal" 2>/dev/null | xargs)"
-    s2_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/soul2soul/.codingkeeper/journal" 2>/dev/null | xargs)"
-    wf_j="$(wc -l < "$HOME/Documents/work/code/AI/AIworkspace/wechatflow/.codingkeeper/journal" 2>/dev/null | xargs)"
-    echo "$(date '+%F %T') | fp_journal=$fp_j | sale_journal=$sp_j | s2_journal=$s2_j | wf_journal=$wf_j | 今日token=$tok" >> "$ACCOUNT"
+    local acc_line
+    acc_line="$(date '+%F %T')"
+    for d in $(fleet_furnaces); do
+        acc_line="$acc_line | ${d##*/}_journal=$(wc -l < "$d/.codingkeeper/journal" 2>/dev/null | xargs)"
+    done
+    echo "$acc_line | 今日token=$tok" >> "$ACCOUNT"
 }
 
 # A kernel lock survives script crashes without a stale mkdir/PID race. The
