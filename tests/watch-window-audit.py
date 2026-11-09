@@ -199,6 +199,20 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertEqual(launches.read_text().count("\n") if launches.exists() else 0, 1,
                          "只有登记的字面路径一个炉子被复燃")
 
+    def test_registry_tolerates_crlf_and_missing_final_newline(self):
+        # 编辑器/外部工具写入注册表的现实损坏: CRLF 行尾让 [ -d "$p\r" ] 必败,
+        # 末行缺换行被 while read 丢弃 — 两种都表现为静默丢炉 (全盲事故类)
+        a = self.scaffold(self.project("a-plain"))
+        b = self.scaffold(self.project("b-crlf"))
+        (self.root / ".codingkeeper/projects").write_bytes(
+            str(a.parent).encode() + b"\r\n" + str(b.parent).encode())  # 无尾 \n
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\n", fake_revive=True)
+        revived = (self.root / "revived").read_text().splitlines()
+        self.assertEqual(sorted(os.path.basename(x) for x in revived),
+                         ["a-plain", "b-crlf"],
+                         "CRLF 行与缺尾换行的注册表不得静默丢炉")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

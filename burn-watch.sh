@@ -28,7 +28,11 @@ FLEET_EXCLUDE="test"
 fleet_furnaces() {
     local p
     [ -f "$HOME/.codingkeeper/projects" ] || return 0
-    while IFS= read -r p; do
+    # || [ -n "$p" ]: 末行缺换行符的注册表不得丢最后一炉; CRLF/首尾空白是
+    # 编辑器与外部工具的现实损坏 — 两者都表现为静默丢炉 (全盲事故类)
+    while IFS= read -r p || [ -n "$p" ]; do
+        p="${p%$'\r'}"
+        p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
         p="${p%/}"
         [ -d "$p" ] || continue
         case "$p" in *[[:space:]]*) continue ;; esac
