@@ -288,6 +288,21 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertTrue(launches.exists(),
                         "同进程第二轮巡逻必须重扫 — 死炉要被复燃 (陈旧缓存=复燃静默失效)")
 
+    def test_dead_registry_entries_leave_a_daily_trace(self):
+        # 可观测性: 注册表死条目 (目录已删/路径含空白) 静默跳过 = 全盲事故类
+        # (2026-11-09 巡逻盲视 15h) — 每条当日留档一次, 不许无声消失
+        registry = self.root / ".codingkeeper/projects"
+        ghost_dead = self.projects / "ghost-dead"
+        ghost_space = self.projects / "ghost space"
+        ghost_space.mkdir(parents=True)  # 存在但含空白 → 走空白分支
+        registry.write_text(f"{ghost_dead}\n{ghost_space}\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\npatrol_once\n")  # 同进程两轮巡逻: 去重必须跨巡逻存活
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertIn("目录不存在", alerts, "死条目必须留档 — 静默跳过不可接受")
+        self.assertIn("含空白", alerts, "空白路径条目必须留档")
+        self.assertEqual(alerts.count("巡逻跳过"), 2, "两类跳过各留档一次 (按日去重)")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

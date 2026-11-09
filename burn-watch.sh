@@ -46,6 +46,23 @@ fleet_furnaces() {
     done < "$HOME/.codingkeeper/projects"
 }
 
+fleet_trace_registry() {  # 注册表死条目/空白路径/缺 queue.md 的留档 — 必须住在主壳:
+    # fleet_furnaces 每次巡逻在 4 个 <() 子壳里各跑一遍, 进程内去重随子壳消亡,
+    # 会变成每 5 分钟 4 条的日志噪音; 这里一巡逻一次, alert 按条目按日去重
+    local p
+    [ -f "$HOME/.codingkeeper/projects" ] || return 0
+    while IFS= read -r p || [ -n "$p" ]; do
+        p="${p%$'\r'}"
+        p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+        p="${p%/}"
+        case "$p" in
+            *[[:space:]]*) alert "registry" "注册表条目含空白 — 巡逻跳过 (空格路径暂不支持): $p" 2>/dev/null || true; continue ;;
+        esac
+        [ -d "$p" ] || { alert "${p##*/}" "注册表条目目录不存在 — 巡逻跳过 (除名或补目录): $p" 2>/dev/null || true; continue; }
+        [ -f "$p/.codingkeeper/queue.md" ] || { alert "${p##*/}" "注册表条目缺 queue.md — 未初始化? 巡逻跳过: $p" 2>/dev/null || true; continue; }
+    done < "$HOME/.codingkeeper/projects"
+}
+
 watch_window_open() {
     local result allowed deadline next_open reason extra
     [ -n "$WATCH_DIR" ] && [ -f "$WATCH_DIR/ck-window.py" ] || return 125
@@ -202,6 +219,7 @@ cleanup_probe_sessions() {
 patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
+    fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
     # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
