@@ -162,6 +162,12 @@ cleanup_probe_sessions() {
 patrol_once() {
     local proj d pid alive halted reason rcount tok fp_j sp_j s2_j
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
+    date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
+    # 零点翻日 = re-exec 换血: 仓库代码更新最迟一天内自动生效 (fd 9 持锁继承, 巡逻无缝)
+    if [ -n "${WATCHDOG_DAY:-}" ] && [ "$DAY" != "$WATCHDOG_DAY" ]; then
+        exec /bin/bash "$0" __locked-run
+    fi
+    WATCHDOG_DAY="$DAY"
     for proj in fingerprint sale soul2soul wechatflow aifinance; do
         d="$HOME/Documents/work/code/AI/AIworkspace/$proj"
         [ -d "$d" ] || continue
