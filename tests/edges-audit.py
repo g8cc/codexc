@@ -109,9 +109,19 @@ class EdgesAudit(unittest.TestCase):
 
     def watchdog_lib(self):
         source = (REPO / "burn-watch.sh").read_text().split('\ncase "${1:-}" in\n')[0]
-        # Fixture injection only: patrol's historical root was hard-coded.
-        source = source.replace('$HOME/Documents/work/code/AI/AIworkspace/', str(self.root) + '/')
+        # 注册表驱动炉队 (c9630a8): fixture 经假 HOME 的注册表注入, 绝不触碰真实
+        # 家目录。旧的硬编码前缀 replace 在 revive/cleanup 改吃完整路径后已无目标,
+        # 留着只会让巡逻发现零炉、预算与 halt 分支空转。
+        self.env["HOME"] = str(self.root)
+        (self.root / ".codingkeeper").mkdir(exist_ok=True)
+        fingerprint = self.root / "fingerprint" / ".codingkeeper"
+        fingerprint.mkdir(parents=True, exist_ok=True)
+        for name in ("queue.md", "gate.sh", "review-leaf.sh"):
+            (fingerprint / name).touch()
+        (self.root / ".codingkeeper/projects").write_text(str(self.root / "fingerprint") + "\n")
         source += '\nLOG="$AUDIT_ROOT/watch.log"; ALERT="$AUDIT_ROOT/alerts.txt"; ACCOUNT="$AUDIT_ROOT/account.txt"\n'
+        # bash -c 管道里 BASH_SOURCE 为空, WATCH_DIR 回退链断在假 HOME — 直接指仓库真源
+        source += f'WATCH_DIR="{REPO}"\n'
         source += 'proj_alive() { return 1; }; revive() { printf "revived\\n" >> "$AUDIT_ROOT/revived"; }; sqlite3() { :; }\n'
         self.env["AUDIT_ROOT"] = str(self.root)
         self.env["BURN_WATCH_NOTIFY"] = "0"
@@ -123,6 +133,8 @@ class EdgesAudit(unittest.TestCase):
         (self.root / "alerts.txt").write_text((date + " 00:00:00 | fingerprint | 复燃#fingerprint#0\n") * 2)
         result = self.run_shell(self.watchdog_lib() + '\npatrol_once\n')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("复燃超限(2)", (self.root / "alerts.txt").read_text(),
+                      "预算路径必须真跑到 — 空转巡逻 (零炉) 不能算通过")
         self.assertFalse((self.root / "revived").exists(), "daily cap failed to stop third revival")
 
     def test_watchdog_preserves_project_halt(self):
@@ -132,6 +144,8 @@ class EdgesAudit(unittest.TestCase):
         (self.root / "watch.log").write_text("2026-01-01 headless: parked: repeated empty turns\n")
         result = self.run_shell(self.watchdog_lib() + '\npatrol_once\n')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("项目已暂停", (self.root / "alerts.txt").read_text(),
+                      "halt 分支必须真跑到 — 空转巡逻 (零炉) 不能算通过")
         self.assertFalse((self.root / "revived").exists(), "an unrelated global log overrode this project's halt")
 
     def test_watchdog_lock_excludes_overlap_and_recovers_after_death(self):

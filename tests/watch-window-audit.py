@@ -12,7 +12,9 @@ import time
 import unittest
 from zoneinfo import ZoneInfo
 
-REPO = Path(__file__).resolve().parent.parent
+# CK_AUDIT_SOURCE: 指向保存的旧源码目录 (需含 burn-watch.sh 与 ck-window.py),
+# 用于回归重放 — 先在旧实现上跑红, 再在当前源码上跑绿 (watchdog-deploy-audit 同款)
+REPO = Path(os.environ.get('CK_AUDIT_SOURCE', Path(__file__).resolve().parent.parent))
 
 
 def epoch(local):
