@@ -625,9 +625,14 @@ EOF
         echo "  created .codingkeeper/queue.md"
     fi
     if [ ! -f ".codingkeeper/gate.sh" ]; then
-        printf '#!/bin/bash\n# CK_GATE_PLACEHOLDER=1\nset -e\necho "(gate placeholder — 放入真实测试命令)"\nexit 0\n' > ".codingkeeper/gate.sh"
-        chmod +x ".codingkeeper/gate.sh"
-        echo "  created .codingkeeper/gate.sh (placeholder — 放入真实测试命令)"
+        # 门禁生成走 ck-common 共享语义 (gate_init_write) — 曾漂移: 本通道永远
+        # 占位, 而 require_gate_check 对占位当场停炉, 无人值守通道无法自举
+        if gate_init_write; then
+            echo "  created .codingkeeper/gate.sh (探测到测试命令:)"
+            while IFS= read -r c; do [ -n "$c" ] && echo "    $c"; done <<< "$GATE_INIT_CMDS"
+        else
+            echo "  created .codingkeeper/gate.sh (placeholder — 放入真实测试命令)"
+        fi
     fi
     echo "init done — 设置 CODEXC_HEADLESS_CMD 后运行: codexc-headless run"
 }

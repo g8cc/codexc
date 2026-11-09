@@ -671,3 +671,66 @@ PYREGISTER
 usage() {
     awk 'NR == 1 { next } /^set -u/ { exit } { sub(/^# ?/, ""); print }' "$0"
 }
+
+detect_test_cmds() {  # 探测项目测试命令 (uv/pytest/npm/bun/pnpm/yarn/go/cargo/flutter/make)
+    # python
+    if [ -f uv.lock ]; then
+        echo "uv run pytest -q"
+    elif [ -f pyproject.toml ] && grep -q 'pytest' pyproject.toml 2>/dev/null; then
+        echo "python3 -m pytest -q"
+    elif [ -f pytest.ini ] || [ -f setup.cfg ]; then
+        echo "python3 -m pytest -q"
+    elif [ -f requirements.txt ] && grep -qi 'pytest' requirements.txt 2>/dev/null; then
+        echo "python3 -m pytest -q"
+    fi
+    # node (runner picked from the lockfile)
+    if [ -f package.json ] && grep -q '"test"' package.json 2>/dev/null; then
+        if [ -f bun.lockb ] || [ -f bun.lock ]; then echo "bun run test"
+        elif [ -f pnpm-lock.yaml ]; then echo "pnpm test"
+        elif [ -f yarn.lock ]; then echo "yarn test"
+        else echo "npm test"
+        fi
+    fi
+    [ -f go.mod ] && echo "go test ./..."
+    [ -f Cargo.toml ] && echo "cargo test --quiet"
+    [ -f pubspec.yaml ] && echo "flutter test"
+    if [ -f Makefile ] && grep -qE '^test[[:space:]]*:' Makefile 2>/dev/null; then
+        echo "make test"
+    fi
+    return 0
+}
+
+gate_init_write() {  # 生成 .codingkeeper/gate.sh: 探测到命令=真门禁, 否则占位。
+    # 两通道 (codexc-loop / codexc-headless) 共用 — 曾漂移: loop 探测生成,
+    # headless 永远占位, 而 headless 的 require_gate_check 对占位当场停炉,
+    # 无人值守通道永远无法自举 (2026-11-10 可维护性轮实证)。返回 0=已探测。
+    local cmds
+    cmds="$(detect_test_cmds)"
+    if [ -n "$cmds" ]; then
+        {
+            echo '#!/bin/bash'
+            echo '# 验收门禁: 由 init 自动探测生成 — 请核对是否符合本项目'
+            echo '# 外环只认本脚本的真实退出码; 命令写错会在第一次任务时暴露'
+            echo 'set -e'
+            while IFS= read -r c; do
+                [ -n "$c" ] || continue
+                echo "echo \"[gate] $c\""
+                echo "$c"
+            done <<< "$cmds"
+        } > ".codingkeeper/gate.sh"
+        chmod +x ".codingkeeper/gate.sh"
+        GATE_INIT_CMDS="$cmds"
+        return 0
+    fi
+    cat > ".codingkeeper/gate.sh" <<'EOF'
+#!/bin/bash
+# CK_GATE_PLACEHOLDER=1
+# 未探测到测试命令 — 把本项目的真实测试放进来; 外环只认退出码。
+# 示例: set -e; pytest -q --cov-fail-under=80
+echo "(gate placeholder: 未探测到测试命令 — 请编辑本文件)"
+exit 0
+EOF
+    chmod +x ".codingkeeper/gate.sh"
+    GATE_INIT_CMDS=""
+    return 1
+}
