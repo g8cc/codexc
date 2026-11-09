@@ -230,7 +230,12 @@ class WatchWindowAudit(unittest.TestCase):
         other = self.root / "empty-proj"
         other.mkdir(parents=True)
         counter = self.root / "lsof-count"
-        self.script("lsof", '#!/bin/bash\nprintf x >> "$LSOF_COUNT"\nexec /usr/sbin/lsof "$@"\n')
+        # 数值计数器 (独立审查: "x"追加式计数在 $((c2-c1)) 里按未定义标识符求值
+        # 为 0 — 缓存整个删掉断言照样绿, 恒真空转)
+        self.script("lsof", '#!/bin/bash\n'
+                    'n="$(cat "$LSOF_COUNT" 2>/dev/null || echo 0)"; n=$((n+1))\n'
+                    'printf "%s" "$n" > "$LSOF_COUNT"\n'
+                    'exec /usr/sbin/lsof "$@"\n')
         self.env.update(LSOF_COUNT=str(counter), PROJ_A=str(runner), PROJ_B=str(other))
         process = subprocess.Popen(["/bin/bash", "-c", 'exec -a "codexc-headless run" sleep 30'],
                                    cwd=str(runner), env=self.env, start_new_session=True)
@@ -248,7 +253,8 @@ class WatchWindowAudit(unittest.TestCase):
                                     'c2="$(cat "$LSOF_COUNT")"\n'
                                     'printf "a=%s b=%s c=%s scans=%s" "$a" "$b" "$c" "$((c2-c1))"\n')
         self.assertEqual(result.stdout, "a=0 b=0 c=1 scans=0",
-                         "cwd 命中=活, 未命中=死; 一次进程只扫一次 (scans=0 = 缓存生效)")
+                         "cwd 命中=活, 未命中=死; 一次进程只扫一次 (数值计数器: 删除惰性缓存"
+                         "本断言必须红 — b/c 的调用会重扫, scans≥1)")
 
     def test_patrol_rescans_runner_liveness_each_cycle(self):
         # 缓存按巡逻周期重置 — 必须在同一看门狗进程内跨两轮巡逻验证: 分进程
