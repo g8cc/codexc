@@ -37,14 +37,15 @@ stage() {
 stage_syntax() {
     echo "════ [syntax] ════"
     local bad=0
-    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc burn-watch.sh ck-init-furnace ck-watchdog-alive.sh ck-common.sh ck-watch-tools.sh install.sh sync-prefix2.sh tests/run-all tests/conformance.sh tests/keys.sh; do
+    for f in ck codexc codexc-loop codexc-daily codexc-headless codexc-zcode-worker codexc-dsh-worker zcodec dshc burn-watch.sh ck-init-furnace ck-watchdog-alive.sh ck-common.sh ck-watch-tools.sh install.sh sync-prefix2.sh tests/run-all tests/conformance.sh tests/keys.sh tests/swift-gate.sh; do
         bash -n "$f" 2>/dev/null || { echo "  ✗ $f"; bad=1; }
     done
     python3 -m compileall -q ck-config.py ck-watcher.py ck-window.py ck-leaf.py ck-leaves.py ck-prompts.py ck-review-process.py ck-zcode-session.py ck-dsh-session.py ck-night-loop.py tests || bad=1
     python3 -m py_compile codexc-review-leaf || bad=1
-    # Swift 侧语法检查 (今天两个坏提交都是 swift 编译错误漏过 bash -n 门禁)
+    # Swift 侧语法检查 (今天两个坏提交都是 swift 编译错误漏过 bash -n 门禁);
+    # swift-gate.sh 先探针工具链: 工具链损坏时大声 SKIP 而不是把环境问题当代码红灯
     if [ -f desktop/CodingKeeperBar.swift ]; then
-        swiftc -typecheck desktop/CodingKeeperBar.swift >/dev/null 2>&1 || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
+        tests/swift-gate.sh desktop/CodingKeeperBar.swift || { echo "  ✗ desktop/CodingKeeperBar.swift (swift parse)"; bad=1; }
     fi
     [ "$bad" = "0" ] && { echo "  ok: Bash + Python + Swift"; RESULTS+=("PASS  syntax"); } || { RESULTS+=("FAIL  syntax"); FAILED=1; }
     echo
@@ -52,7 +53,7 @@ stage_syntax() {
 
 stage_unit() { stage "unit (loop)" ./codexc-loop selftest; stage "unit (headless)" ./codexc-headless selftest; }
 stage_audit() {
-    for suite in night-loop startup acceptance loop-daily edges desktop tool-watchers harness window zcode-window watch-window zcode-quota zcode-session session-hygiene park-revive quality-trend dsh-session leaf-runtime review-leaf leaves burn-runtime watchdog-deploy prompts status; do
+    for suite in night-loop startup acceptance loop-daily edges desktop tool-watchers harness window zcode-window watch-window zcode-quota zcode-session session-hygiene park-revive quality-trend dsh-session leaf-runtime review-leaf leaves burn-runtime watchdog-deploy swift-gate prompts status; do
         stage "audit $suite" python3 "tests/$suite-audit.py"
     done
 }

@@ -91,6 +91,17 @@ default: exit(2)
 print("PASS " + CommandLine.arguments[1])
 '''
 with tempfile.TemporaryDirectory(prefix='ck-desktop-test-') as temp:
+    # 工具链自检: swiftc 本身损坏 (SDK/编译器错配) 时整条 desktop 检查零信号,
+    # 诚实跳过而不是把环境问题当代码红灯 (与 tests/swift-gate.sh 同一规则)
+    probe = subprocess.run([str(repo / 'tests/swift-gate.sh'), '--probe-only'], text=True,
+                           capture_output=True, timeout=300,
+                           env={**os.environ, 'SWIFT_GATE_PROBE_TIMEOUT': '120'})
+    if probe.returncode == 2:
+        print((probe.stdout or 'SKIP: Swift 工具链损坏 — desktop 检查本次未覆盖').strip())
+        raise SystemExit(0)
+    if probe.returncode != 0:
+        print('FAIL 工具链探针异常退出', probe.returncode, (probe.stdout + probe.stderr)[:250])
+        raise SystemExit(1)
     root = Path(temp)
     swift = root / 'main.swift'
     swift.write_text(source)
