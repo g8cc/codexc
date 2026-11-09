@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+# CK_AUDIT_SOURCE: 指向保存的旧源码目录, 用于回归重放 (先红后绿取证)
+REPO = Path(os.environ.get('CK_AUDIT_SOURCE', Path(__file__).resolve().parent.parent))
 
 
 class ParkReviveAudit(unittest.TestCase):
@@ -79,6 +80,14 @@ class ParkReviveAudit(unittest.TestCase):
         fallback_body = '\n'.join(lines[fallback_line:])
         self.assertNotIn('rm -f', fallback_body,
                          'the *) fallback must not clear halts')
+
+    def test_quality_trend_alert_points_at_the_real_log(self):
+        # 独立审查: quality-trend 行住在 codexc-watch.log (~/.codingkeeper/
+        # burn-watch.log 是 launchd stdout, 不含该行) — 告警指引不得指向旧文件
+        watch = self.read('burn-watch.sh')
+        self.assertIn('详情看 codexc-watch.log', watch)
+        self.assertNotIn('burn-watch.log 的 quality-trend', watch,
+                         '按告警指引找不到故障 = 不可定位')
 
     def test_fleet_furnaces_discovery_semantics(self):
         """注册表 + 三件套 + 排除表: 四类项目的判定 (进程级, 临时 world)。"""

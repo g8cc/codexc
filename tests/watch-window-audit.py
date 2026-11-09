@@ -325,6 +325,28 @@ class WatchWindowAudit(unittest.TestCase):
         watchlog = (self.root / ".codex/codexc-watch.log").read_text()
         self.assertIn("quality-trend with-journal", watchlog, "遥测改写 watch 日志 — 可观测性不丢")
 
+    def test_registry_trace_respects_comments_exclusions_and_per_entry_keys(self):
+        # 独立审查: 空行/# 注释是注册表合法语法 (注释=暂停手段), 不得变每日误报;
+        # FLEET_EXCLUDE 命中的条目主动除名必须静默 (哪怕缺件); 空白条目按全路径
+        # 去重 — 共用常量键让同日第二条空白条目永无留档 (不可见故障类)
+        excl = self.scaffold(self.project("test"))   # 默认 FLEET_EXCLUDE 名单内的名字
+        (excl / "queue.md").unlink()          # 缺件 — 若不查排除表就会误报
+        commented = self.projects / "commented-furnace"
+        commented.mkdir(parents=True)
+        space1 = self.projects / "space one"
+        space2 = self.projects / "space two"
+        registry = self.root / ".codingkeeper/projects"
+        registry.write_text(f"\n# {commented}\n{excl.parent}\n{space1}\n{space2}\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\npatrol_once\n")
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertNotIn("目录不存在", alerts, "空行不得误报为死条目")
+        self.assertNotIn("commented-furnace", alerts, "注释行是合法暂停手段, 不得误报")
+        self.assertNotIn("缺 queue.md", alerts, "FLEET_EXCLUDE 命中的条目主动除名必须静默")
+        self.assertIn(str(space1), alerts, "空白条目按全路径去重: 第一条要可见")
+        self.assertIn(str(space2), alerts, "空白条目按全路径去重: 第二条不得被常量键吞掉")
+        self.assertEqual(alerts.count("巡逻跳过"), 2, "恰两条空白条目各留档一次 (按日去重)")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

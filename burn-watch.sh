@@ -55,8 +55,12 @@ fleet_trace_registry() {  # 注册表死条目/空白路径/缺 queue.md 的留�
         p="${p%$'\r'}"
         p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
         p="${p%/}"
+        [ -z "$p" ] && continue                     # 空行是注册表合法语法
+        case "$p" in \#*) continue ;; esac          # 注释掉条目 = 可用的暂停手段
+        case " $FLEET_EXCLUDE " in *" ${p##*/} "*) continue ;; esac  # 主动除名 = 静默
         case "$p" in
-            *[[:space:]]*) alert "registry" "注册表条目含空白 — 巡逻跳过 (空格路径暂不支持): $p" 2>/dev/null || true; continue ;;
+            # 去重键含全路径: 共用常量键会让同日第二条空白条目永无留档
+            *[[:space:]]*) alert "registry: $p" "注册表条目含空白 — 巡逻跳过 (空格路径暂不支持)" 2>/dev/null || true; continue ;;
         esac
         [ -d "$p" ] || { alert "${p##*/}" "注册表条目目录不存在 — 巡逻跳过 (除名或补目录): $p" 2>/dev/null || true; continue; }
         [ -f "$p/.codingkeeper/queue.md" ] || { alert "${p##*/}" "注册表条目缺 queue.md — 未初始化? 巡逻跳过: $p" 2>/dev/null || true; continue; }
@@ -300,7 +304,7 @@ patrol_once() {
         echo "$(date '+%F %T') quality-trend $qproj: $qtrend" >> "$LOG"
         case "$qtrend" in
             *'"verdict": "alert"'*)
-                alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 burn-watch.log 的 quality-trend 行" ;;
+                alert "$qproj" "质量趋势预警 — 审核轮数/gate 重试抬头, 详情看 codexc-watch.log 的 quality-trend 行" ;;
         esac
     done 3< <(fleet_furnaces)
     local acc_line
