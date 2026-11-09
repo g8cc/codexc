@@ -140,8 +140,8 @@ except Exception:
     return 1
 }
 
-revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃
-    local d="$HOME/Documents/work/code/AI/AIworkspace/$1"
+revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃 (注册表驱动: 传 fleet_furnaces 的完整路径)
+    local d="$1"
     watch_window_open || return 125
     # A halt belongs to this project/operator; never clear it from global logs.
     [ ! -e "$d/.codingkeeper/loop.halt" ] || return 1
@@ -161,11 +161,13 @@ cleanup_probe_sessions() {
     # 失败时自清 sid 文件换新链。
     local cutoff=$(( $(date +%s) - 3600 ))000
     local live sid excludes="" chain_clause=""
-    for live in "$HOME"/Documents/work/code/AI/AIworkspace/*/.codingkeeper/zcode-session-id \
-                "$HOME"/Documents/work/code/AI/AIworkspace/*/.codingkeeper/zcode-session-id.retry; do
-        [ -f "$live" ] || continue
-        sid="$(head -c 64 "$live" 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
-        case "$sid" in sess_*) excludes="$excludes '$sid'," ;; esac
+    for fdir in $(fleet_furnaces); do
+        for f in "$fdir/.codingkeeper/zcode-session-id" \
+                 "$fdir/.codingkeeper/zcode-session-id.retry"; do
+            [ -f "$f" ] || continue
+            sid="$(head -c 64 "$f" 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
+            case "$sid" in sess_*) excludes="$excludes '$sid'," ;; esac
+        done
     done
     excludes="${excludes%,}"
     [ -n "$excludes" ] && chain_clause="AND id NOT IN ($excludes)"
@@ -216,7 +218,7 @@ patrol_once() {
                         continue
                     fi
                     rm -f "$d/.codingkeeper/loop.halt"
-                    if revive "$proj"; then
+                    if revive "$d"; then
                         echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
                     fi
                     continue ;;
@@ -238,7 +240,7 @@ patrol_once() {
             alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"
             continue
         fi
-        if revive "$proj"; then
+        if revive "$d"; then
             echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
         fi
     done

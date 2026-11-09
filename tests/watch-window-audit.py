@@ -33,9 +33,10 @@ class WatchWindowAudit(unittest.TestCase):
         self.source.write_text(source)
         (self.lib / "ck-window.py").symlink_to(REPO / "ck-window.py")
         self.projects = self.root / "Documents/work/code/AI/AIworkspace"
-        self.project("fingerprint")
         (self.root / ".codingkeeper").mkdir()
         (self.root / ".codex").mkdir()
+        self.furnace = str(self.projects / "fingerprint")
+        self.scaffold(self.project("fingerprint"))
         self.clock = self.root / "clock"
         self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
         self.env = dict(os.environ, HOME=str(self.root), TMPDIR=str(self.root),
@@ -71,10 +72,21 @@ class WatchWindowAudit(unittest.TestCase):
             process.communicate(timeout=5)
         self.tmp.cleanup()
 
-    def project(self, name):
-        kd = self.projects / name / ".codingkeeper"
+    def project(self, name, parent=None):
+        base = parent if parent is not None else self.projects
+        kd = base / name / ".codingkeeper"
         kd.mkdir(parents=True)
         (kd / "journal").touch()
+        return kd
+
+    def scaffold(self, kd):
+        """注册表驱动的炉子必须三件套齐全 (c9630a8), 否则巡逻跳过并告警。"""
+        for name in ("queue.md", "gate.sh", "review-leaf.sh"):
+            (kd / name).touch()
+        registry = self.root / ".codingkeeper/projects"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        with open(registry, "a") as handle:
+            handle.write(str(kd.parent) + "\n")
         return kd
 
     def script(self, name, source):
@@ -84,7 +96,8 @@ class WatchWindowAudit(unittest.TestCase):
         return path
 
     def shell(self, body, fake_revive=False):
-        setup = '. "$WATCH_SOURCE"\nZCJS="$WATCH_ROOT/bin/probe"\nproj_alive() { return 1; }\n'
+        setup = (f'. "$WATCH_SOURCE"\nZCJS="$WATCH_ROOT/bin/probe"\n'
+                 f'CK_FURNACE="{self.furnace}"\nproj_alive() {{ return 1; }}\n')
         setup += 'sleep() { if [ -n "${WATCH_NEXT_TIME:-}" ]; then printf "%s" "$WATCH_NEXT_TIME" > "$WATCH_CLOCK"; fi; }\n'
         if fake_revive:
             setup += 'revive() { printf "%s\\n" "$1" >> "$WATCH_ROOT/revived"; }\n'
@@ -130,7 +143,7 @@ class WatchWindowAudit(unittest.TestCase):
             with self.subTest(local=local):
                 self.reset_markers()
                 self.clock.write_text(str(epoch(local)))
-                result = self.shell('revive fingerprint; printf "rc=%s" "$?"\n')
+                result = self.shell('revive "$CK_FURNACE"; printf "rc=%s" "$?"\n')
                 if allowed:
                     deadline = time.monotonic() + 2
                     while not (self.root / "launches").exists() and time.monotonic() < deadline:
@@ -139,6 +152,27 @@ class WatchWindowAudit(unittest.TestCase):
                 else:
                     self.assertEqual(result.stdout, "rc=125")
                     self.assertFalse((self.root / "launches").exists())
+
+    def test_registry_project_outside_workspace_prefix_revives(self):
+        # 注册表可登记任意路径 (c9630a8); revive 仍从 Documents 前缀重建目录时,
+        # 前缀外炉子的 park 自愈会清掉 halt 却永远起不来 — 复燃必须吃完整路径
+        outside = self.scaffold(self.project("outsider", parent=self.root / "elsewhere"))
+        (outside / "loop.halt").write_text("review rounds exhausted (6)\n")
+        (self.root / ".codingkeeper/projects").write_text(str(outside.parent) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\n")
+        self.assertTrue((self.root / "launches").exists(),
+                        "前缀外注册炉子必须能被真实 revive 拉起 (nohup fake 落 launches)")
+
+    def test_probe_cleanup_excludes_live_sessions_across_registry_paths(self):
+        # 同类病灶: cleanup 的活链排除曾用 Documents 硬编码 glob — 注册表前缀外
+        # 炉子的活会话进不了排除名单, 自动化标题的活链会被误删
+        outside = self.scaffold(self.project("outsider", parent=self.root / "elsewhere"))
+        (outside / "zcode-session-id").write_text("sess_outsidelive0000000000000000000\n")
+        self.shell("cleanup_probe_sessions\n")
+        sql = (self.root / "sqlite-args").read_text()
+        self.assertIn("sess_outsidelive0000000000000000000", sql,
+                      "前缀外炉子的活链 sid 必须进 NOT IN 排除名单")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
@@ -156,7 +190,7 @@ class WatchWindowAudit(unittest.TestCase):
 
     def test_revive_preserves_custom_timezone(self):
         self.env['CODEXC_ACTIVE_TZ'] = 'Asia/Singapore'
-        self.shell('revive fingerprint\n')
+        self.shell('revive "$CK_FURNACE"\n')
         deadline = time.monotonic() + 2
         while not (self.root / 'launches').exists() and time.monotonic() < deadline:
             time.sleep(.01)
@@ -169,14 +203,14 @@ class WatchWindowAudit(unittest.TestCase):
                 previous = dict(self.env)
                 self.env.update(config)
                 self.reset_markers()
-                self.shell("patrol_once\ncli_alive || :\nrevive fingerprint || :\n", fake_revive=False)
+                self.shell('patrol_once\ncli_alive || :\nrevive "$CK_FURNACE" || :\n', fake_revive=False)
                 self.assertFalse((self.root / "launches").exists())
                 self.assertFalse((self.root / "probes").exists())
                 self.env = previous
 
     def test_missing_helper_fails_closed(self):
         (self.lib / "ck-window.py").unlink()
-        self.shell("patrol_once\ncli_alive || :\nrevive fingerprint || :\n")
+        self.shell('patrol_once\ncli_alive || :\nrevive "$CK_FURNACE" || :\n')
         self.assertFalse((self.root / "launches").exists())
         self.assertFalse((self.root / "probes").exists())
 
@@ -185,7 +219,7 @@ class WatchWindowAudit(unittest.TestCase):
         for reason in ("quota: current package not active\n", "manual pause\n"):
             with self.subTest(reason=reason):
                 halt.write_text(reason)
-                self.shell("patrol_once\nrevive fingerprint || :\n")
+                self.shell('patrol_once\nrevive "$CK_FURNACE" || :\n')
                 self.assertEqual(halt.read_text(), reason)
                 self.assertFalse((self.root / "launches").exists())
 
@@ -202,12 +236,12 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertFalse((self.root / "revived").exists())
 
     def test_patrol_rechecks_between_projects(self):
-        self.project("sale")
+        self.scaffold(self.project("sale"))
         self.clock.write_text(str(epoch("2026-11-06T08:59:59")))
         self.env["WATCH_NEXT_TIME"] = str(epoch("2026-11-06T09:00:00"))
         self.shell('revive() { printf "%s\\n" "$1" >> "$WATCH_ROOT/revived"; '
                    'printf "%s" "$WATCH_NEXT_TIME" > "$WATCH_CLOCK"; }\npatrol_once\n')
-        self.assertEqual((self.root / "revived").read_text(), "fingerprint\n")
+        self.assertEqual((self.root / "revived").read_text(), self.furnace + "\n")
 
     def test_symlink_entry_resolves_sibling_policy_helper(self):
         link = self.bin / "watchdog-link"
