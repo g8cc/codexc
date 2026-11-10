@@ -25,6 +25,8 @@ fi
 # 加炉 = ck-init-furnace (登记+三件套); 下架 = 注册表删行。$HOME/.codingkeeper 不受
 # Documents TCC 限制, launchd 实例同样可读。缺件的已登记项目告警留档, 不盲烧。
 FLEET_EXCLUDE="test"
+CODEXC_FLEET_MAX="${CODEXC_FLEET_MAX:-5}"       # 并发上限: 同时活着的 runner 数; 0=不限
+CODEXC_DISK_MIN_GB="${CODEXC_DISK_MIN_GB:-10}"  # HOME 所在卷可用 GiB 低于此值时每日告警
 fleet_furnaces() {
     local p
     [ -f "$HOME/.codingkeeper/projects" ] || return 0
@@ -102,6 +104,23 @@ proj_alive() {  # $1=project dir — pid 文件 (每炉新鲜) 或 cwd 扫描 (�
     [ -z "$PROJ_ALIVE_CWDS" ] && proj_alive_scan
     case "$PROJ_ALIVE_CWDS" in *" $dreal "*) return 0 ;; esac
     return 1
+}
+
+fleet_cap_blocks() {  # 并发闸门: 活 runner 数 ≥ 上限时返回 0 (跳过复燃); 0=不限
+    [ "${CODEXC_FLEET_MAX:-5}" -gt 0 ] || return 1
+    set -- $PROJ_ALIVE_CWDS
+    [ "$#" -lt "${CODEXC_FLEET_MAX:-5}" ] && return 1
+    return 0
+}
+
+disk_watch() {  # HOME 所在卷可用 GiB 低于阈值 → 每日告警一次 (key=disk)
+    local free_gb
+    free_gb="$(df -k "$HOME" 2>/dev/null | awk 'NR == 2 { print int($4 / 1048576) }')"
+    [ -n "$free_gb" ] || return 0
+    if [ "$free_gb" -lt "${CODEXC_DISK_MIN_GB:-10}" ]; then
+        alert "disk" "磁盘仅剩 ${free_gb} GiB (阈值 ${CODEXC_DISK_MIN_GB:-10}) — 清理 /tmp/ck-*、.codex/sessions 或 evidence; 磁盘满曾致看门狗写入失败死亡 (2026-11-10)"
+    fi
+    return 0
 }
 
 rotate_log() {  # $1=文件 $2=保留行数 — >1MB 或 >2000 行时归档旧内容 (gz, 90 天)
@@ -226,6 +245,7 @@ patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
+    disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
     date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
     # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
@@ -256,6 +276,10 @@ patrol_once() {
                         alert "$proj" "复燃超限(2) — 审核 park 留档待人 (最后park: ${halt_reason:0:40})"
                         continue
                     fi
+                    if fleet_cap_blocks; then
+                        alert "fleet" "并发已满 ${CODEXC_FLEET_MAX} — ${proj} 审核 park 保留, 空位后自动复燃"
+                        continue
+                    fi
                     rm -f "$d/.codingkeeper/loop.halt"
                     if revive "$d"; then
                         echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
@@ -279,6 +303,10 @@ patrol_once() {
         rcount=${rcount:-0}
         if [ "$rcount" -ge 2 ]; then
             alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"
+            continue
+        fi
+        if fleet_cap_blocks; then
+            alert "fleet" "并发已满 ${CODEXC_FLEET_MAX} — ${proj} 等待空位后自动复燃"
             continue
         fi
         if revive "$d"; then

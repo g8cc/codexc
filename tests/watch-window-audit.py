@@ -347,6 +347,43 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertIn(str(space2), alerts, "空白条目按全路径去重: 第二条不得被常量键吞掉")
         self.assertEqual(alerts.count("巡逻跳过"), 2, "恰两条空白条目各留档一次 (按日去重)")
 
+    def test_fleet_concurrency_cap_blocks_revive(self):
+        # 操作者指令 (2026-11-11): 并发上限 5, 不许 18 炉齐开。闸门是机械规则:
+        # 活 runner 数 ≥ 上限时, 死炉与审核 park 都不得复燃 (park 保留防丢状态)
+        furnace = self.scaffold(self.project("capped-furnace"))
+        (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
+        other_a = self.projects / "busy-a"
+        other_b = self.projects / "busy-b"
+        for d in (other_a, other_b):
+            d.mkdir(parents=True)
+        self.env["CODEXC_FLEET_MAX"] = "2"
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        body = (
+            '( cd "$BUSY_A" && exec -a "codexc-headless run" sleep 30 ) >/dev/null 2>&1 &\n'
+            '( cd "$BUSY_B" && exec -a "codexc-headless run" sleep 30 ) >/dev/null 2>&1 &\n'
+            'sleep 0.8\n'
+            'patrol_once\n')
+        self.env.update(BUSY_A=str(other_a), BUSY_B=str(other_b))
+        self.run_lib_shell(body)
+        self.assertFalse((self.root / "launches").exists(),
+                         "并发已达上限时不得复燃任何炉子")
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertIn("并发已满", alerts, "闸门触发必须留档 (按日去重, 不刷屏)")
+
+    def test_disk_watch_alerts_on_low_space(self):
+        # 操作者指令 (2026-11-11): 磁盘纳入监控 — 可用空间低于阈值时每日告警
+        # 一次; 例行巡逻在磁盘满时的写入失败正是 2026-11-10 看门狗死亡诱因
+        self.scaffold(self.project("disk-probe"))
+        (self.root / ".codingkeeper/projects").write_text(
+            str(self.projects / "disk-probe") + "\n")
+        self.script("df", '#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+                    'echo "/dev/disk1s2 466 466 ${FAKE_DF_AVAIL_KB:-8192} 100% /"\n')
+        self.env["CODEXC_DISK_MIN_GB"] = "10"
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.run_lib_shell("patrol_once\n")
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertIn("磁盘仅剩", alerts, "低水位必须告警")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")
