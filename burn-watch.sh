@@ -180,8 +180,10 @@ revive() {  # $1=proj — 有界、保留 halt 的 nohup 复燃 (注册表驱动
     [ -d "$d" ] || return 1
     ( cd "$d" || exit 1
       # The resumed runner enforces the same policy for the full child lifetime.
+      # 9-12 全关: patrol 期间 bash 把锁 fd 暂存在 10 (+1/2 的存槽), 长命 runner
+      # 继承它 = 永久持锁, 看门狗死后永远重启不了 (2026-11-10 舰队扩编时实证)。
       CODEXC_ACTIVE_WINDOW="$CODEXC_ACTIVE_WINDOW" CODEXC_ACTIVE_TZ="$CODEXC_ACTIVE_TZ" \
-      CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 & )
+      CODEXC_REVIEW_CMD="$d/.codingkeeper/review-leaf.sh" nohup zcodec run >> "$LOG" 2>&1 9>&- 10>&- 11>&- 12>&- & )
 }
 
 # 探测会话自动清理: 看门狗的健康探测 (replyOK) 会在 zcode db 留会话行,
@@ -432,7 +434,7 @@ while :; do
     patrol_once 9>&- >> "$ALERT" 2>&1
     rotate_log "$ACCOUNT" 1000 9>&-
     rotate_log "$ALERT" 300 9>&-
-    sleep 300 9>&- & sleeper=$!
+    sleep 300 9>&- 10>&- 11>&- 12>&- & sleeper=$!
     wait "$sleeper"
     sleeper=""
 done
