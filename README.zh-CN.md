@@ -39,8 +39,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `ck <tool> [args]` | 统一入口：`ck codex` / `ck claude` / `ck pi` / `ck opencode` / `ck zcode` / `ck dsh` |
 | `ck status` | 跨项目总览 |
 | `ck fuel [tool]` | 燃料表 |
-| `codexc` | 兼容别名，等同 `ck codex` |
-| `codexc` | 接入/创建本目录的会话 — 默认纯交互，不自动投喂任何内容 |
+| `codexc` | 兼容别名，等同 `ck codex` — 接入/创建本目录的会话，默认纯交互，不自动投喂任何内容 |
 | `codexc loop` | 显式装配无人值守交付循环（首次运行自动生成 `.codingkeeper/`；`--no-loop` 强制关闭） |
 | `codexc codex <参数>` | `codexc codex -m o3 --search` → 启动时携带参数；已有会话时用 `-n <新名字>` 新开 |
 | `codexc resume --last` | 续跑最近一次 codex 会话 |

@@ -37,8 +37,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `ck <tool> [args]` | unified entry: `ck codex` / `ck claude` / `ck pi` / `ck opencode` / `ck zcode` / `ck dsh` |
 | `ck status` | cross-project overview |
 | `ck fuel [tool]` | fuel gauge |
-| `codexc` | backward compat alias for `ck codex` |
-| `codexc` | create-or-attach this directory's session — interactive by default, nothing auto-fed |
+| `codexc` | backward compat alias for `ck codex` — create-or-attach this directory's session; interactive by default, nothing auto-fed |
 | `codexc loop` | arm the unattended delivery loop (auto-scaffolds `.codingkeeper/` on first run; `--no-loop` forces it off) |
 | `codexc codex <args>` | `codexc codex -m o3 --search` → start with those arguments; use `-n <new-name>` if a session is already running |
 | `codexc resume --last` | continue the most recent codex session |
