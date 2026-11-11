@@ -401,6 +401,28 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertIn("alive=0", result.stdout,
                       "非法字节 cmdlines 不得让判活扫描弃扫 — 活炉必须被识别")
 
+    def test_model_quota_park_auto_resumes_once_per_day(self):
+        # 可靠性: "model quota exhausted" park 等的是日额度重置 — 跨日后必须有界
+        # 自动复燃 (1/日), 否则每晚额度刷新时整队睡死 = 浪费额度 (2026-11-11 实证
+        # 4 炉配额 park 过夜)。套餐未激活类配额 park 仍走人工分支不受影响。
+        furnace = self.scaffold(self.project("quota-furnace"))
+        (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        launches = self.root / "launches"
+        (furnace / "loop.halt").write_text("model quota exhausted\n")
+        self.run_lib_shell("patrol_once\n")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not launches.exists():
+            time.sleep(0.05)
+        self.assertEqual(len(launches.read_text().splitlines()) if launches.exists() else 0, 1,
+                         "配额 park 跨日应自动复燃一次")
+        self.assertFalse((furnace / "loop.halt").exists(), "复燃后 halt 应清除")
+        # 同日再 park (额度再次耗尽) → 预算 1/日已耗 → 保留停炉等人
+        (furnace / "loop.halt").write_text("model quota exhausted\n")
+        self.run_lib_shell("patrol_once\n")
+        self.assertEqual(len(launches.read_text().splitlines()), 1,
+                         "预算 1/日: 同日第二次配额 park 不得再复燃")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

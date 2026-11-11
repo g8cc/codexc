@@ -284,6 +284,28 @@ patrol_once() {
         if [ "$halted" = 1 ]; then
             halt_reason="$(head -c 200 "$d/.codingkeeper/loop.halt" 2>/dev/null)"
             case "$halt_reason" in
+                *"model quota exhausted"*)
+                    # 模型日额度 park: 额度按日重置 — 跨日后有界自动复燃 (1/日),
+                    # 否则每晚额度刷新时整队睡死 (2026-11-11 实证 4 炉配额 park
+                    # 过夜)。套餐未激活/人工类 park 仍走 *) 人工分支。
+                    qcount="$(awk -v day="$DAY" -v key="配额复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+                    qcount=${qcount:-0}
+                    if [ "$qcount" -ge 1 ]; then
+                        alert "$proj" "配额复燃超限(1/日) — 留档待人 (最后park: ${halt_reason:0:40})"
+                        continue
+                    fi
+                    if fleet_cap_blocks; then
+                        alert "fleet" "并发已满 ${CODEXC_FLEET_MAX} — ${proj} 配额 park 保留, 空位后自动复燃"
+                        continue
+                    fi
+                    rm -f "$d/.codingkeeper/loop.halt"
+                    if revive "$d"; then
+                        FLEET_REVIVED=$((FLEET_REVIVED + 1))
+                        echo "$(date '+%F %T') | $proj | 配额复燃#$proj#$qcount (额度重置自愈)" >> "$ALERT"
+                    else
+                        alert "$proj" "复燃失败(rc=$?) — runner 未拉起 (留档按日去重)"
+                    fi
+                    continue ;;
                 *"review rounds exhausted"*|*"review output unparseable"*)
                     # 审核类 park 有界自动复燃: 夜间不再整夜停摆。
                     # 预算与退出类复燃共用 2/日; 超限 = 同一叶子反复被拒, 留档待人。
