@@ -28,8 +28,9 @@ FLEET_EXCLUDE="test"
 CODEXC_FLEET_MAX="${CODEXC_FLEET_MAX:-6}"       # 并发目标: 看门狗把活炉补足到该数 (低于即复燃); 0=不限
 CODEXC_DISK_MIN_GB="${CODEXC_DISK_MIN_GB:-10}"  # HOME 所在卷可用 GiB 低于此值时每日告警
 # 非数字手滑兜底回默认 (否则每巡逻刷 integer expression 错误且磁盘监控静默失效)
-case "${CODEXC_FLEET_MAX}" in ''|*[!0-9]*) CODEXC_FLEET_MAX=6 ;; esac
-case "${CODEXC_DISK_MIN_GB}" in ''|*[!0-9]*) CODEXC_DISK_MIN_GB=10 ;; esac
+# 限长 9 位: 超长数字串会在 $(( )) 溢出报错、前导零被八进制误读 — 一并兜底
+case "${CODEXC_FLEET_MAX}" in ''|*[!0-9]*|??????????*) CODEXC_FLEET_MAX=6 ;; esac
+case "${CODEXC_DISK_MIN_GB}" in ''|*[!0-9]*|??????????*) CODEXC_DISK_MIN_GB=10 ;; esac
 fleet_furnaces() {
     local p
     [ -f "$HOME/.codingkeeper/projects" ] || return 0
@@ -124,11 +125,11 @@ fleet_cap_blocks() {  # 并发闸门: 活炉数 + 本巡逻已复燃数 ≥ 上�
     # 必须加 FLEET_REVIVED 增量 — 活炉计数是巡逻开始时的缓存, 同一巡逻内
     # 连续复燃不更新, 闸门会被缓存打穿 (2026-11-11 实证一次巡逻 12 炉齐开)。
     # 只数注册炉子 (proj_alive 逐炉比对 cwd) — 与真实舰队进程天然隔离, 可测。
-    [ "${CODEXC_FLEET_MAX:-5}" -gt 0 ] || return 1
+    [ "${CODEXC_FLEET_MAX:-6}" -gt 0 ] || return 1
     local alive rev
     alive="$(fleet_alive_count)"
     rev="${FLEET_REVIVED:-0}"
-    [ "$((alive + rev))" -lt "${CODEXC_FLEET_MAX:-5}" ] && return 1
+    [ "$((alive + rev))" -lt "${CODEXC_FLEET_MAX:-6}" ] && return 1
     return 0
 }
 

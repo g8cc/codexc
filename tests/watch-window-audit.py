@@ -494,7 +494,7 @@ class WatchWindowAudit(unittest.TestCase):
         self.script("df", '#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
                     'echo "/dev/disk1s2 466 466 8192 100% /"\n')   # 可用 8KiB — 低水位必告警
         self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
-        result = self.run_lib_shell("patrol_once\n")
+        result = self.run_lib_shell("patrol_once\npatrol_once\n")
         self.assertNotIn("integer expression", result.stderr,
                          "非数字环境变量不得每巡逻刷算术错误")
         self.assertNotIn("目录不存在 — 巡逻跳过 (除名或补目录): \n", (self.root / ".codingkeeper/burn-ALERTS.txt").read_text(),
@@ -502,6 +502,21 @@ class WatchWindowAudit(unittest.TestCase):
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertIn("磁盘仅剩 0 GiB", alerts,
                       "垃圾阈值必须兜底回默认 (10) — 磁盘监控不得静默失效")
+        self.assertEqual(alerts.count("磁盘仅剩"), 1,
+                         "告警按 key 每进程每日去重: 同进程两轮巡逻恰 1 条")
+        # 类别覆盖: 超长数字串穿过非数字 case 后会在 $(( )) 溢出报错、前导零
+        # 被八进制误读 — 限长兜底必须拦截 (独立审查: 回归只测 abc 未证明该类别)
+        self.env["CODEXC_FLEET_MAX"] = "99999999999999999999"
+        self.env["CODEXC_DISK_MIN_GB"] = "0000000099"
+        result = self.run_lib_shell("patrol_once\npatrol_once\n")
+        self.assertNotIn("value too great", result.stderr, "超长数字不得溢出进巡逻日志")
+        self.assertNotIn("integer expression", result.stderr)
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertEqual(alerts.count("磁盘仅剩"), 2,
+                         "磁盘告警按 key 每进程每日去重: 第二进程恰再 1 条 (共 2)")
+        launches_n = len((self.root / "launches").read_text().splitlines()) if (self.root / "launches").exists() else 0
+        self.assertLessEqual(launches_n, 2,
+                             "死炉复燃 2/日 预算经由 ALERT 账本跨进程生效 — 恢复有界, 无超发")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
