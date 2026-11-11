@@ -53,7 +53,7 @@ stage_syntax() {
 
 stage_unit() { stage "unit (loop)" ./codexc-loop selftest; stage "unit (headless)" ./codexc-headless selftest; }
 stage_audit() {
-    for suite in night-loop startup acceptance loop-daily edges desktop tool-watchers harness install-deps init-parity window zcode-window watch-window zcode-quota zcode-session session-hygiene park-revive quality-trend dsh-session leaf-runtime review-leaf leaves burn-runtime watchdog-deploy swift-gate prompts status; do
+    for suite in night-loop startup acceptance loop-daily edges desktop tool-watchers harness install-deps init-parity notify-parity window zcode-window watch-window zcode-quota zcode-session session-hygiene park-revive quality-trend dsh-session leaf-runtime review-leaf leaves burn-runtime watchdog-deploy swift-gate prompts status; do
         stage "audit $suite" python3 "tests/$suite-audit.py"
     done
 }

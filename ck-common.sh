@@ -112,6 +112,9 @@ notify() {
     # CODEXC_NOTIFY_GAP 秒(默认3, 0=关)的本条直接丢弃 (通知是糖, 不是投递保证)
     local gap="${CODEXC_NOTIFY_GAP:-3}" last now
     case "$gap" in ''|*[!0-9]*) gap=3 ;; esac
+    # 超范围回退默认 3 — 对齐 codex 通道 normalize_uint 的拒绝-回退语义
+    # (否则 gap=99999999 会在 ck 通道压抑 ~3 年, codex 通道却照常送达)
+    [ "$gap" -gt 86400 ] && gap=3
     if [ "$gap" -gt 0 ]; then
         last="$(cat "$HOME/.codingkeeper/.notify-last" 2>/dev/null || echo 0)"
         case "$last" in ''|*[!0-9]*) last=0 ;; esac
