@@ -25,7 +25,7 @@ fi
 # 加炉 = ck-init-furnace (登记+三件套); 下架 = 注册表删行。$HOME/.codingkeeper 不受
 # Documents TCC 限制, launchd 实例同样可读。缺件的已登记项目告警留档, 不盲烧。
 FLEET_EXCLUDE="test"
-CODEXC_FLEET_MAX="${CODEXC_FLEET_MAX:-5}"       # 并发上限: 同时活着的 runner 数; 0=不限
+CODEXC_FLEET_MAX="${CODEXC_FLEET_MAX:-6}"       # 并发目标: 看门狗把活炉补足到该数 (低于即复燃); 0=不限
 CODEXC_DISK_MIN_GB="${CODEXC_DISK_MIN_GB:-10}"  # HOME 所在卷可用 GiB 低于此值时每日告警
 fleet_furnaces() {
     local p

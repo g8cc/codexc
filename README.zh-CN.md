@@ -154,7 +154,7 @@ ck codex loop             # Codex TUI 监督循环
 | `CODEXC_EXTRA_RE` | 追加的自动 continue 正则（与内置取 OR） | — |
 | `CODEXC_AUTO_YES` | `1` 全自动 / `2` 保留沙箱 / `0` 关闭 | `1` |
 | `CODEXC_DAILY_IDLE` | 每日任务空闲阈值（分钟），`0` 关闭（范围 `0`–`10080`） | `30` |
-| `CODEXC_FLEET_MAX` | 看门狗复燃并发上限（同时活着的 runner 数），`0` 不限 | `5` |
+| `CODEXC_FLEET_MAX` | 看门狗并发目标（活炉低于该数即自动复燃补足），`0` 不限 | `6` |
 | `CODEXC_DISK_MIN_GB` | HOME 所在卷可用 GiB 低于此值时每日告警（看门狗巡逻内置检查） | `10` |
 
 ## 工作原理
