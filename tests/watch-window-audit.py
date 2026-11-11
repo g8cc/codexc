@@ -3,6 +3,7 @@
 import datetime as dt
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -422,6 +423,36 @@ class WatchWindowAudit(unittest.TestCase):
         self.run_lib_shell("patrol_once\n")
         self.assertEqual(len(launches.read_text().splitlines()), 1,
                          "预算 1/日: 同日第二次配额 park 不得再复燃")
+
+    def test_registry_adversarial_lines_cannot_execute(self):
+        # 安全边界: 注册表是 agent 可写输入 (aitv 实证真实世界会塞任意行) —
+        # 行内容流经 cd/rm/alert/osascript 四个命令边界, 任何注入都等于
+        # 无人值守机器上的任意命令执行。含注入载荷的字面目录必须被留档而非执行。
+        canary = self.root / "CK-SEC-CANARY"
+        ws = self.root / "sec-ws"
+        payloads = ('$(touch ' + str(canary) + ')',
+                    '`touch ' + str(canary) + '`',
+                    '-e',
+                    'x"; do shell script "touch ' + str(canary) + '"; "y')
+        for name in payloads:
+            (ws / name).mkdir(parents=True, exist_ok=True)
+        registry = self.root / ".codingkeeper/projects"
+        registry.write_text("\n".join(str(ws / n) for n in payloads) + "\n")
+        self.env["BURN_WATCH_NOTIFY"] = "1"   # 打开 osascript 路径验证转义
+        self.script("osascript", '#!/bin/bash\nprintf "%s\\n" "$*" >> "$WATCH_ROOT/osa.log"\n')
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        self.shell("patrol_once\n")
+        self.assertFalse(canary.exists(), "注册表行内容不得作为命令执行")
+        result = self.run_lib_shell('patrol_once; true\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        for name in payloads:
+            self.assertIn(name, alerts, f"对抗性行必须原样留档可见: {name}")
+        # 转义后的 "do shell script" 是惰性文本; 只有未转义引号逃逸进代码位才是注入
+        osa = (self.root / "osa.log").read_text()
+        self.assertIn('\\"; do shell script', osa, "双引号必须被转义为惰性文本")
+        self.assertIsNone(re.search(r'(?<!\\)"; (?:do shell script|touch )', osa),
+                          "osascript 参数中不得出现未转义引号逃逸")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
