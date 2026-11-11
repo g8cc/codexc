@@ -532,8 +532,14 @@ class WatchWindowAudit(unittest.TestCase):
             "cf = os.environ['FAKE_DATE_COUNT']\n"
             "n = (int(open(cf).read()) if os.path.exists(cf) else 0) + 1\n"
             "open(cf, 'w').write(str(n))\n"
-            "if args == ['+%F'] and n > int(os.environ['FAKE_DATE_FLIP_AFTER']):\n"
-            "    print(os.environ['FAKE_DATE_DAY2']); sys.exit(0)\n"
+            "if args == ['+%F']:\n"
+            "    # 裸 +%F 恒返回假日 (阈值前 DAY1, 之后 DAY2) — 与墙上时钟解耦:\n"
+            "    # 否则 WATCHDOG_DAY 取真实日期, 真实日期 == DAY2 的 24h 窗口内\n"
+            "    # 翻日永不触发, 事故形态空转通过 (独立审查缺陷 1)\n"
+            "    day = os.environ['FAKE_DATE_DAY1']\n"
+            "    if n > int(os.environ['FAKE_DATE_FLIP_AFTER']):\n"
+            "        day = os.environ['FAKE_DATE_DAY2']\n"
+            "    print(day); sys.exit(0)\n"
             "os.execv(" + repr(real_date) + ", ['date'] + args)\n")
         fake_date.chmod(0o755)
         self.script("sleep", "#!" + sys.executable + "\n"
@@ -571,10 +577,10 @@ class WatchWindowAudit(unittest.TestCase):
                           "翻日 exec 后看门狗必须同 PID 存活 (exec 换血, 非 restart)")
         hb1 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
         self.assertGreater(time.time() - hb1, 0)
-        time.sleep(2.5)   # exec 后的新实例应继续巡逻 (心跳持续推进)
+        time.sleep(2.5)   # exec 后的新实例应继续巡逻 (假 sleep 千倍加速, ~0.3s 一轮)
         hb2 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
-        self.assertGreaterEqual(hb2, hb1, "换血后巡逻必须继续 (心跳不得回退)")
-        self.assertLess(time.time() - hb2, 300, "换血后心跳停滞 — 新实例未巡逻")
+        self.assertGreater(hb2, hb1,
+                           "换血后巡逻必须继续 — 存活但挂起 (心跳不推进) 的形态必须被捕获")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
