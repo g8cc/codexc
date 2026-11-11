@@ -71,6 +71,33 @@ class LeafRuntimeAudit(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'baseline')
 
+    def test_oversize_source_is_hashed_without_blob_and_does_not_block_acceptance(self):
+        # 2026-11-12 实证: vendored 大数据文件 (tessdata 类 19.2 MiB) 触发
+        # 16 MiB/file 预算 raise → 该炉永远 "leaf baseline failed" 停炉。
+        # 修复后大文件流式哈希照记 (blob: False), 验收资格与证据体积解耦。
+        self.repo()
+        big = self.world / 'public' / 'tessdata.gz'
+        big.parent.mkdir()
+        with big.open('wb') as fh:
+            for _ in range(17):          # 17 MiB > 16 MiB/file 预算
+                fh.write(b'\x90' * (1024 * 1024))
+        self.env['CODEXC_REQUIRE_GATE'] = '1'
+        result = self.helper('begin', 'dGFzaw==', check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        directory = Path(result.stdout.strip())
+        baseline = json.loads((directory / 'baseline.json').read_text())
+        entry = baseline['files']['public/tessdata.gz']
+        self.assertFalse(entry.get('blob', True), '大文件只记哈希, 内容不进证据')
+        self.assertEqual(entry['size'], 17 * 1024 * 1024)
+        self.assertTrue(entry['sha256'], '完整性哈希必须照记')
+        oversize_blobs = [p for p in (directory / 'blobs').iterdir()
+                          if p.stat().st_size > 16 * 1024 * 1024]
+        self.assertEqual(oversize_blobs, [], '超限内容不得拷贝进证据')
+        product_sha = baseline['files']['product.txt']['sha256']
+        self.assertTrue((directory / 'blobs' / product_sha).exists() or
+                        ((self.state / 'evidence' / '.blobs' / product_sha).exists()),
+                        '小文件 blob 照常存证')
+
     def test_existing_dirty_and_empty_commit_do_not_count_as_burn(self):
         self.repo()
         (self.world / 'product.txt').write_text('preexisting user edit\n')

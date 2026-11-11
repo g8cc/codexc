@@ -187,21 +187,33 @@ def snapshot(directory, save=False):
         except FileNotFoundError:
             files[name] = {'kind': 'missing'}
             continue
+        save_blob = True
         if stat.S_ISLNK(info.st_mode):
             data = os.fsencode(os.readlink(path))
             kind = 'symlink'
         elif stat.S_ISREG(info.st_mode):
-            total += info.st_size
+            # 16 MiB/file 与 128 MiB/source 预算只约束证据 blob 存储: 超限文件
+            # 流式哈希照记 (完整性不变), 内容不拷贝 — vendored 大数据文件
+            # (tessdata 类) 不应剥夺炉子的验收资格 (2026-11-12 实证: 19.2 MiB
+            # 的 chi_sim.traineddata.gz 让该炉永远过不了严格验收)。
             if info.st_size > 16 * 1024 * 1024 or total > 128 * 1024 * 1024:
-                raise ValueError('snapshot exceeds 16 MiB/file or 128 MiB/source budget: ' + name)
+                save_blob = False
+            else:
+                total += info.st_size
             fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, 'rb') as stream:
                 actual = os.fstat(stream.fileno())
                 if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
                     raise ValueError('source changed during snapshot: ' + name)
-                data = stream.read(16 * 1024 * 1024 + 1)
+                if save_blob:
+                    data = stream.read(16 * 1024 * 1024 + 1)
+                else:
+                    hasher = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b''):
+                        hasher.update(chunk)
+                    data = None
                 after = os.fstat(stream.fileno())
-            if len(data) != info.st_size or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+            if (len(data) if data is not None else info.st_size) != info.st_size or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
                 raise ValueError('source changed during snapshot: ' + name)
             kind = 'file'
         elif stat.S_ISDIR(info.st_mode):
@@ -218,6 +230,11 @@ def snapshot(directory, save=False):
             kind = 'gitlink'
         else:
             raise ValueError('unsupported source file: ' + name)
+        if kind == 'file' and data is None:
+            # 超限大文件: 流式哈希结果, 内容不进证据 (blob: False)
+            files[name] = {'kind': kind, 'mode': stat.S_IMODE(info.st_mode),
+                           'sha256': hasher.hexdigest(), 'size': info.st_size, 'blob': False}
+            continue
         sha = digest(data)
         files[name] = {'kind': kind, 'mode': stat.S_IMODE(info.st_mode), 'sha256': sha, 'size': len(data)}
         if save and not (blobs / sha).exists():
