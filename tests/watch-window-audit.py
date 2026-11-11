@@ -625,16 +625,26 @@ class WatchWindowAudit(unittest.TestCase):
         text = alerts.read_text() if alerts.exists() else ""
         self.assertIn("上次运行中断", text, "长静默后的启动必须留档死亡窗口")
         self.assertIn("1.0h", text, "死亡窗口时长必须可见 (小时粒度)")
-        # 新鲜启动 (无旧心跳) 不告警 — 全新安装不刷屏
+        # 新鲜启动 (无旧心跳) 不告警 — 全新安装不刷屏。
+        # 必须先终止第一实例并等锁释放: 否则第二实例锁冲突早退, 启动块从未
+        # 运行, 无告警断言空转通过 (独立审查缺陷)。
         alerts.unlink()
         hb.unlink()
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            process.wait(timeout=5)
         process2 = subprocess.Popen([str(REPO / "burn-watch.sh"), "run"], cwd=self.root,
                                     env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
         self.processes.append(process2)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not (self.root / ".codingkeeper/watchdog.heartbeat").exists():
+        # 心跳重建 = 第二实例真拿到锁并运行了启动块 + 巡逻 (非空转证据)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not hb.exists():
             time.sleep(0.05)
+        self.assertTrue(hb.exists(), "第二实例必须真获锁运行启动块 (非空转)")
         time.sleep(1)
         self.assertFalse(alerts.exists() and "上次运行中断" in alerts.read_text(),
                          "无旧心跳的全新启动不得告警")
