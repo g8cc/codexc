@@ -207,7 +207,7 @@ except Exception:
         rm -f "$HOME/.codingkeeper/cli-probe-fail-ts"
         return 0
     fi
-    date +%s > "$HOME/.codingkeeper/cli-probe-fail-ts"
+    d="$(date +%s 2>/dev/null)" && printf '%s\n' "$d" > "$HOME/.codingkeeper/cli-probe-fail-ts.tmp.$$" 2>/dev/null && mv -f "$HOME/.codingkeeper/cli-probe-fail-ts.tmp.$$" "$HOME/.codingkeeper/cli-probe-fail-ts"
     return 1
 }
 
@@ -268,7 +268,9 @@ patrol_once() {
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
-    date +%s > "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
+    # 原子写入 (tmp+mv): 非原子的 truncate→write 窗口会让读者 (守夜员/巡检)
+    # 读到空文件而误报看门狗死亡 (2026-11-12 测试实测撞上)
+    d="$(date +%s 2>/dev/null)" && printf '%s\n' "$d" > "$HOME/.codingkeeper/watchdog.heartbeat.tmp.$$" 2>/dev/null && mv -f "$HOME/.codingkeeper/watchdog.heartbeat.tmp.$$" "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true
     # 运行位自愈: launchd 从 ~/.codingkeeper/bin/ 的副本启动 (TCC: launchd 进程读不了
     # ~/Documents), 副本漂移则从仓库真源原子刷新; 新代码由主循环的翻日 exec 加载。
     if [ "$0" = "$HOME/.codingkeeper/bin/burn-watch.sh" ]; then

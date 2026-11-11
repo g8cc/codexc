@@ -525,20 +525,19 @@ class WatchWindowAudit(unittest.TestCase):
         # binary 真 entry 全程实测; exec 丢 fd 9 的事故形态下进程当场死亡。
         real_date = "/bin/date"
         fake_date = self.bin / "date"
+        # 翻转由标记文件触发 (独立审查: 全局调用计数会让翻日落在巡逻中途,
+        # DAY1/DAY2 同巡逻混杂 — 不稳定): 测试在观察到 ≥2 个完整巡逻后落
+        # 标记, 翻日只可能发生在轮次之间的检查点
         fake_date.write_text(
             "#!" + sys.executable + "\n"
             "import os, sys\n"
             "args = sys.argv[1:]\n"
-            "cf = os.environ['FAKE_DATE_COUNT']\n"
-            "n = (int(open(cf).read()) if os.path.exists(cf) else 0) + 1\n"
-            "open(cf, 'w').write(str(n))\n"
             "if args == ['+%F']:\n"
-            "    # 裸 +%F 恒返回假日 (阈值前 DAY1, 之后 DAY2) — 与墙上时钟解耦:\n"
+            "    # 裸 +%F 恒返回假日 (标记前 DAY1, 标记后 DAY2) — 与墙上时钟解耦:\n"
             "    # 否则 WATCHDOG_DAY 取真实日期, 真实日期 == DAY2 的 24h 窗口内\n"
             "    # 翻日永不触发, 事故形态空转通过 (独立审查缺陷 1)\n"
-            "    day = os.environ['FAKE_DATE_DAY1']\n"
-            "    if n > int(os.environ['FAKE_DATE_FLIP_AFTER']):\n"
-            "        day = os.environ['FAKE_DATE_DAY2']\n"
+            "    marker = os.environ['FAKE_DATE_FLIP_MARKER']\n"
+            "    day = os.environ['FAKE_DATE_DAY2'] if os.path.exists(marker) else os.environ['FAKE_DATE_DAY1']\n"
             "    print(day); sys.exit(0)\n"
             "os.execv(" + repr(real_date) + ", ['date'] + args)\n")
         fake_date.chmod(0o755)
@@ -546,8 +545,7 @@ class WatchWindowAudit(unittest.TestCase):
                     "import os, subprocess\n"
                     "t = sys.argv[1] if len(sys.argv) > 1 else '1'\n"
                     "subprocess.run(['/bin/sleep', str(float(t) * 0.001)])\n")
-        self.env.update(FAKE_DATE_COUNT=str(self.root / "date-count"),
-                        FAKE_DATE_FLIP_AFTER="12",
+        self.env.update(FAKE_DATE_FLIP_MARKER=str(self.root / "flip-marker"),
                         FAKE_DATE_DAY1="2026-11-11", FAKE_DATE_DAY2="2026-11-12")
         process = subprocess.Popen([str(REPO / "burn-watch.sh"), "run"], cwd=self.root,
                                    env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -559,26 +557,40 @@ class WatchWindowAudit(unittest.TestCase):
             time.sleep(0.05)
         self.assertTrue((self.root / ".codingkeeper/watchdog.heartbeat").exists(),
                         "首轮巡逻未启动")
-        # 跨天翻转: 假 date 计数越过阈值后 +%F 返回第二天 → 翻日检查命中 → exec
+        # 等待 ≥2 个完整巡逻 (burn-log 记账行), 然后落翻转标记:
+        # 翻日只可能发生在下一轮巡逻开始的检查点 (轮次之间, 非中途)
         deadline = time.monotonic() + 20
-        flipped = False
+        while time.monotonic() < deadline:
+            acct = self.root / ".codingkeeper/burn-log.txt"
+            if acct.exists() and len(acct.read_text().splitlines()) >= 2:
+                break
+            if process.poll() is not None:
+                self.fail("看门狗在达到 2 轮巡逻前死亡")
+            time.sleep(0.05)
+        (self.root / "flip-marker").write_text("flip")
+        hb1 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
+        # 下一轮巡逻边界的翻日检查命中 → exec 换血; 事故形态 (exec 丢 fd 9)
+        # 会在边界处死亡 (11-10 零点事故等价形态) — 断言存活即钉死该形态
+        def read_hb():
+            for _ in range(20):
+                f = self.root / ".codingkeeper/watchdog.heartbeat"
+                if f.exists() and f.read_text().strip():
+                    return int(f.read_text())
+                time.sleep(0.05)
+            return 0
+        deadline = time.monotonic() + 20
+        died = None
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                self.fail("翻日 exec 后看门狗死亡 — fd 9 继承/锁重验被破坏")
-            cf = Path(self.env["FAKE_DATE_COUNT"])
-            n = int(cf.read_text()) if cf.exists() else 0
-            if n > int(self.env["FAKE_DATE_FLIP_AFTER"]):
-                flipped = True
+                died = "翻日 exec 后看门狗死亡 — fd 9 继承/锁重验被破坏"
+                break
+            if read_hb() > hb1:
                 break
             time.sleep(0.05)
-        self.assertTrue(flipped, "跨天翻转未发生 (假 date 未越过阈值)")
-        time.sleep(2)
         self.assertIsNone(process.poll(),
                           "翻日 exec 后看门狗必须同 PID 存活 (exec 换血, 非 restart)")
-        hb1 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
-        self.assertGreater(time.time() - hb1, 0)
-        time.sleep(2.5)   # exec 后的新实例应继续巡逻 (假 sleep 千倍加速, ~0.3s 一轮)
-        hb2 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
+        self.assertIsNone(died, died or "")
+        hb2 = read_hb()
         self.assertGreater(hb2, hb1,
                            "换血后巡逻必须继续 — 存活但挂起 (心跳不推进) 的形态必须被捕获")
 
