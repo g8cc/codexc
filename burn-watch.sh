@@ -113,11 +113,20 @@ proj_alive() {  # $1=project dir — pid 文件 (每炉新鲜) 或 cwd 扫描 (�
     return 1
 }
 
-fleet_alive_count() {  # 注册炉子中活着的 runner 数 (proj_alive 走每巡逻缓存)
+fleet_alive_count() {  # 注册炉子中活着的 runner 数 — 每巡逻缓存一次 (FLEET_ALIVE_N)
+    # 惰性缓存: 首个闸门调用计算, patrol_once 入口随 PROJ_ALIVE_CWDS 重置。
+    # 不缓存则每死炉一次全表 proj_alive = O(炉数²) (实测 19 炉 3.3s/巡逻);
+    # 巡逻中复燃的增量由 FLEET_REVIVED 计入, 巡逻中 runner 死亡的少补 edge
+    # 由下一巡逻纠正 (5 分钟粒度, 既有取舍)。
+    if [ -n "${FLEET_ALIVE_N:-}" ]; then
+        echo "$FLEET_ALIVE_N"
+        return 0
+    fi
     local n=0 d
     while IFS= read -r d <&3; do
         proj_alive "$d" && n=$((n + 1))
     done 3< <(fleet_furnaces)
+    FLEET_ALIVE_N=$n
     echo "$n"
 }
 
@@ -126,10 +135,11 @@ fleet_cap_blocks() {  # 并发闸门: 活炉数 + 本巡逻已复燃数 ≥ 上�
     # 连续复燃不更新, 闸门会被缓存打穿 (2026-11-11 实证一次巡逻 12 炉齐开)。
     # 只数注册炉子 (proj_alive 逐炉比对 cwd) — 与真实舰队进程天然隔离, 可测。
     [ "${CODEXC_FLEET_MAX:-6}" -gt 0 ] || return 1
-    local alive rev
-    alive="$(fleet_alive_count)"
+    # 直接调用而非 \$( ) 子壳: 缓存变量 FLEET_ALIVE_N 必须写在父壳,
+    # 子壳赋值不回传会让缓存永不命中 (O(n²) 复现的根因)
+    fleet_alive_count
     rev="${FLEET_REVIVED:-0}"
-    [ "$((alive + rev))" -lt "${CODEXC_FLEET_MAX:-6}" ] && return 1
+    [ "$((FLEET_ALIVE_N + rev))" -lt "${CODEXC_FLEET_MAX:-6}" ] && return 1
     return 0
 }
 
@@ -265,6 +275,8 @@ patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
     FLEET_REVIVED=0       # 本巡逻已成功复燃数 — 并发闸门的增量项 (随巡逻重置)
+    FLEET_ALIVE_N=""      # 活炉计数缓存随巡逻重置 (与上同因)
+    FLEET_ALIVE_N=""      # 活炉计数缓存随巡逻重置 (与上同因)
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
