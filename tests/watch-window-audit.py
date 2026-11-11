@@ -649,6 +649,32 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertFalse(alerts.exists() and "上次运行中断" in alerts.read_text(),
                          "无旧心跳的全新启动不得告警")
 
+    def test_cli_probe_honors_zcode_cjs_env_and_alerts_missing(self):
+        # 依赖健康: ZCODE_CJS 在 zcodec/worker 均为声明项, 看门狗的凭证探测
+        # 却硬编码 App 路径 — App 更新挪位后探测静默瞎跑零诊断。修复后:
+        # ① env 尊重 (假 cjs 探测成功且被使用); ② 路径缺失 → 有界告警 + rc 1。
+        recorder = self.root / "probe-cjs.log"
+        fake_cjs = self.root / "fake.cjs"
+        fake_cjs.write_text('#!/bin/bash\nline=\'{"response":"ok","sessionId":"sess_x"}\'\nprintf \'%s\\n\' "$line" >> "$CJS_LOG"\nprintf \'%s\\n\' "$line"\n')
+        fake_cjs.chmod(0o755)
+        self.script("sqlite3", '#!/bin/bash\nprintf "0.0M\\n"\n')
+        self.env.update(ZCODE_CJS=str(fake_cjs), CJS_LOG=str(recorder))
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        result = self.run_lib_shell('cli_alive; echo "rc=$?"\n')
+        self.assertIn("rc=0", result.stdout, "env 指定的 cjs 探测应成功")
+        cjs_log = self.root / "probe-cjs.log"
+        self.assertTrue(cjs_log.exists() and '{"response":"ok"' in cjs_log.read_text(),
+                        "探测必须使用 env 指定的 cjs")
+        self.assertFalse((self.root / ".codingkeeper/cli-probe-fail-ts").exists(),
+                         "探测成功不得写失败时间戳")
+        # 路径缺失: 告警一次 + rc 1 + 失败时间戳入账 (TTL 抑制重复探测)
+        (self.root / ".codingkeeper/burn-ALERTS.txt").unlink(missing_ok=True)
+        self.env["ZCODE_CJS"] = str(self.root / "nonexistent.cjs")
+        result = self.run_lib_shell('cli_alive; echo "rc=$?"\n')
+        self.assertIn("rc=1", result.stdout)
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertIn("zcode.cjs 缺失", alerts, "cjs 缺失必须有界告警 (探测不可用的原因)")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

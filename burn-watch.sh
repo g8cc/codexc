@@ -8,7 +8,8 @@ ACCOUNT="$HOME/.codingkeeper/burn-log.txt"
 LOCKDIR="$HOME/.codingkeeper/watchdog.lock"
 DAY="$(date +%F)"
 GREP=/usr/bin/grep
-ZCJS=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+# 凭证探测的 cjs 路径尊重 ZCODE_CJS (与 zcodec/codexc-zcode-worker 同一声明)
+ZCJS="${ZCODE_CJS:-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs}"
 # This watchdog serves ZCode only. Empty/unset configuration permits 24/7;
 # an explicit availability policy is forwarded unchanged to every restart.
 CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-}"   # 默认不限制 (全天燃烧)
@@ -184,6 +185,11 @@ cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"
     failts="$(cat "$HOME/.codingkeeper/cli-probe-fail-ts" 2>/dev/null || echo 0)"
     now="$(date +%s)"
     if [ "${failts:-0}" -gt 0 ] && [ $((now - failts)) -lt "$PROBE_TTL" ]; then
+        return 1
+    fi
+    # cjs 路径缺失 (App 更新挪位/未装) → 有界告警 + 探测失败, 不静默瞎跑
+    if [ ! -f "$ZCJS" ]; then
+        alert "watchdog" "zcode.cjs 缺失 ($ZCJS) — 凭证探测不可用; 检查 ZCode.app 路径或设 ZCODE_CJS" 2>/dev/null || true
         return 1
     fi
     watch_window_open || return 125
