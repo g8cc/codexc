@@ -518,6 +518,64 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertLessEqual(launches_n, 2,
                              "死炉复燃 2/日 预算经由 ALERT 账本跨进程生效 — 恢复有界, 无超发")
 
+    def test_midnight_rollover_reexec_survives_and_keeps_patrol(self):
+        # 行为回归 (2026-11-10 零点事故): 翻日 exec 换血是"代码更新最迟一天内
+        # 生效"承诺的落地机制 — 跨天瞬间 exec 的新实例必须活着 (fd 9 继承 +
+        # 锁重验) 并继续巡逻。假 date 计数翻天 + 假 sleep 千倍加速循环, 真
+        # binary 真 entry 全程实测; exec 丢 fd 9 的事故形态下进程当场死亡。
+        real_date = "/bin/date"
+        fake_date = self.bin / "date"
+        fake_date.write_text(
+            "#!" + sys.executable + "\n"
+            "import os, sys\n"
+            "args = sys.argv[1:]\n"
+            "cf = os.environ['FAKE_DATE_COUNT']\n"
+            "n = (int(open(cf).read()) if os.path.exists(cf) else 0) + 1\n"
+            "open(cf, 'w').write(str(n))\n"
+            "if args == ['+%F'] and n > int(os.environ['FAKE_DATE_FLIP_AFTER']):\n"
+            "    print(os.environ['FAKE_DATE_DAY2']); sys.exit(0)\n"
+            "os.execv(" + repr(real_date) + ", ['date'] + args)\n")
+        fake_date.chmod(0o755)
+        self.script("sleep", "#!" + sys.executable + "\n"
+                    "import os, subprocess\n"
+                    "t = sys.argv[1] if len(sys.argv) > 1 else '1'\n"
+                    "subprocess.run(['/bin/sleep', str(float(t) * 0.001)])\n")
+        self.env.update(FAKE_DATE_COUNT=str(self.root / "date-count"),
+                        FAKE_DATE_FLIP_AFTER="12",
+                        FAKE_DATE_DAY1="2026-11-11", FAKE_DATE_DAY2="2026-11-12")
+        process = subprocess.Popen([str(REPO / "burn-watch.sh"), "run"], cwd=self.root,
+                                   env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        self.processes.append(process)
+        # 第一轮巡逻: 心跳出现即入循环
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not (self.root / ".codingkeeper/watchdog.heartbeat").exists():
+            time.sleep(0.05)
+        self.assertTrue((self.root / ".codingkeeper/watchdog.heartbeat").exists(),
+                        "首轮巡逻未启动")
+        # 跨天翻转: 假 date 计数越过阈值后 +%F 返回第二天 → 翻日检查命中 → exec
+        deadline = time.monotonic() + 20
+        flipped = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail("翻日 exec 后看门狗死亡 — fd 9 继承/锁重验被破坏")
+            cf = Path(self.env["FAKE_DATE_COUNT"])
+            n = int(cf.read_text()) if cf.exists() else 0
+            if n > int(self.env["FAKE_DATE_FLIP_AFTER"]):
+                flipped = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(flipped, "跨天翻转未发生 (假 date 未越过阈值)")
+        time.sleep(2)
+        self.assertIsNone(process.poll(),
+                          "翻日 exec 后看门狗必须同 PID 存活 (exec 换血, 非 restart)")
+        hb1 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
+        self.assertGreater(time.time() - hb1, 0)
+        time.sleep(2.5)   # exec 后的新实例应继续巡逻 (心跳持续推进)
+        hb2 = int((self.root / ".codingkeeper/watchdog.heartbeat").read_text())
+        self.assertGreaterEqual(hb2, hb1, "换血后巡逻必须继续 (心跳不得回退)")
+        self.assertLess(time.time() - hb2, 300, "换血后心跳停滞 — 新实例未巡逻")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")
