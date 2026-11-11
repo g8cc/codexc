@@ -348,25 +348,19 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertEqual(alerts.count("巡逻跳过"), 2, "恰两条空白条目各留档一次 (按日去重)")
 
     def test_fleet_concurrency_cap_blocks_revive(self):
-        # 操作者指令 (2026-11-11): 并发上限 5, 不许 18 炉齐开。闸门是机械规则:
-        # 活 runner 数 ≥ 上限时, 死炉与审核 park 都不得复燃 (park 保留防丢状态)
-        furnace = self.scaffold(self.project("capped-furnace"))
-        (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
-        other_a = self.projects / "busy-a"
-        other_b = self.projects / "busy-b"
-        for d in (other_a, other_b):
-            d.mkdir(parents=True)
+        # 操作者指令 (2026-11-11): 并发上限 5, 不许 18 炉齐开。闸门必须实时计数:
+        # 同一巡逻内连续复燃时, 缓存计数不更新会让闸门被打穿 (2026-11-11 实证
+        # 12 炉齐开)。这里上限 2、三炉全死 — 恰好复燃 2 个, 第三个被实时闸门拦下
+        for name in ("cap-a", "cap-b", "cap-c"):
+            self.scaffold(self.project(name))
+        registry = self.root / ".codingkeeper/projects"
+        registry.write_text("\n".join(str(self.projects / n) for n in ("cap-a", "cap-b", "cap-c")) + "\n")
         self.env["CODEXC_FLEET_MAX"] = "2"
         self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
-        body = (
-            '( cd "$BUSY_A" && exec -a "codexc-headless run" sleep 30 ) >/dev/null 2>&1 &\n'
-            '( cd "$BUSY_B" && exec -a "codexc-headless run" sleep 30 ) >/dev/null 2>&1 &\n'
-            'sleep 0.8\n'
-            'patrol_once\n')
-        self.env.update(BUSY_A=str(other_a), BUSY_B=str(other_b))
-        self.run_lib_shell(body)
-        self.assertFalse((self.root / "launches").exists(),
-                         "并发已达上限时不得复燃任何炉子")
+        self.run_lib_shell("patrol_once\n")
+        launches = (self.root / "launches").read_text().splitlines()
+        self.assertEqual(len(launches), 2,
+                         "上限 2: 同一巡逻内连续复燃, 第三个必须被实时计数拦下")
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertIn("并发已满", alerts, "闸门触发必须留档 (按日去重, 不刷屏)")
 
@@ -383,6 +377,29 @@ class WatchWindowAudit(unittest.TestCase):
         self.run_lib_shell("patrol_once\n")
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertIn("磁盘仅剩", alerts, "低水位必须告警")
+
+    def test_proj_alive_survives_non_utf8_cmdlines(self):
+        # macOS pgrep -f 会对含非法字节序列的进程 cmdline 整体报错弃扫
+        # ("illegal byte sequence") — 舰队 runner 的任务参数带中文/二进制时,
+        # 一个坏进程就让判活全灭 (全部误判死 → 复燃失控)。扫描必须字节透明。
+        furnace = self.scaffold(self.project("byte-furnace"))
+        (self.root / ".codingkeeper/projects").write_text(str(furnace.parent) + "\n")
+        subprocess.Popen([b'/bin/bash', b'-c',
+                          b'exec -a "codexc-headless run\xff" sleep 30'],
+                         cwd=str(furnace.parent), env=self.env, start_new_session=True)
+        deadline = time.monotonic() + 5
+        seen = False
+        while time.monotonic() < deadline:
+            probe = subprocess.run(['ps', 'ax', '-o', 'command='], capture_output=True)
+            if b'codexc-headless run\xff' in probe.stdout:
+                seen = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(seen, '带非法字节的 runner 必须真实存在 (装置自检)')
+        result = self.run_lib_shell(
+            'proj_alive "$HOME/Documents/work/code/AI/AIworkspace/byte-furnace"; echo "alive=$?"')
+        self.assertIn("alive=0", result.stdout,
+                      "非法字节 cmdlines 不得让判活扫描弃扫 — 活炉必须被识别")
 
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")

@@ -90,7 +90,10 @@ PROJ_ALIVE_CWDS=""   # 一次巡逻只扫一次 runner cwd (pgrep+lsof 是 O(炉
 proj_alive_scan() {  # 惰性: 首个 pid 文件未命中的炉子触发; patrol_once 入口重置 — 每周期新鲜
     local rpid rcwd
     PROJ_ALIVE_CWDS=" "
-    for rpid in $(pgrep -f 'codexc-headless run' 2>/dev/null); do
+    # pgrep -f 会对含非法字节的进程 cmdline 整体报错弃扫 ("illegal byte
+    # sequence", 舰队 runner 的中文任务参数即可触发) — 用 LC_ALL=C ps+awk
+    # 字节透明枚举; [c] 类括号自排除, 避免匹配到枚举进程自身
+    for rpid in $(LC_ALL=C ps ax -o pid=,command= 2>/dev/null | LC_ALL=C awk '/[c]odexc-headless run/ { print $1 }'); do
         rcwd="$(lsof -a -p "$rpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
         rcwd="$(cd "$rcwd" 2>/dev/null && pwd -P)" || continue
         PROJ_ALIVE_CWDS="$PROJ_ALIVE_CWDS$rcwd "
@@ -106,10 +109,23 @@ proj_alive() {  # $1=project dir — pid 文件 (每炉新鲜) 或 cwd 扫描 (�
     return 1
 }
 
-fleet_cap_blocks() {  # 并发闸门: 活 runner 数 ≥ 上限时返回 0 (跳过复燃); 0=不限
+fleet_alive_count() {  # 注册炉子中活着的 runner 数 (proj_alive 走每巡逻缓存)
+    local n=0 d
+    while IFS= read -r d <&3; do
+        proj_alive "$d" && n=$((n + 1))
+    done 3< <(fleet_furnaces)
+    echo "$n"
+}
+
+fleet_cap_blocks() {  # 并发闸门: 活炉数 + 本巡逻已复燃数 ≥ 上限 → block。
+    # 必须加 FLEET_REVIVED 增量 — 活炉计数是巡逻开始时的缓存, 同一巡逻内
+    # 连续复燃不更新, 闸门会被缓存打穿 (2026-11-11 实证一次巡逻 12 炉齐开)。
+    # 只数注册炉子 (proj_alive 逐炉比对 cwd) — 与真实舰队进程天然隔离, 可测。
     [ "${CODEXC_FLEET_MAX:-5}" -gt 0 ] || return 1
-    set -- $PROJ_ALIVE_CWDS
-    [ "$#" -lt "${CODEXC_FLEET_MAX:-5}" ] && return 1
+    local alive rev
+    alive="$(fleet_alive_count)"
+    rev="${FLEET_REVIVED:-0}"
+    [ "$((alive + rev))" -lt "${CODEXC_FLEET_MAX:-5}" ] && return 1
     return 0
 }
 
@@ -244,6 +260,7 @@ cleanup_probe_sessions() {
 patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
+    FLEET_REVIVED=0       # 本巡逻已成功复燃数 — 并发闸门的增量项 (随巡逻重置)
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
@@ -282,6 +299,7 @@ patrol_once() {
                     fi
                     rm -f "$d/.codingkeeper/loop.halt"
                     if revive "$d"; then
+                        FLEET_REVIVED=$((FLEET_REVIVED + 1))
                         echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
                     else
                         alert "$proj" "复燃失败(rc=$?) — runner 未拉起, 每 5 分钟继续重试; 检查 zcodec/时段/TCC (留档按日去重)"
@@ -310,6 +328,7 @@ patrol_once() {
             continue
         fi
         if revive "$d"; then
+            FLEET_REVIVED=$((FLEET_REVIVED + 1))
             echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (${reason:0:50})" >> "$ALERT"
         else
             alert "$proj" "复燃失败(rc=$?) — runner 未拉起, 每 5 分钟继续重试; 检查 zcodec/时段/TCC (留档按日去重)"
