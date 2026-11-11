@@ -601,6 +601,44 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertGreater(hb2, hb1,
                            "换血后巡逻必须继续 — 存活但挂起 (心跳不推进) 的形态必须被捕获")
 
+    def test_startup_logs_death_gap_after_long_silence(self):
+        # 可观测性 (2026-11-11 事故): 看门狗死亡本身零痕迹 (心跳只是变陈旧),
+        # 死亡窗口需人工考古。启动时读旧心跳, 中断 >20 分钟即落一条
+        # "启动: 距上次心跳 Xh" 到告警账本 — 下次重启直接写明死亡窗口。
+        stale_ts = int(time.time()) - 3600   # 1 小时前的心跳 = 死亡 1 小时
+        hb = self.root / ".codingkeeper/watchdog.heartbeat"
+        hb.parent.mkdir(parents=True, exist_ok=True)
+        hb.write_text(str(stale_ts))
+        process = subprocess.Popen([str(REPO / "burn-watch.sh"), "run"], cwd=self.root,
+                                   env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        self.processes.append(process)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not (self.root / ".codingkeeper/watchdog.heartbeat").exists():
+            time.sleep(0.05)
+        alerts = self.root / ".codingkeeper/burn-ALERTS.txt"
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if alerts.exists() and "上次运行中断" in alerts.read_text():
+                break
+            time.sleep(0.05)
+        text = alerts.read_text() if alerts.exists() else ""
+        self.assertIn("上次运行中断", text, "长静默后的启动必须留档死亡窗口")
+        self.assertIn("1.0h", text, "死亡窗口时长必须可见 (小时粒度)")
+        # 新鲜启动 (无旧心跳) 不告警 — 全新安装不刷屏
+        alerts.unlink()
+        hb.unlink()
+        process2 = subprocess.Popen([str(REPO / "burn-watch.sh"), "run"], cwd=self.root,
+                                    env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        self.processes.append(process2)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not (self.root / ".codingkeeper/watchdog.heartbeat").exists():
+            time.sleep(0.05)
+        time.sleep(1)
+        self.assertFalse(alerts.exists() and "上次运行中断" in alerts.read_text(),
+                         "无旧心跳的全新启动不得告警")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

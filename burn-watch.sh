@@ -508,6 +508,18 @@ sleeper=""
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null' EXIT
+# 死亡窗口留档 (启动一次性): 旧心跳存在且中断 >20 分钟 = 上次运行异常终止,
+# 落一条 "距上次心跳 Xh" 到告警账本 — 死亡本身零痕迹 (SIGKILL 无法自述),
+# 由下一次启动补述; 新鲜/全新启动低于阈值不告警 (操作者重启不刷屏)
+prev_hb="$(cat "$HOME/.codingkeeper/watchdog.heartbeat" 2>/dev/null || true)"
+if [ -n "$prev_hb" ]; then
+    gap_s=$(( $(date +%s) - prev_hb ))
+    if [ "$gap_s" -gt 1200 ]; then
+        gap_h="$(awk -v s="$gap_s" 'BEGIN { printf "%.1f", s / 3600 }')"
+        alert "watchdog" "启动: 距上次心跳 ${gap_h}h (上次运行中断 ${gap_s}s) — 检查死亡原因 (磁盘满/provider/被杀)" 2>/dev/null || true
+    fi
+fi
+
 while :; do
     # 零点翻日 = re-exec 换血: 仓库代码更新最迟一天内自动生效。
     # 必须在主循环 (fd 9 开启) 做, 不能放 patrol_once — 那里以 9>&- 运行, exec 出的
