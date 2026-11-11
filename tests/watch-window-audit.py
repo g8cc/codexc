@@ -454,6 +454,34 @@ class WatchWindowAudit(unittest.TestCase):
         self.assertIsNone(re.search(r'(?<!\\)"; (?:do shell script|touch )', osa),
                           "osascript 参数中不得出现未转义引号逃逸")
 
+    def test_backslash_basename_budget_is_literal(self):
+        # 独立审查: awk -v 会对赋值做转义处理 (\b → 退格), 与 ALERT 里的字面
+        # 行永不相等 → 预算永不命中 → 反斜杠炉名的 park 每 5 分钟无限复燃
+        # (与有界 1/日 直接相悖)。键必须字面传递 (ENVIRON), 配额与审核两分支同修。
+        bs = self.scaffold(self.project("bs\\bfurnace"))       # basename 含字面反斜杠
+        rv = self.scaffold(self.project("rv\\bfurnace"))
+        registry = self.root / ".codingkeeper/projects"
+        registry.write_text(str(bs.parent) + "\n" + str(rv.parent) + "\n")
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        launches = self.root / "launches"
+        # 配额分支: 1/日 — 两轮巡逻恰一次复燃
+        (bs / "loop.halt").write_text("model quota exhausted\n")
+        self.run_lib_shell("patrol_once\n")
+        (bs / "loop.halt").write_text("model quota exhausted\n")
+        self.run_lib_shell("patrol_once\n")
+        # 审核分支: 2/日 — 三轮巡逻 (每轮前重写 halt) 恰两次复燃
+        for _ in range(3):
+            (rv / "loop.halt").write_text("review rounds exhausted\n")
+            self.run_lib_shell("patrol_once\n")
+        quota_n = sum(1 for l in (self.root / ".codingkeeper/burn-ALERTS.txt").read_text().splitlines()
+                      if "配额复燃#" in l)
+        review_n = sum(1 for l in (self.root / ".codingkeeper/burn-ALERTS.txt").read_text().splitlines()
+                       if "复燃#rv" in l)
+        total = len(launches.read_text().splitlines())
+        self.assertEqual((quota_n, review_n, total), (1, 2, 3),
+                         "预算键必须字面命中: 配额 1/日 + 审核 2/日, 总发射 3 "
+                         "(转义 bug 时键永不命中 → 2+3=5 次无限复燃)")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

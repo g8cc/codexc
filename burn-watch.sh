@@ -288,7 +288,8 @@ patrol_once() {
                     # 模型日额度 park: 额度按日重置 — 跨日后有界自动复燃 (1/日),
                     # 否则每晚额度刷新时整队睡死 (2026-11-11 实证 4 炉配额 park
                     # 过夜)。套餐未激活/人工类 park 仍走 *) 人工分支。
-                    qcount="$(awk -v day="$DAY" -v key="配额复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+                    # awk -v 与 前缀赋值 都会对值做转义 (\b→退格) — 键必须走 ENVIRON 字面传递
+                    qcount="$(day="$DAY" key="配额复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
                     qcount=${qcount:-0}
                     if [ "$qcount" -ge 1 ]; then
                         alert "$proj" "配额复燃超限(1/日) — 留档待人 (最后park: ${halt_reason:0:40})"
@@ -309,7 +310,7 @@ patrol_once() {
                 *"review rounds exhausted"*|*"review output unparseable"*)
                     # 审核类 park 有界自动复燃: 夜间不再整夜停摆。
                     # 预算与退出类复燃共用 2/日; 超限 = 同一叶子反复被拒, 留档待人。
-                    rcount="$(awk -v day="$DAY" -v key="复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+                    rcount="$(day="$DAY" key="复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
                     rcount=${rcount:-0}
                     if [ "$rcount" -ge 2 ]; then
                         alert "$proj" "复燃超限(2) — 审核 park 留档待人 (最后park: ${halt_reason:0:40})"
@@ -339,7 +340,7 @@ patrol_once() {
         reason="runner exited without a halt"
         # 统一有界复燃: 每项目每日 2 次 (不依赖全局日志归因, 对一切 park 类生效);
         # 超限 = 同一问题反复出现, 真问题留档待人, 防坏叶无限烧
-        rcount="$(awk -v day="$DAY" -v key="复燃#$proj#" 'index($0, day " ") == 1 && index($0, key) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+        rcount="$(day="$DAY" key="复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
         rcount=${rcount:-0}
         if [ "$rcount" -ge 2 ]; then
             alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"
