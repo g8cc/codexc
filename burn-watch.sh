@@ -119,7 +119,6 @@ fleet_alive_count() {  # 注册炉子中活着的 runner 数 — 每巡逻缓存
     # 巡逻中复燃的增量由 FLEET_REVIVED 计入, 巡逻中 runner 死亡的少补 edge
     # 由下一巡逻纠正 (5 分钟粒度, 既有取舍)。
     if [ -n "${FLEET_ALIVE_N:-}" ]; then
-        echo "$FLEET_ALIVE_N"
         return 0
     fi
     local n=0 d
@@ -127,7 +126,6 @@ fleet_alive_count() {  # 注册炉子中活着的 runner 数 — 每巡逻缓存
         proj_alive "$d" && n=$((n + 1))
     done 3< <(fleet_furnaces)
     FLEET_ALIVE_N=$n
-    echo "$n"
 }
 
 fleet_cap_blocks() {  # 并发闸门: 活炉数 + 本巡逻已复燃数 ≥ 上限 → block。
@@ -275,7 +273,6 @@ patrol_once() {
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
     FLEET_REVIVED=0       # 本巡逻已成功复燃数 — 并发闸门的增量项 (随巡逻重置)
-    FLEET_ALIVE_N=""      # 活炉计数缓存随巡逻重置 (与上同因)
     FLEET_ALIVE_N=""      # 活炉计数缓存随巡逻重置 (与上同因)
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)

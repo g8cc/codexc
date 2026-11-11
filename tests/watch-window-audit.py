@@ -358,12 +358,19 @@ class WatchWindowAudit(unittest.TestCase):
         registry.write_text("\n".join(str(self.projects / n) for n in ("cap-a", "cap-b", "cap-c")) + "\n")
         self.env["CODEXC_FLEET_MAX"] = "2"
         self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
-        self.run_lib_shell("patrol_once\n")
+        result = self.run_lib_shell("patrol_once\n")
         launches = (self.root / "launches").read_text().splitlines()
         self.assertEqual(len(launches), 2,
                          "上限 2: 同一巡逻内连续复燃, 第三个必须被实时计数拦下")
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertIn("并发已满", alerts, "闸门触发必须留档 (按日去重, 不刷屏)")
+        # P1 回归 (独立审查): fleet_alive_count 直调用后 echo 泄漏进 ALERT
+        # (patrol stdout 全量重定向) — 每死炉每次闸门调用一行裸数字,
+        # 最坏 19 死炉 = ~5470 行/天, 且加速挤出预算账本 (预算 grep 此文件)
+        # 测试世界: run_lib_shell 捕获 patrol stdout — 泄漏的裸数字落在这里;
+        # 生产世界经 >> "$ALERT" 落告警账本, 两处都是禁止模式
+        bare = [l for l in result.stdout.splitlines() if re.fullmatch(r"[0-9]+", l.strip())]
+        self.assertEqual(bare, [], "巡逻 stdout 不得泄漏裸数字行 (计数走变量)")
 
     def test_disk_watch_alerts_on_low_space(self):
         # 操作者指令 (2026-11-11): 磁盘纳入监控 — 可用空间低于阈值时每日告警
