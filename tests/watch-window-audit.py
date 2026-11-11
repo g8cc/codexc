@@ -667,7 +667,8 @@ class WatchWindowAudit(unittest.TestCase):
                         "探测必须使用 env 指定的 cjs")
         self.assertFalse((self.root / ".codingkeeper/cli-probe-fail-ts").exists(),
                          "探测成功不得写失败时间戳")
-        # 路径缺失: 告警一次 + rc 1 + 失败时间戳入账 (TTL 抑制重复探测)
+        # 路径缺失: 告警一次 + rc 1 — 无探测会话产生, fail-ts (TTL 抑制) 不适用;
+        # 噪声由告警按 key 每日去重兜底
         (self.root / ".codingkeeper/burn-ALERTS.txt").unlink(missing_ok=True)
         self.env["ZCODE_CJS"] = str(self.root / "nonexistent.cjs")
         result = self.run_lib_shell('cli_alive; echo "rc=$?"\n')
