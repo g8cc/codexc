@@ -389,7 +389,9 @@ gate_run() {  # $1=outfile; 0=pass
     return "$rc"
 }
 
-gate_tail() { tr '\n' ' ' < "$1" | tail -c 500; }
+gate_tail() { tr '\n' ' ' < "$1" | tail -c 500 | LC_ALL=C iconv -c -f UTF-8 -t UTF-8; }
+# iconv -c: gate 输出可能含非法 UTF-8 字节 (测试工具吐二进制) — 原样嵌入下一轮
+# 提示词会让 worker argv 带毒, 全机器 pgrep -f 瘫痪 (2026-11-11 实证)
 
 parse_bugs() {  # only a complete verdict line, with a bounded decimal count
     python3 - "$1" <<'PYBUGS'
@@ -542,7 +544,7 @@ review_collect() {  # Direct call only: command substitution defers TERM traps.
     return "$review_rc"
 }
 
-review_tail() { LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600; }
+review_tail() { LC_ALL=C tr -d '\000' < "$1" | tr '\n' ' ' | tail -c 600 | LC_ALL=C iconv -c -f UTF-8 -t UTF-8; }
 
 result_marker() {  # only the final nonempty line may complete the protocol
     python3 - "$1" <<'PYMARK'
