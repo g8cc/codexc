@@ -482,6 +482,27 @@ class WatchWindowAudit(unittest.TestCase):
                          "预算键必须字面命中: 配额 1/日 + 审核 2/日, 总发射 3 "
                          "(转义 bug 时键永不命中 → 2+3=5 次无限复燃)")
 
+    def test_blank_registry_line_and_garbage_env_fall_back_cleanly(self):
+        # 边界: ① 注册表空行/尾空行 (编辑器常态) 不得产生空路径死条目告警;
+        # ② CODEXC_FLEET_MAX/CODEXC_DISK_MIN_GB 手滑非数字 → 兜底默认值,
+        #    磁盘监控保持有效, 不许每巡逻刷 stderr 整数表达式错误
+        furnace = self.scaffold(self.project("edge-furnace"))
+        (self.root / ".codingkeeper/projects").write_text(
+            str(furnace.parent) + "\n\n")          # 尾随空行
+        self.env["CODEXC_FLEET_MAX"] = "abc"
+        self.env["CODEXC_DISK_MIN_GB"] = "abc"
+        self.script("df", '#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+                    'echo "/dev/disk1s2 466 466 8192 100% /"\n')   # 可用 8KiB — 低水位必告警
+        self.clock.write_text(str(epoch("2026-11-05T23:00:00")))
+        result = self.run_lib_shell("patrol_once\n")
+        self.assertNotIn("integer expression", result.stderr,
+                         "非数字环境变量不得每巡逻刷算术错误")
+        self.assertNotIn("目录不存在 — 巡逻跳过 (除名或补目录): \n", (self.root / ".codingkeeper/burn-ALERTS.txt").read_text(),
+                         "空行不得产生空路径死条目告警")
+        alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
+        self.assertIn("磁盘仅剩 0 GiB", alerts,
+                      "垃圾阈值必须兜底回默认 (10) — 磁盘监控不得静默失效")
+
     def test_watchdog_defaults_to_unrestricted_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")

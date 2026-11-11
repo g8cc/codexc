@@ -27,6 +27,9 @@ fi
 FLEET_EXCLUDE="test"
 CODEXC_FLEET_MAX="${CODEXC_FLEET_MAX:-6}"       # 并发目标: 看门狗把活炉补足到该数 (低于即复燃); 0=不限
 CODEXC_DISK_MIN_GB="${CODEXC_DISK_MIN_GB:-10}"  # HOME 所在卷可用 GiB 低于此值时每日告警
+# 非数字手滑兜底回默认 (否则每巡逻刷 integer expression 错误且磁盘监控静默失效)
+case "${CODEXC_FLEET_MAX}" in ''|*[!0-9]*) CODEXC_FLEET_MAX=6 ;; esac
+case "${CODEXC_DISK_MIN_GB}" in ''|*[!0-9]*) CODEXC_DISK_MIN_GB=10 ;; esac
 fleet_furnaces() {
     local p
     [ -f "$HOME/.codingkeeper/projects" ] || return 0
