@@ -196,3 +196,5 @@ rm -f ~/Library/LaunchAgents/com.codexc.daily.plist
 `codexc-review-leaf` 是共享审查适配器：ZCode 使用全新会话、plan 模式和已知写/执行/委托工具禁用；Codex 使用只读沙箱。ZCode 没有工具允许列表或操作系统沙箱，未知插件并不受这份禁用列表全面约束；候选校验提供额外变更检测。`auto` 固定使用 Codex，不再发送计费 ping 或自动改用另一计费渠道。适配器应由 runner 调用，以获得超时、时窗和进程组清理。
 
 95 项质量目录用于选择有证据、有价值的检查，不是必须逐项执行的待办。已有实现先验收；已有等价测试引用证据；无缺陷不制造提交；实机或浏览器依赖缺失时保留待验收。见 [本轮叶子审计](docs/LEAF-AUDIT-2026-11-05.md)。
+
+停炉自愈（2026-11-12 起）: 看门狗每 5 分钟巡逻，活炉低于 `CODEXC_FLEET_MAX`（默认 6）自动从备池复燃补足；"model quota exhausted" 的 park 在跨日额度刷新后有界自动复燃（1/日）；看门狗中断超过 20 分钟后的下一次启动会向告警账本留档死亡窗口（`burn-ALERTS.txt`）；夜间巡检每 30 分钟检查看门狗生死并按上述规则补炉（留痕 `~/.codingkeeper/overnight-watch.log`）。`worker auth failure` 与完整性类 park 仍等待人工处理。
