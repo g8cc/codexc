@@ -40,26 +40,36 @@ def evaluate(window, timezone='Asia/Shanghai', now=None):
         local = dt.datetime.fromtimestamp(instant, zone)
     except (ValueError, TypeError, OverflowError, OSError):
         return decision(False, reason='invalid_clock')
-    # 周末套餐全天开放 (2026-11-07 用户确认): Sat/Sun 不受 23:00-09:00 窗口限制;
-    # 工作日的 overnight 窗 (Fri 23:00 → Sat 09:00 / Sun 23:00 → Mon 09:00) 由下方
-    # 区间逻辑自然覆盖 — Fri/Sun 起始的 overnight 区间跨进周末早晨仍按窗口放行
-    if local.weekday() >= 5:
-        return decision(True, reason='weekend')
     overnight = (sh, sm) > (eh, em)
     intervals = []
+    rechecks = []
     try:
-        for delta in (-1, 0, 1, 2):
+        for delta in range(-2, 10):
             start_date = local.date() + dt.timedelta(days=delta)
             end_date = start_date + dt.timedelta(days=1 if overnight else 0)
             start = dt.datetime.combine(start_date, dt.time(sh, sm), zone)
             end = dt.datetime.combine(end_date, dt.time(eh, em), zone)
             intervals.append((int(start.timestamp()), int(end.timestamp())))
+            rechecks.append(int(start.timestamp()))
+            if start_date.weekday() >= 5:
+                start = dt.datetime.combine(start_date, dt.time(), zone)
+                end = dt.datetime.combine(start_date + dt.timedelta(days=1), dt.time(), zone)
+                intervals.append((int(start.timestamp()), int(end.timestamp())))
+                rechecks.append(int(start.timestamp()))
     except (ValueError, OverflowError, OSError):
         return decision(False, reason='invalid_clock')
-    next_open = min((start for start, _ in intervals if start > instant), default=0)
-    for start, end in intervals:
+    # Merge adjoining weekend/daily windows. Fri night continues until Mon
+    # morning, and a Sunday worker receives a real Mon cutoff, not deadline=0.
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    next_open = min((start for start in rechecks if start > instant), default=0)
+    for start, end in merged:
         if start <= instant < end:
-            return decision(True, end, next_open)
+            return decision(True, end, next_open, 'weekend' if local.weekday() >= 5 else 'allowed')
     return decision(False, next_open=next_open, reason='outside_window')
 
 

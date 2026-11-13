@@ -128,7 +128,8 @@ def run_cli(lane, prompt, directory):
             cjs = os.environ.get('ZCODE_CJS') or ZCODE_DEFAULT
             if not Path(cjs).is_file():
                 raise ReviewError('ZCODE_CJS does not name an existing CLI file')
-            command = ['node', cjs, '--prompt', prompt, '--cwd', str(Path.cwd()),
+            command = [sys.executable, str(Path(__file__).resolve().with_name('ck-zcode-session.py')),
+                       'exec', cjs, 'node', cjs, '--prompt', prompt, '--cwd', str(Path.cwd()),
                        '--mode', 'plan', '--json', '--no-color',
                        '--disallowed-tools', ' '.join(DISALLOWED_TOOLS),
                        '--toolsearch-mode', 'off', '--workflow-mode', 'disabled']

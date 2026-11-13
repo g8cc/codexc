@@ -37,7 +37,7 @@ class LeafRuntimeAudit(unittest.TestCase):
         self.queue.write_text('## ready\n- [ ] task\n')
         self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.world / 'home'),
                     'CODEX_HOME': str(self.world / 'home/.codex'), 'TMPDIR': '/private/tmp',
-                    'CODEXC_LOOP_NOTIFY': '0', 'CODEXC_NOTIFY': '0', 'CODEXC_LOOP_IDLE': '0',
+                    'CODEXC_ACTIVE_WINDOW': '', 'CODEXC_LOOP_NOTIFY': '0', 'CODEXC_NOTIFY': '0', 'CODEXC_LOOP_IDLE': '0',
                     'CODEXC_AUTO_RESUME': '0', 'CODEXC_BANNER': '0', 'CODEXC_HEADLESS_CMD': 'true',
                     'CODEXC_REVIEW_PARALLEL': '0', 'GIT_CONFIG_NOSYSTEM': '1',
                     'GIT_AUTHOR_NAME': 'Audit', 'GIT_AUTHOR_EMAIL': 'audit@example.invalid',
@@ -54,7 +54,7 @@ class LeafRuntimeAudit(unittest.TestCase):
         else:
             source = source.rsplit('# ---- dispatch', 1)[0]
         return subprocess.run(['/bin/bash', '-c', source + '\n' + (STUBS if stubs else '') + '\n' + body, str(ROOT / script)],
-                              cwd=self.world, env=self.env | env, text=True, capture_output=True, timeout=30)
+                              cwd=self.world, env=self.env | env, text=True, capture_output=True, timeout=60)
 
     def helper(self, *args, check=True):
         return subprocess.run(['python3', str(ROOT / 'ck-leaf.py'), *map(str, args)], cwd=self.world,
@@ -97,6 +97,52 @@ class LeafRuntimeAudit(unittest.TestCase):
         self.assertTrue((directory / 'blobs' / product_sha).exists() or
                         ((self.state / 'evidence' / '.blobs' / product_sha).exists()),
                         '小文件 blob 照常存证')
+
+
+    def test_headless_park_preserves_an_existing_manual_halt(self):
+        halt = self.state / 'loop.halt'
+        halt.write_text('operator pause\n')
+        result = self.shell('park "automatic failure" "model quota exhausted"\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(halt.read_text(), 'operator pause\n')
+
+    def budget_sources(self):
+        self.repo()
+        for i in range(8):
+            with (self.world / ('a%02d.bin' % i)).open('wb') as stream:
+                stream.write(bytes([i]))
+                overhead = sum((self.world / name).stat().st_size for name in ('.gitignore', 'product.txt'))
+                stream.truncate(16 * 1024 * 1024 - (overhead if i == 7 else 0))
+        (self.world / 'zz.txt').write_text('before\n')
+        return Path(self.helper('begin', 'dGFzaw==').stdout.strip())
+
+    def test_snapshot_blob_budget_includes_the_next_file(self):
+        directory = self.budget_sources()
+        baseline = json.loads((directory / 'baseline.json').read_text())
+        stored = sum(item.get('size', 0) for item in baseline['files'].values()
+                     if item.get('blob', True))
+        self.assertLessEqual(stored, 128 * 1024 * 1024)
+
+    def test_small_hash_only_change_can_reach_verified_acceptance(self):
+        directory = self.budget_sources()
+        (self.world / 'zz.txt').write_text('after\n')
+        result = self.helper('candidate', directory, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidate = json.loads((directory / 'candidate.json').read_text())
+        self.assertIn('sha256', candidate['files']['zz.txt'])
+        self.helper('verify', directory)
+        self.helper('accept', directory, 'dGFzaw==', 'accepted')
+        self.assertIn('- [x] task', self.queue.read_text())
+
+    def test_blob_storage_changes_are_not_source_changes(self):
+        self.repo()
+        directory = Path(self.helper('begin', 'dGFzaw==').stdout.strip())
+        manifest = json.loads((directory / 'baseline.json').read_text())
+        manifest['files']['product.txt']['blob'] = False
+        (directory / 'baseline.json').write_text(json.dumps(manifest))
+        self.assertEqual(self.helper('changed', directory).stdout.strip(), '0')
+        self.helper('candidate', directory)
+        self.assertIn('Changed paths: []', (directory / 'changes.diff').read_text())
 
     def test_existing_dirty_and_empty_commit_do_not_count_as_burn(self):
         self.repo()

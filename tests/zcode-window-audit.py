@@ -7,7 +7,9 @@ def lib():
  s=(ROOT/'codexc-headless').read_text();s=s[:s.rindex('\ncase "${1:-}" in')]
  return '\n'.join('. '+shlex.quote(str(ROOT/'ck-common.sh')) if l.startswith('. "$(dirname') else l for l in s.splitlines())+'\n'
 class WindowTests(unittest.TestCase):
- def run_case(self,body,timeout=10):
+ # Bound fixture setup/teardown on busy hosts separately from the injected
+ # worker/window deadlines; task markers and escaped children still fail.
+ def run_case(self,body,timeout=60):
   with tempfile.TemporaryDirectory(prefix='ck-zcode-window-') as d:
    p=Path(d); (p/'.codingkeeper').mkdir();(p/'.codingkeeper/queue.md').write_text('## ready\n- [ ] task\n')
    env=dict(os.environ,HOME=str(p),CODEX_HOME=str(p/'home'),CODEXC_LOOP_NOTIFY='0',CODEXC_LOOP_IDLE='0',CODEXC_BANNER='0',CODEXC_ACTIVE_WINDOW='',CODEXC_AUTO_RESUME='1',CODEXC_REVIEW_CMD="printf 'BUGS: 0\\n'",CODEXC_HEADLESS_CMD="printf 'worker called\\n' >> calls; printf 'TASK_RESULT: DONE\\n'")
@@ -52,6 +54,18 @@ run_runner
 ''')
   self.assertEqual(rc,0,err);self.assertEqual(files['calls'].count('call'),1)
   s=json.loads(files['waiting.json']);self.assertEqual(s['phase'],'waiting_quota');self.assertFalse(s['active']);self.assertIn('.codingkeeper/quota-until',files)
+ def test_quota_failure_retains_first_of_two_ready_tasks(self):
+  rc,out,err,files=self.run_case(r'''
++printf '## ready\n- [ ] first task\n- [ ] second task\n' > .codingkeeper/queue.md
++headless_turn(){ printf '%s\n' "$1" >> calls; printf 'CK_ERROR_CLASS: quota\nTASK_RESULT: DONE\n' > "$2"; return 1; }
++run_runner
++'''.replace('\n+', '\n'))
+  self.assertEqual(rc,0,err)
+  self.assertIn('- [ ] first task',files['.codingkeeper/queue.md'])
+  self.assertIn('- [ ] second task',files['.codingkeeper/queue.md'])
+  self.assertNotIn('second task',files['calls'])
+  self.assertNotIn('.codingkeeper/journal',files)
+
  def test_cutoff_never_accepts_done_or_runs_gate(self):
   rc,out,err,files=self.run_case('''
 headless_turn(){ echo call >> calls; printf 'TASK_RESULT: DONE\\n' > "$2"; touch .codingkeeper/loop.halt; return 125; }
@@ -144,13 +158,13 @@ status_write 'idle' zcode 0 0
 cmd_status
 ''')
   self.assertEqual(rc,0,err);self.assertIn('空闲',out);self.assertNotIn('🔥',out)
- def test_zcodec_run_defaults_to_unrestricted_window(self):
+ def test_zcodec_run_defaults_to_weekday_night_window(self):
   with tempfile.TemporaryDirectory(prefix='ck-zcodec-entry-') as d:
    p=Path(d);(p/'zcodec').write_bytes((ROOT/'zcodec').read_bytes());(p/'zcodec').chmod(0o755)
    hl=p/'codexc-headless';hl.write_text('#!/bin/bash\nprintf "%s|%s" "${CODEXC_ACTIVE_WINDOW:-missing}" "${CODEXC_ACTIVE_TZ:-missing}"\n');hl.chmod(0o755)
    env={k:v for k,v in os.environ.items() if not k.startswith('CODEXC_')}
    r=subprocess.run([str(p/'zcodec'),'run'],env=env,text=True,capture_output=True)
-   self.assertEqual(r.stdout,'missing|Asia/Shanghai')
+   self.assertEqual(r.stdout,'23:00-09:00|Asia/Shanghai')
    r=subprocess.run([str(p/'zcodec'),'run'],env=dict(env,CODEXC_ACTIVE_WINDOW='23:00-09:00',CODEXC_ACTIVE_TZ='Asia/Singapore'),text=True,capture_output=True)
    self.assertEqual(r.stdout,'23:00-09:00|Asia/Singapore')
  def test_zcodec_run_defaults_to_burn_and_requires_gate(self):

@@ -12,8 +12,10 @@
 #   ck fuel [tool]        燃料表
 #   ck init [tool]        项目脚手架
 #   ck leaves [args]      离线审计叶子队列 (--registry 查看全部登记项目)
-#   ck prompts [args]     工程燃料库 (list/show/add)
+#   ck prompts [args]     改进燃料库 (list/show/add/packs/enable/disable)
 #   ck enqueue [args]     添加队列任务 (文本/--file/--prompt)
+#   ck propose [args]     留下待人类决策的改进工单 (文本/--file)
+#   ck morning [args]     跨项目晨报 (--hours 12 / --json)
 #   ck --help             本帮助
 set -u
 
@@ -41,6 +43,12 @@ case "${1:-help}" in
         shift; exec python3 "$REPO/ck-prompts.py" "${@:-list}" ;;
     enqueue)
         shift; exec python3 "$REPO/ck-prompts.py" enqueue "$@" ;;
+    propose)
+        shift; exec python3 "$REPO/ck-prompts.py" propose "$@" ;;
+    interaction)
+        shift; exec python3 "$REPO/ck-interaction.py" "$@" ;;
+    morning)
+        shift; exec python3 "$REPO/ck-morning.py" "$@" ;;
     fuel)
         shift; exec "$REPO/codexc" fuel "$@" ;;
     init)
@@ -50,7 +58,7 @@ case "${1:-help}" in
         case "${2:-codex}" in claude) TOOL=claude ;; *) TOOL=codex ;; esac
         exec env CODEXC_TOOL="$TOOL" "$REPO/codexc-loop" init ;;
     --help|-h|help)
-        sed -n '3,18p' "$0" | sed -E 's/^# ?//'
+        sed -n '3,20p' "$0" | sed -E 's/^# ?//'
         ;;
     *)
         echo "ck: unknown command '${1:-}'" >&2

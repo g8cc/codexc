@@ -15,7 +15,8 @@
 # 本文件定义的全局: CODEX_HOME_DIR WATCHLOG TAB LOOP_TMP_FILES CK_TURN_TS
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+CK_LOG_DIR="${CODEXC_LOG_DIR:-$HOME/.codingkeeper}"
+WATCHLOG="$CK_LOG_DIR/codexc-watch.log"
 TAB="$(printf '\t')"
 LOOP_TMP_FILES=""
 # 当前任务/回合的起始 epoch — runner 在投喂时设置, 验收或复燃时清零;
@@ -52,17 +53,27 @@ ck_window_check() {  # rc 0=allowed; 125=closed/invalid/unavailable
     fi
     case "$CK_WINDOW_ALLOWED:$CK_WINDOW_REASON" in
         1:allowed) [ "$CK_WINDOW_DEADLINE" != 0 ] && return 0 ;;
-        1:weekend) return 0 ;;                                # 周末全天开放, 无截止
+        1:weekend) [ "$CK_WINDOW_DEADLINE" != 0 ] && return 0 ;;                                # 周末全天开放, 无截止
         0:outside_window) return 125 ;;
     esac
     CK_WINDOW_ALLOWED=0; CK_WINDOW_REASON=invalid_response
     return 125
 }
 
-ck_run_check() {  # a manual project halt takes precedence over clock policy
+ck_interaction_check() {
+    [ -d .codingkeeper/interactive ] || [ -L .codingkeeper/interactive ] || return 0
+    python3 "$CK_COMMON_DIR/ck-interaction.py" check >/dev/null
+}
+
+ck_run_check() {  # Manual halt and live human interaction precede clock policy
     if [ -e .codingkeeper/loop.halt ]; then
         CK_WINDOW_ALLOWED=0; CK_WINDOW_DEADLINE=0; CK_WINDOW_NEXT_OPEN=0
         CK_WINDOW_REASON=manual_stop
+        return 125
+    fi
+    if ! ck_interaction_check; then
+        CK_WINDOW_ALLOWED=0; CK_WINDOW_DEADLINE=0; CK_WINDOW_NEXT_OPEN=0
+        CK_WINDOW_REASON=user_interactive
         return 125
     fi
     ck_window_check
@@ -101,6 +112,7 @@ trim_watchlog() {
 }
 
 log() {
+    python3 "$CK_COMMON_DIR/ck-log.py" "$CK_LOG_DIR" "$CODEX_HOME_DIR" || return 1
     trim_watchlog
     (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") 2>/dev/null || return 1
     echo "$(date '+%F %T') $CK_TAG: $*" >> "$WATCHLOG"
@@ -110,11 +122,8 @@ notify() {
     [ "${CODEXC_LOOP_NOTIFY:-1}" = "1" ] || return 0
     # global popup gap: 多车道并行时防弹窗风暴 — 共享时间戳, 距上一条不足
     # CODEXC_NOTIFY_GAP 秒(默认3, 0=关)的本条直接丢弃 (通知是糖, 不是投递保证)
-    local gap="${CODEXC_NOTIFY_GAP:-3}" last now
-    case "$gap" in ''|*[!0-9]*) gap=3 ;; esac
-    # 超范围回退默认 3 — 对齐 codex 通道 normalize_uint 的拒绝-回退语义
-    # (否则 gap=99999999 会在 ck 通道压抑 ~3 年, codex 通道却照常送达)
-    [ "$gap" -gt 86400 ] && gap=3
+    local gap last now
+    gap="$(normalize_uint CODEXC_NOTIFY_GAP "${CODEXC_NOTIFY_GAP:-3}" 3 0 86400)"
     if [ "$gap" -gt 0 ]; then
         last="$(cat "$HOME/.codingkeeper/.notify-last" 2>/dev/null || echo 0)"
         case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -267,17 +276,25 @@ burn_exhaust() {
 }
 
 burn_prompt_prepare() {
-    BURN_PROMPT="$IDLE_PROMPT"; BURN_PROMPT_ID=custom
+    BURN_PROMPT="$IDLE_PROMPT"; BURN_PROMPT_ID=custom; BURN_PROMPT_TOKEN=""
     BURN_NOOP_LIMIT="$CODEXC_IDLE_PARK"
     burn_rotating || return 0
     local answer count encoded extra
-    answer="$(python3 "$CK_COMMON_DIR/ck-prompts.py" next --format tsv)" || return 1
-    IFS="$TAB" read -r BURN_PROMPT_ID count encoded extra <<< "$answer"
+    answer="$(python3 "$CK_COMMON_DIR/ck-prompts.py" next --reserve --format tsv)" || return 1
+    IFS="$TAB" read -r BURN_PROMPT_ID count encoded BURN_PROMPT_TOKEN extra <<< "$answer"
     case "$count" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$count" -ge 1 ] && [ "$count" -le 64 ] && [ -n "$encoded" ] && [ -z "$extra" ] || return 1
+    [ "$count" -ge 1 ] && [ "$count" -le 512 ] && [ -n "$encoded" ] && [ -z "$extra" ] || return 1
     BURN_PROMPT="$(python3 -c 'import base64,sys; print(base64.b64decode(sys.argv[1],validate=True).decode("utf-8"),end="")' "$encoded")" || return 1
+    case "$BURN_PROMPT_TOKEN" in *[!0-9a-f]*) return 1 ;; esac
+    [ "${#BURN_PROMPT_TOKEN}" = 32 ] || return 1
     BURN_NOOP_LIMIT=$((CODEXC_IDLE_PARK * count))
     return 0
+}
+
+burn_prompt_complete() {
+    burn_rotating || return 0
+    [ -n "${BURN_PROMPT_TOKEN:-}" ] || return 1
+    python3 "$CK_COMMON_DIR/ck-prompts.py" complete "$BURN_PROMPT_TOKEN" >/dev/null
 }
 
 leaf_begin() {
@@ -659,7 +676,8 @@ with os.fdopen(os.open(os.path.join(state, "projects.lock"), os.O_CREAT | os.O_R
     registry = os.path.join(state, "projects")
     try:
         with open(registry, encoding="utf-8") as fh:
-            entries = [os.path.realpath(p) for p in fh.read().splitlines() if p]
+            entries = [p if not p.strip() or p.lstrip().startswith("#") else os.path.realpath(p.strip())
+                       for p in fh.read().splitlines()]
     except FileNotFoundError:
         entries = []
     entries = list(dict.fromkeys(entries + [project]))

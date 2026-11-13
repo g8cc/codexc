@@ -10,6 +10,9 @@
 """
 import os
 import plistlib
+import json
+import signal
+import sys
 import subprocess
 import tempfile
 import time
@@ -22,7 +25,10 @@ HOME = Path.home()
 
 class WatchdogDeployAudit(unittest.TestCase):
     def setUp(self):
-        self.world = Path(os.environ.get('CK_TEST_TMP', '/private/tmp')) / 'ck-watchdog-deploy-selftest'
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix='ck-watchdog-deploy-',
+            dir=os.environ.get('CK_TEST_TMP') or tempfile.gettempdir())
+        self.world = Path(self.tmp.name)
         self.home = self.world / 'home'
         (self.home / '.codingkeeper').mkdir(parents=True, exist_ok=True)
         self.flock = self.home / '.codingkeeper' / 'watchdog.lock.flock'
@@ -37,12 +43,28 @@ class WatchdogDeployAudit(unittest.TestCase):
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-        if self.world.exists():
-            subprocess.run(['rm', '-rf', str(self.world)], check=False)
+                    proc.wait(timeout=5)
+        self.tmp.cleanup()
 
     def plist_args(self, path):
         with open(path, 'rb') as fh:
             return plistlib.load(fh)['ProgramArguments']
+
+    def test_fixture_worlds_are_unique_and_cleanup_preserves_other_run(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix='ck-watchdog-isolation-') as base:
+            with patch.dict(os.environ, {'CK_TEST_TMP': base}):
+                first = WatchdogDeployAudit('test_daily_plist_script_outside_documents')
+                second = WatchdogDeployAudit('test_daily_plist_script_outside_documents')
+                first.setUp(); second.setUp()
+                marker = second.world / 'other-run-marker'
+                marker.write_text('preserve')
+                try:
+                    self.assertNotEqual(first.world, second.world)
+                    first.tearDown()
+                    self.assertEqual(marker.read_text(), 'preserve')
+                finally:
+                    first.tearDown(); second.tearDown()
 
     # ---- 静态断言 (可移植) ----
 
@@ -64,8 +86,8 @@ class WatchdogDeployAudit(unittest.TestCase):
 
     def test_install_script_covers_deploy_steps(self):
         script = (ROOT / 'packaging' / 'install-watchdog.sh').read_text()
-        for needle in ('cp "$repo/burn-watch.sh"', 'cp "$repo/codexc-daily"',
-                       'cp "$repo/ck-watchdog-alive.sh"', 'bootout', 'bootstrap'):
+        for needle in ('atomic_copy "$repo/burn-watch.sh"', 'atomic_copy "$repo/codexc-daily"',
+                       'atomic_copy "$repo/ck-watchdog-alive.sh"', 'launchctl bootout', 'launchctl bootstrap'):
             self.assertIn(needle, script)
 
     def test_watchdog_alive_checker_is_fda_free(self):
@@ -174,6 +196,22 @@ class WatchdogDeployAudit(unittest.TestCase):
             self.assertIn('true', (proj_b / '.codingkeeper' / 'gate.sh').read_text(),
                           '全新项目走指定命令路径')
 
+    def test_furnace_registration_preserves_comments_and_concurrent_projects(self):
+        (self.home / '.codingkeeper/projects').write_text('# intentionally disabled\n')
+        projects = [self.world / ('project-' + str(i)) for i in range(6)]
+        children = []
+        for project in projects:
+            project.mkdir()
+            children.append(subprocess.Popen(['/bin/bash', str(ROOT / 'ck-init-furnace'), str(project), 'true'],
+                                             env={**os.environ, 'HOME': str(self.home)},
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for child in children:
+            out, err = child.communicate(timeout=20)
+            self.assertEqual(child.returncode, 0, err)
+        lines = (self.home / '.codingkeeper/projects').read_text().splitlines()
+        self.assertEqual(lines[0], '# intentionally disabled')
+        self.assertEqual(set(lines[1:]), {str(project.resolve()) for project in projects})
+
     def test_midnight_exec_lives_outside_patrol(self):
         lines = (ROOT / 'burn-watch.sh').read_text().splitlines()
         exec_lines = [i for i, l in enumerate(lines) if 'exec /bin/bash "$0" __locked-run' in l]
@@ -204,6 +242,60 @@ class WatchdogDeployAudit(unittest.TestCase):
                              f'{installed_path.name} 与 packaging 源漂移 — 重跑 packaging/install-watchdog.sh')
 
     # ---- 进程级回归: __locked-run 在 fd 9 开启 (未持锁) 时必须存活 ----
+
+    def test_real_revived_runner_does_not_inherit_watchdog_lock_descriptors(self):
+        project = self.world / 'real-revive'
+        state = project / '.codingkeeper'
+        state.mkdir(parents=True)
+        for name in ('queue.md', 'gate.sh', 'review-leaf.sh'):
+            (state / name).touch()
+        (self.home / '.codingkeeper/projects').write_text(str(project.resolve()) + '\n')
+        bindir = self.world / 'fd-bin'
+        bindir.mkdir()
+        record = self.world / 'runner-fds.json'
+        fake = bindir / 'zcodec'
+        fake.write_text('#!' + sys.executable + '\n' +
+                        'import json,os,time\nfrom pathlib import Path\n'
+                        'fds=[]\n'
+                        'for fd in range(9,13):\n'
+                        '    try: os.fstat(fd); fds.append(fd)\n'
+                        '    except OSError: pass\n'
+                        'Path(os.environ["FD_RECORD"]).write_text(json.dumps({"pid":os.getpid(),"fds":fds}))\n'
+                        'time.sleep(60)\n')
+        fake.chmod(0o755)
+        env = {**os.environ, 'HOME': str(self.home), 'PATH': str(bindir) + ':' + os.environ['PATH'],
+               'CODEXC_ACTIVE_WINDOW': '', 'BURN_WATCH_NOTIFY': '0', 'FD_RECORD': str(record)}
+        process = subprocess.Popen([str(ROOT / 'burn-watch.sh'), 'run'], cwd=project, env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        self.processes.append(process)
+        try:
+            # This includes watchdog initialization and the first patrol,
+            # separate from the descriptor ownership assertions below.
+            until = time.monotonic() + 60
+            while time.monotonic() < until and process.poll() is None:
+                if record.exists():
+                    break
+                time.sleep(.05)
+            alert = self.home / '.codingkeeper/burn-ALERTS.txt'
+            detail = alert.read_text(errors='replace')[-2000:] if alert.is_file() else ''
+            self.assertTrue(record.exists(),
+                            'real nohup must launch the fake runner (watchdog rc=' +
+                            str(process.poll()) + '): ' + detail)
+            result = json.loads(record.read_text())
+            self.assertEqual(result['fds'], [], 'runner must not inherit fd 9 or Bash save slots 10–12')
+            process.terminate()
+            process.wait(timeout=5)
+            # The long-lived runner must not retain the kernel lock after its
+            # watchdog dies; a new independent process must acquire it now.
+            check = subprocess.run([sys.executable, '-c',
+                                    'import fcntl,sys; f=open(sys.argv[1],"a+"); '
+                                    'fcntl.flock(f, fcntl.LOCK_EX|fcntl.LOCK_NB)',
+                                    str(self.flock)], capture_output=True, text=True, timeout=5)
+            self.assertEqual(check.returncode, 0, check.stderr)
+        finally:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
 
     def test_locked_run_survives_with_open_fd9(self):
         env = dict(os.environ, HOME=str(self.home))

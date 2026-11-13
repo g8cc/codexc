@@ -42,10 +42,12 @@
 #   CODEXC_REVIEW_ROUNDS   max total review runs/task   (default 6)
 #   CODEXC_REVIEW_PASS     consecutive zero-bug reviews to accept (default 2)
 #   CODEXC_LOOP_DRY        1 = log actions, never run the worker
-#   CODEXC_ACTIVE_WINDOW   HH:MM-HH:MM; unset = unrestricted (all headless entrypoints)
+#   CODEXC_ACTIVE_WINDOW   HH:MM-HH:MM; default 23:00-09:00 on weekdays, weekends open
 #   CODEXC_ACTIVE_TZ       IANA timezone for the window (default Asia/Shanghai)
 
 set -u
+
+export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
 
 CK_LANE=codexc-headless
 . "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/ck-common.sh" || { echo "codexc-headless: cannot source ck-common.sh (put it next to $0)" >&2; exit 1; }
@@ -95,7 +97,7 @@ headless_turn() {  # $1=task text $2=outfile
     command python3 "$CK_COMMON_DIR/ck-review-process.py" launch "$CK_REVIEW_GROUP_DIR" "$CK_REVIEW_GROUP_TOKEN" /bin/bash -c "$CODEXC_HEADLESS_CMD" < "$instrfile" > "$outfile" 2>&1 &
     rpid=$!
     while kill -0 "$rpid" 2>/dev/null; do
-        if [ -e .codingkeeper/loop.halt ] || { [ "$deadline" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ]; }; then
+        if [ -e .codingkeeper/loop.halt ] || ! ck_interaction_check || { [ "$deadline" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ]; }; then
             review_group_stop "$rpid"
             wait "$rpid" 2>/dev/null
             printf '\n[turn stopped: availability window closed or manual halt]\n' >> "$outfile"
@@ -188,6 +190,9 @@ PYREADQUOTA
                 rm -f .codingkeeper/quota-until || return 2
             fi
         fi
+        if [ -z "$phase" ] && ! ck_interaction_check; then
+            phase=waiting_interaction; next=0; text="用户正在交互，自动任务让位"
+        fi
         if [ -z "$phase" ]; then
             if ck_window_check; then return 0; fi
             [ "${CK_WINDOW_REASON:-}" = outside_window ] || return 2
@@ -250,7 +255,7 @@ park() {  # $1=通知文本 $2=日志原因 — 落停靠文件; mode 是 run_ru
     printf '%s\n' "$(date '+%F %T') | (park) | $2" >> ".codingkeeper/parks.log" 2>/dev/null || true
     mode="halt"
     # halt 文件携带 park 原因: 看门狗据此判定审核类 park 是否有界自动复燃
-    printf '%s' "$2" > ".codingkeeper/loop.halt"
+    python3 "$CK_COMMON_DIR/ck-leaf.py" halt "$2" || return 1
     headless_wait_status "$1" parked 0
     park_halt_ts="$(halt_signature)"
     # 瞬时类 park 标记 (供 run_runner 尾部决定是否自动复燃): 网关抖动/回合与审查超时
@@ -273,6 +278,8 @@ run_runner() {
     register_project
     # Only the owner initializes or sweeps state; another lane may be active.
     if [ ! -f ".codingkeeper/queue.md" ]; then
+        # Prepare/migrate the log before the shell opens its redirection.
+        log "auto-init: preparing project queue and gate" || return 1
         cmd_init >> "$WATCHLOG" 2>&1 || return 1
         # 与 require_gate_check 同一判据: 占位=请填真实测试; 探测成功=请核对
         if grep -q 'CK_GATE_PLACEHOLDER' ".codingkeeper/gate.sh" 2>/dev/null; then
@@ -298,7 +305,7 @@ run_runner() {
     # 一次网关故障全停; 真问题类 park (BLOCKED/gate 耗尽) 仍然退出等人。
     local mode="idle" idle_count=0 task_kind="" task="" task_b64=""
     local gate_rounds=0 review_rounds=0 zero_streak=0 fail_streak=0 empty_logged=0
-    local head_at_feed="" line dirty head_now prompt marker rc bugs marked rrc batch_count changed
+    local line prompt marker rc bugs marked rrc batch_count changed
     local park_transient=0 auto_resume=0 resume_wait=0 park_halt_ts=""
 
     review_groups_prepare || return 1
@@ -325,7 +332,7 @@ run_runner() {
             fi
             burn_fuel_check; rc=$?
             if [ "$rc" = 1 ]; then
-                headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
+                headless_wait_status "燃料已扫描完，等待新任务、源码变化或定时复查" waiting_fuel 0
                 sleep "$CODEXC_LOOP_POLL"
                 continue
             elif [ "$rc" != 0 ]; then
@@ -334,15 +341,14 @@ run_runner() {
             fi
             [ "$BURN_FUEL_STATE" != renewed ] || idle_count=0
             task_kind="idle"; task="(idle 持续改进)"; task_b64=""
-            head_at_feed="$(git rev-parse HEAD 2>/dev/null || echo none)"
             if ! burn_prompt_prepare; then
                 park "燃料库或轮换状态无效 — 请检查 prompts 和 burn-cursor.json" "invalid prompt fuel"
                 continue
             fi
             prompt="$BURN_PROMPT
 
-[idle 纪律] 只修有证据的真问题。若本轮有改动, 最终回复必须包含一行 '证据: <依据>' —
-依据 = 失败的测试名 / 可复现的缺陷步骤 / 覆盖缺口或基准的具体数字 / 可指认的缺陷代码行。
+[idle 纪律] 只做有依据的产品、用户或工程改进。若本轮有改动, 最终回复必须包含一行 '证据: <依据>' —
+依据 = 失败的测试名 / 可复现的缺陷步骤 / 覆盖缺口或基准的具体数字 / 可指认的产品流程缺口、用户阻碍或成本依据。
 无证据的风格改动、重命名、文件搬移、猜测性重构一律不做。本轮若无可证明的问题:
 不改动任何文件, 回复说明无可证问题并以 TASK_RESULT: DONE 结尾。"
             task="(idle 持续改进: $BURN_PROMPT_ID)"
@@ -413,19 +419,19 @@ run_runner() {
             continue
         fi
         # ---- idle turns must prove real work before gate/review apply:
-        # the "(idle)" claim is corroborated by a clean tree at the same
-        # commit as when the prompt was fed ----
+        # compare the current source snapshot to this turn's recorded baseline ----
         if [ "$task_kind" = "idle" ]; then
             changed="$(leaf_changed)" || { park "无法验证本轮产出" "leaf snapshot failed"; continue; }
             if [ "$changed" = 0 ]; then
+                burn_prompt_complete || { park "燃料完成状态无法保存" "fuel completion failed"; continue; }
                 idle_count=$((idle_count + 1))
                 log "idle turn $idle_count/$BURN_NOOP_LIMIT: nothing to do"
                 if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
                     if burn_rotating; then
                         burn_exhaust || { park "无法保存燃料状态" "fuel state write failed"; continue; }
                         CK_TURN_TS=0
-                        headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
-                        notify "工程燃料已扫描完，等待新任务或新 Prompt"
+                        headless_wait_status "燃料已扫描完，等待新任务、源码变化或定时复查" waiting_fuel 0
+                        notify "工程燃料已扫描完，等待新任务、源码变化或定时复查"
                     else
                     park "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
                     fi
@@ -433,29 +439,10 @@ run_runner() {
                 continue
             fi
             if ! turn_has_evidence "$outfile"; then
-                # idle 纪律: 无证据改动不落地 — 回滚到本叶基线并计为无事可做;
-                # 连续无可证问题走既有 idle-exhaustion 熄火路径, 而不是无限 churn。
-                # reset 不带 clean: 轮次产生的未跟踪新文件保留, 不碰用户未跟踪文件
-                base_head="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("head") or "")' "$CODEXC_LEAF_EVIDENCE_DIR/baseline.json" 2>/dev/null)"
-                if [ -n "$base_head" ] && git rev-parse --verify --quiet "$base_head" >/dev/null 2>&1; then
-                    if ! git reset --hard "$base_head" >/dev/null 2>&1; then
-                        park "循环挂起: 无证据改动回滚失败 — 请人工核对工作区" "no-evidence revert failed"
-                        continue
-                    fi
-                fi
-                idle_count=$((idle_count + 1))
-                printf '%s\n' "$(date '+%F %T') | (idle) | reverted: no-evidence change rolled back" >> ".codingkeeper/parks.log" 2>/dev/null || true
-                log "idle turn $idle_count/$BURN_NOOP_LIMIT: 无证据改动 — 已回滚"
-                if [ "$idle_count" -ge "$BURN_NOOP_LIMIT" ]; then
-                    if burn_rotating; then
-                        burn_exhaust || { park "无法保存燃料状态" "fuel state write failed"; continue; }
-                        CK_TURN_TS=0
-                        headless_wait_status "燃料已扫描完，等待新任务或新 Prompt" waiting_fuel 0
-                        notify "工程燃料已扫描完，等待新任务或新 Prompt"
-                    else
-                    park "锅炉熄火: 连续 $idle_count 轮无可证改进 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃" "idle exhaustion"
-                    fi
-                fi
+                # The baseline may contain user WIP. Neither HEAD nor whole-file
+                # rollback can distinguish it from this turn's changes. Preserve
+                # all code/commits and evidence, and require explicit inspection.
+                park "循环挂起: 本轮有改动但缺少证据 — 已保留工作区与提交，请核对 evidence" "idle change missing evidence; work preserved"
                 continue
             fi
             idle_count=0
@@ -574,6 +561,9 @@ run_runner() {
             if ! leaf_accept "$task_b64" "accepted after $review_rounds review round(s), gate retries $gate_rounds"; then
                 park "验收事务无法提交，任务保留待处理 — $task" "acceptance transaction failed"
                 break
+            fi
+            if [ "$task_kind" = idle ]; then
+                burn_prompt_complete || { park "已验收，但燃料进度无法保存" "accepted fuel completion failed"; break; }
             fi
             notify "任务通过验收: $task"
             banner_set "✅ 已验收: $task ｜ 燃烧继续"
@@ -720,8 +710,9 @@ IT_FAILURES=0
 cmd_selftest_integration() {
     local base root pass_total=0
     base="$(mktemp -d /tmp/codexc-hl-it.XXXXXX)" || return 1
-    CODEX_HOME_DIR="$base/home"; WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
-    export CODEX_HOME="$CODEX_HOME_DIR"
+    CODEX_HOME_DIR="$base/home"; CK_LOG_DIR="$base/home"
+    WATCHLOG="$CK_LOG_DIR/codexc-watch.log"
+    export CODEX_HOME="$CODEX_HOME_DIR" CODEXC_LOG_DIR="$CK_LOG_DIR"
     mkdir -p "$CODEX_HOME_DIR"
     export CODEXC_REVIEW_PARALLEL=0 CODEXC_AUTO_RESUME=0 CODEXC_LOOP_NOTIFY=0
     echo "(headless lane integration)"
@@ -751,7 +742,7 @@ cmd_selftest_integration() {
           echo '  EMPTY) exit 0 ;;'
           echo '  SLEEP) sleep 120 ;;'
           echo '  "IDLE-DONE") echo "无事可做 TASK_RESULT: DONE (idle)" ;;'
-          echo '  WORK) printf "real fixture improvement\n" >> README.md; echo "TASK_RESULT: DONE" ;;'
+          echo '  WORK) printf "real fixture improvement\n" >> README.md; echo "证据: fixture README.md 追加 real fixture improvement"; echo "TASK_RESULT: DONE" ;;'
           echo '  AUTHFAIL) echo "zcode turn failed (rc=1, class=auth): 该令牌已过期"; echo "CK_ERROR_CLASS: auth"; exit 1 ;;'
           echo '  QUOTAFAIL) echo "zcode turn failed (rc=1, class=quota): 429 rate limit"; echo "CK_ERROR_CLASS: quota"; exit 1 ;;'
           echo '  *) echo "did work. TASK_RESULT: $resp" ;;'
@@ -945,12 +936,12 @@ for project in projects:
     live = alive(state / "loop.pid") or alive(state / "watcher.pid")
     try: fresh = 0 <= time.time() - float(snapshot.get("ts", 0)) <= 120
     except (TypeError, ValueError, OverflowError): fresh = False
-    waiting = snapshot.get("phase") in ("waiting_window", "waiting_quota", "backoff", "waiting_fuel") and live and fresh
+    waiting = snapshot.get("phase") in ("waiting_window", "waiting_quota", "waiting_interaction", "backoff", "waiting_fuel") and live and fresh
     running = live and fresh and snapshot.get("active") is True and not waiting
     if parked:
         icon, label = "⏸", "已挂起"
     elif waiting:
-        icon, label = "◷", {"waiting_window": "等待时段", "waiting_quota": "等待配额", "backoff": "等待重试", "waiting_fuel": "等待燃料"}[snapshot["phase"]]
+        icon, label = "◷", {"waiting_window": "等待时段", "waiting_quota": "等待配额", "waiting_interaction": "用户交互让位", "backoff": "等待重试", "waiting_fuel": "等待燃料"}[snapshot["phase"]]
     else:
         icon, label = ("🔥", "任务执行中") if running else ("·", "空闲")
     ready = done = 0

@@ -116,6 +116,32 @@ def metadata(record):
                  or 'type' not in record))
 
 
+
+def cli_environment(cjs, base=None):
+    env = dict(os.environ if base is None else base)
+    key = 'ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'
+    # The bootstrap reads CONFIG_FILE; BUNDLED_CONFIG_FILE is its output.
+    # Keep an explicit input authoritative, with the earlier bundled override
+    # accepted as a compatibility seed when the actual input is absent.
+    bundled_key = 'ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE'
+    if key not in env and env.get(bundled_key, '').strip():
+        env[key] = env[bundled_key]
+    if key not in env:
+        directory = Path(cjs).resolve().parent
+        # CLI development builds use glm/provider; packaged apps keep the
+        # signed built-in config beside glm under Resources/config/provider.
+        candidates = (directory / 'provider/zcode-builtin.json',
+                      directory.parent / 'config/provider/zcode-builtin.json')
+        for path in candidates:
+            if path.is_file():
+                env[key] = str(path)
+                break
+    # Do not supply a personal path: with only the bundled seed, the SDK
+    # prepares its normal endpoint-specific active cache and personal default.
+    # Explicit provider paths, endpoint and credentials stay inherited.
+    return env
+
+
 def capture(path, out, err, resumed, command):
     pending = Path(str(path) + '.retry')
     root = resumed
@@ -134,7 +160,8 @@ def capture(path, out, err, resumed, command):
             root = sid
 
     with out.open('wb') as stdout, err.open('wb') as stderr:
-        process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+        env = cli_environment(command[1]) if len(command) > 1 and Path(command[0]).name == 'node' else None
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
         offset, buffer = 0, b''
         with out.open('rb') as source:
             while True:
@@ -193,6 +220,10 @@ def finish(path, out, resumed):
 
 def main():
     action, session, *args = sys.argv[1:]
+    if action == 'exec':
+        if not args:
+            raise ValueError('exec requires a CLI command')
+        os.execvpe(args[0], args, cli_environment(session))
     path = Path(session)
     if action == 'select':
         print(saved(path) or saved(Path(session + '.retry')), end='')

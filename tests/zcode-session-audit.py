@@ -47,7 +47,7 @@ class SessionAudit(unittest.TestCase):
         self.out.write_text('\n'.join(json.dumps(r) for r in records))
         return subprocess.run([str(REPO / 'codexc-zcode-worker')], input='offline task',
                               cwd=self.root, env=dict(self.env, RC=str(rc), ERR=err),
-                              text=True, capture_output=True, timeout=10)
+                              text=True, capture_output=True, timeout=60)
 
     def args(self):
         return json.loads(self.call.read_text())

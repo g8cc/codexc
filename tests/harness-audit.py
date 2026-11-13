@@ -31,11 +31,13 @@ class HarnessCancellationTests(unittest.TestCase):
         (self.repo / "sync-prefix2.sh").write_text("#!/bin/bash\nexit 0\n")
         self.tmux_log = self.root / "fake-tmux.jsonl"
         fake_tmux = self.root / "bin/tmux"
+        # This fixture only receives -S, a generated scratch path, kill-server.
+        # Log with shell builtins before stalling; a cold Python interpreter
+        # can itself exceed the client timeout on a heavily loaded host.
         fake_tmux.write_text(
-            "#!" + sys.executable + "\n"
-            "import json, os, sys\n"
-            "with open(os.environ['HARNESS_AUDIT_TMUX_LOG'], 'a') as out:\n"
-            "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            '#!/bin/bash\n'
+            'printf \'["%s","%s","%s"]\\n\' "$1" "$2" "$3" >> "$HARNESS_AUDIT_TMUX_LOG"\n'
+            '[ "${HARNESS_AUDIT_TMUX_STALL:-0}" != "1" ] || exec sleep 60\n'
         )
         fake_tmux.chmod(0o755)
         self.env = dict(os.environ, PATH=str(self.root / "bin") + ":" + os.environ["PATH"],
@@ -135,6 +137,24 @@ class HarnessCancellationTests(unittest.TestCase):
 
     def test_sigterm_kills_term_ignoring_grandchild_after_leader_exits(self):
         self.cancel_and_check(self.start(ignore_term_grandchild=True))
+
+    def test_cleanup_timeout_preserves_cancellation_and_reports_failure(self):
+        self.env['HARNESS_AUDIT_TMUX_STALL'] = '1'
+        self.cancel_and_check(self.start(ignore_term_grandchild=False))
+        self.assertIn('private tmux cleanup timed out', self.output_path.read_text())
+
+    def test_cleanup_timeout_cannot_turn_success_into_a_green_gate(self):
+        self.env['HARNESS_AUDIT_TMUX_STALL'] = '1'
+        runner = self.repo / 'tests/run-all'
+        runner.write_text('#!/bin/bash\nexit 0\n'); runner.chmod(0o755)
+        self.launcher = subprocess.Popen(
+            [sys.executable, str(self.repo / 'tests/isolate.py')], env=self.env,
+            stdin=subprocess.DEVNULL, stdout=self.output, stderr=subprocess.STDOUT)
+        self.assertEqual(self.launcher.wait(timeout=12), 1)
+        self.assertIn('private tmux cleanup timed out', self.output_path.read_text())
+        for line in self.output_path.read_text().splitlines():
+            if line.startswith('Test artifacts: '):
+                self.artifacts = Path(line.split(': ', 1)[1])
 
 
 class FixtureProcessIsolationTests(unittest.TestCase):

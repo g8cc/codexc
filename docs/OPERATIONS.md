@@ -161,7 +161,7 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 
 | 看什么 | 位置 |
 |---|---|
-| 全部时间线（投喂/审查/park/续命） | `~/.codex/codexc-watch.log` |
+| 全部时间线（投喂/审查/park/续命） | `~/.codingkeeper/codexc-watch.log` |
 | 每任务验收记录 | `<项目>/.codingkeeper/journal` |
 | 队列/门禁/挂起状态 | `<项目>/.codingkeeper/`；`codexc fuel` 一屏汇总 |
 | 测试回归 | `codexc-loop selftest` / `selftest-integration <tool>` / `selftest-faultinjection` / `codexc-headless selftest[-integration]` |
@@ -184,13 +184,13 @@ install 自动编译（Swift/AppKit，`desktop/CodingKeeperBar.swift`）。
 
 ## 交互会话的夜间空闲接管
 
-`codexc` 的交互 TUI 可在新加坡时间 00:00–08:00 内，连续空闲 600 秒后接入已有队列循环。`CODEXC_NIGHT_IDLE=0` 或 `--no-loop` 关闭；`CODEXC_NIGHT_IDLE`、`CODEXC_NIGHT_WINDOW`、`CODEXC_NIGHT_TZ` 分别设置空闲秒数、接管时段和时区。已有显式 loop 或定时投喂时不启动该监视器。
+`codexc` 的交互 TUI 可在新加坡时间工作日23:00–09:00或周末内，连续空闲 600 秒后接入已有队列循环。`CODEXC_NIGHT_IDLE=0` 或 `--no-loop` 关闭；`CODEXC_NIGHT_IDLE`、`CODEXC_NIGHT_WINDOW`、`CODEXC_NIGHT_TZ` 分别设置空闲秒数、接管时段和时区。已有显式 loop 或定时投喂时不启动该监视器。
 
 接管要求 pane 所有者、项目及工具匹配、Git 项目有真实 gate、没有 `loop.halt`、输入框为空且画面持续稳定；Codex、Claude、Pi 的已知输入框布局可识别，OpenCode 与未知布局暂不接管。交接前再次检查；每个交互会话只交接一次，不自动重启已暂停的循环。这里的时段限制控制交接时机，循环运行时段仍由 `CODEXC_ACTIVE_WINDOW` 和 `CODEXC_ACTIVE_TZ` 控制。
 
 ## ZCode 夜间套餐
 
-`zcodec run` 默认全天可运行；显式 `CODEXC_ACTIVE_WINDOW=23:00-09:00` 才限制为夜间，时区默认 Asia/Shanghai。到期停止受管子进程，队列只有完整验收后才修改；等待期间 runner 保持存活，但 `active=false`，不是正在执行模型任务。
+`zcodec run` 默认工作日23:00–09:00、周末全天可运行，时区默认 Asia/Shanghai（本机launchd显式Asia/Singapore，同为UTC+8）。显式空的 CODEXC_ACTIVE_WINDOW 为人工不限时覆盖。到期停止受管子进程，队列只有完整验收后才修改；等待期间 runner 保持存活，但 `active=false`，不是正在执行模型任务。
 
 配额耗尽时 `.codingkeeper/quota-until` 持久化下一次开放的 epoch；复开服务不会清除此标记。`loop.halt` 仍为人工/不可恢复错误暂停，优先于自动时段。无效时段、时区或配额标记会停止执行；排查后才清理对应状态。`burn-watch` 同样遵守窗口并保留项目 halt；它不负责清除人工暂停。
 
@@ -202,16 +202,20 @@ ZCode 的窗口不改变 `codexc-daily`（该入口仅负责 Codex）的调度�
 - `zcodec run`：默认轮换工程 Prompt 持续 burn；CODEXC_LOOP_IDLE=0 时空队列等待，占位 gate 直接挂起。正式 gate 的业务覆盖仍由项目维护者负责，不能从任意 shell 代码自动证明。
 - 续行必须缩进；待依赖的任务放 `## blocked`，已实现但缺验收的任务放 `## review-needed`。runner 不自动把依赖当完成。
 - `.codingkeeper/acceptance.pending.json` 是未提交完的验收事务。恢复会核对队列前/后内容并幂等补齐 journal/receipt；队列已被外部修改则停住供核对。不要随意删除它或手工勾选以绕过失败。
-- `.codingkeeper/evidence/<id>/` 保留任务基线、候选、输出与 receipt；blobs 按内容去重复用。默认源文件上限 16 MiB/文件、128 MiB/快照、50,000 路径，超出会明确停止；大型仓库应先界定可信验证范围，不能静默忽略文件。
+- `.codingkeeper/evidence/<id>/` 保留任务基线、候选、输出与 receipt；blobs 按内容去重复用。内容 blob 上限 16 MiB/文件、128 MiB/快照；超限文件仍流式记录完整哈希和元数据，缺内容时明确省略文本 diff。50,000 路径上限仍会停止；不能静默忽略文件。已验收历史默认保留最近 50 份，活动/pending/未验收证据和 journal 保留，见 [改进燃料](FUEL.md)。
 - ZCode `review-lane=auto` 现在直接选择 Codex；不会 ping 模型或自动换渠道。`zcode` 与 `codex` 明确选择车道。审查失败/空响应不算 BUGS: 0。
 - gate 输出中的 SKIP 不是 PASS，设备与真实浏览器结果必须独立记录。队列归档前核对 gate 是否依赖勾选数量；本次已解除 sale 的此类耦合。
 
 ## 工程燃料与受管进程
 
-`ck prompts list/show/add` 管理内置十类指令及 `.codingkeeper/prompts/*.md` 项目燃料；`ck enqueue` 接受文本、`--file` 或 `--prompt`，与验收共享锁。轮换游标持久化，任务优先于 burn；默认两遍燃料库无源文件产出后在线等待新料，不发送模型请求；新任务或项目 Prompt 变更自动恢复。验收一个队列任务后重置空转计数。自定义 CODEXC_LOOP_IDLE 文本不轮换；CODEXC_PROMPT_ROTATION=0 保留单条通用指令。
+`ck prompts list/show/add` 管理44类通用、已启用领域及 `.codingkeeper/prompts/*.md` 项目燃料；`packs/enable/disable` 查看和原子配置领域包，配置保存在 fuel-packs.json；`ck enqueue` 接受文本、`--file` 或 `--prompt`，与验收共享锁。轮换游标持久化，任务优先于 burn；默认两遍燃料库无源文件产出后在线等待新料，不发送模型请求；新任务或项目 Prompt 变更自动恢复。验收一个队列任务后重置空转计数。自定义 CODEXC_LOOP_IDLE 文本不轮换；CODEXC_PROMPT_ROTATION=0 保留单条通用指令。
 
 headless worker、gate、reviewer 使用独立的受管进程组。阶段结束先清理后台组成员再验证源码；runner 被 SIGKILL 后，监护进程发现 owner 消失会停止本组。主动创建新 session 的守护进程不属于这个进程组；需要由项目 gate/工具自身管理。headless evidence 保留 worker Prompt、输出及 burn 目标。
 
-本轮审计与验证范围：[2026-11-06 审计](AUDIT-2026-11-06.md)。
+审计与验证范围：[2026-11-12 复审与改进燃料](AUDIT-2026-11-12.md)；历史记录见 [2026-11-06 审计](AUDIT-2026-11-06.md)。
 
 默认审查器通过 Codex --output-last-message 提取最终回答，日志单独保存；最后非空行必须为 BUGS: <n>。自定义审查命令同样需遵守最终行契约，较早的 BUGS: 0 不再放行。
+
+## 改进燃料与晨报
+
+内置目录为44类通用改进燃料及17包/85类领域燃料，领域默认不启用，Agent读取实际能力后选择；具体成果称为改进工单。队列空时持续轮换；两遍无改动后在线等待，默认每小时复查，源码/燃料变化即时复燃。待人类决策的事项用 `ck propose --file decision.md` 记录到 review-needed，早晨 `ck morning` 汇总。完整规则、目录与保留策略见 [FUEL.md](FUEL.md) 和 [领域指南](FUEL-DOMAINS.md)，回归结果见 [领域扩展复审](AUDIT-FUEL-EXTENSION-2026-11-12.md)。

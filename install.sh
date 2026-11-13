@@ -38,6 +38,10 @@ link() {  # link <src> <dest>
 echo "==== scripts ===="
 link "$HERE/ck" "$CODEX_BIN_DIR/ck"
 link "$HERE/ck-common.sh" "$CODEX_BIN_DIR/ck-common.sh"   # 三车道共享底层 (被 source)
+link "$HERE/ck-log.py" "$CODEX_BIN_DIR/ck-log.py"
+link "$HERE/ck-interaction.py" "$CODEX_BIN_DIR/ck-interaction.py"
+link "$HERE/ck-morning.py" "$CODEX_BIN_DIR/ck-morning.py"
+link "$HERE/ck-fuel-packs.py" "$CODEX_BIN_DIR/ck-fuel-packs.py"
 link "$HERE/ck-config.py" "$CODEX_BIN_DIR/ck-config.py"
 link "$HERE/ck-window.py" "$CODEX_BIN_DIR/ck-window.py"
 link "$HERE/ck-leaf.py" "$CODEX_BIN_DIR/ck-leaf.py"

@@ -69,6 +69,8 @@
 
 set -u
 
+export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
+
 CK_LANE=codex-loop
 . "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/ck-common.sh" || { echo "codex-loop: cannot source ck-common.sh (put it next to $0)" >&2; exit 1; }
 
@@ -567,6 +569,18 @@ run_driver() {  # $1=pane
             continue
         fi
         halted_logged=0
+        if ! ck_run_check; then
+            if [ "$mode" = task ] && [ "$phase" = work ]; then
+                tmux send-keys -t "$pane" C-c 2>/dev/null || true
+                mode="idle"; phase=""; CK_TURN_TS=0
+            fi
+            if [ "${CK_WINDOW_REASON:-}" = user_interactive ]; then
+                status_write "用户正在交互，自动任务让位" "$CODEXC_TOOL" 0 0 waiting_interaction 0
+            else
+                status_write "等待可用时段" "$CODEXC_TOOL" 0 0 waiting_window "${CK_WINDOW_NEXT_OPEN:-0}"
+            fi
+            continue
+        fi
 
         if [ "$mode" = "halt" ]; then
             if [ ! -e ".codingkeeper/loop.halt" ]; then
@@ -613,7 +627,7 @@ run_driver() {  # $1=pane
                 fi
                 burn_fuel_check; rc=$?
                 if [ "$rc" = 1 ]; then
-                    status_write "燃料已扫描完，等待新任务或新 Prompt" "$CODEXC_TOOL" 0 0 waiting_fuel 0
+                    status_write "燃料已扫描完，等待新任务、源码变化或定时复查" "$CODEXC_TOOL" 0 0 waiting_fuel 0
                     continue
                 elif [ "$rc" != 0 ]; then
                     log "parked: invalid fuel exhaustion state"
@@ -763,6 +777,11 @@ run_driver() {  # $1=pane
                         continue
                     }
                     if [ "$changed" = 0 ]; then
+                        if ! burn_prompt_complete; then
+                            log "parked: fuel completion failed"
+                            mode="halt"; touch .codingkeeper/loop.halt
+                            continue
+                        fi
                         # genuinely nothing to do: corroborated by the worker's
                         # idle claim AND a clean tree at the same commit
                         idle_count=$((idle_count + 1))
@@ -773,8 +792,8 @@ run_driver() {  # $1=pane
                                     continue
                                 fi
                                 CK_TURN_TS=0; mode="idle"; phase=""
-                                status_write "燃料已扫描完，等待新任务或新 Prompt" "$CODEXC_TOOL" 0 0 waiting_fuel 0
-                                notify "工程燃料已扫描完，等待新任务或新 Prompt"
+                                status_write "燃料已扫描完，等待新任务、源码变化或定时复查" "$CODEXC_TOOL" 0 0 waiting_fuel 0
+                                notify "工程燃料已扫描完，等待新任务、源码变化或定时复查"
                                 continue
                             fi
                             notify "锅炉熄火: 连续 $idle_count 轮无事可做 — 加任务到 queue.md 或 rm .codingkeeper/loop.halt 复燃"
@@ -800,7 +819,7 @@ run_driver() {  # $1=pane
                 ;;
             *)
                 notify "循环挂起: 回合结束但缺少 TASK_RESULT 标记 — $task"
-                log "parked: turn ended without TASK_RESULT marker (last message: $(tail -c 120 "$msgfile" | tr '\n' ' '))"
+                log "parked: turn ended without TASK_RESULT marker (last message: $(python3 "$CK_COMMON_DIR/ck-log.py" --tail "$msgfile" 120))"
                 mode="halt"; phase=""
                 touch ".codingkeeper/loop.halt"
                 continue
@@ -901,6 +920,11 @@ run_driver() {  # $1=pane
                     log "parked: acceptance transaction failed"
                     mode="halt"; phase=""
                     touch .codingkeeper/loop.halt
+                    continue
+                fi
+                if [ "$task_kind" = idle ] && ! burn_prompt_complete; then
+                    log "parked: accepted fuel completion failed"
+                    mode="halt"; touch .codingkeeper/loop.halt
                     continue
                 fi
                 notify "任务通过验收: $task"
@@ -1353,7 +1377,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho "gate ok"\nexit 0\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" CODEXC_GATE_TIMEOUT=20 \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" CODEXC_GATE_TIMEOUT=20 \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1377,7 +1401,7 @@ cmd_selftest_integration() {
     } > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1398,7 +1422,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 3 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1419,7 +1443,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 1 1 1 1 1 1 1
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_ROUNDS=2 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1445,7 +1469,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1462,7 +1486,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1479,7 +1503,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_LOOP_STALL=8 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1494,7 +1518,7 @@ cmd_selftest_integration() {
     it_hanging_fixture "$root/proj/.codingkeeper/gate.sh" "$root/gate.pids" gate
     it_fake_review "$root/review.sh" 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_GATE_TIMEOUT=5 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1515,7 +1539,7 @@ cmd_selftest_integration() {
     # Four concurrent harnesses also start the Python group supervisor. Give
     # startup headroom; the fixture must still record both PIDs and time out.
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_TIMEOUT=15 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1533,7 +1557,7 @@ cmd_selftest_integration() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1561,7 +1585,7 @@ EOF
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1586,7 +1610,7 @@ EOF
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1624,7 +1648,7 @@ EOF
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1686,7 +1710,7 @@ cmd_faultinjection() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1705,7 +1729,7 @@ cmd_faultinjection() {
     printf '#!/bin/bash\necho injected > .codingkeeper/GATE-RAN\necho "gate ran"\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1723,7 +1747,7 @@ cmd_faultinjection() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1742,7 +1766,7 @@ cmd_faultinjection() {
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1766,7 +1790,7 @@ PYEOF
     printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
     it_fake_review "$root/review.sh" 0 0
     tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
     driver_pid=$!
@@ -1775,7 +1799,7 @@ PYEOF
     kill -9 "$driver_pid" 2>/dev/null   # INJECT: SIGKILL — the EXIT trap cannot run
     sleep 1
     [ -e "$root/proj/.codingkeeper/loop.pid" ] && echo "  ok: stale pid file present (expected after SIGKILL)" || echo "  note: pid file already gone"
-    ( cd "$root/proj" && CODEX_HOME="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
       CODEXC_REVIEW_CMD="$root/review.sh" \
       "$SELF" run "$sess" >> "$root/driver2.log" 2>&1 ) &
     driver_pid=$!

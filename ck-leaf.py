@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -51,7 +52,15 @@ def atomic(path, data, mode=0o600):
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text())
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
+            raise ValueError('leaf metadata must be a regular file no larger than 32 MiB')
+        data = source.read(32 * 1024 * 1024 + 1)
+    if len(data) > 32 * 1024 * 1024:
+        raise ValueError('leaf metadata exceeds 32 MiB')
+    return json.loads(data)
 
 
 def queue_items(data):
@@ -196,7 +205,7 @@ def snapshot(directory, save=False):
             # 流式哈希照记 (完整性不变), 内容不拷贝 — vendored 大数据文件
             # (tessdata 类) 不应剥夺炉子的验收资格 (2026-11-12 实证: 19.2 MiB
             # 的 chi_sim.traineddata.gz 让该炉永远过不了严格验收)。
-            if info.st_size > 16 * 1024 * 1024 or total > 128 * 1024 * 1024:
+            if info.st_size > 16 * 1024 * 1024 or total + info.st_size > 128 * 1024 * 1024:
                 save_blob = False
             else:
                 total += info.st_size
@@ -251,8 +260,18 @@ def manifest(directory, which):
     return read_json(directory / (which + '.json'))
 
 
+def source_files(value):
+    # Blob availability is storage metadata; it must not change source identity.
+    return {name: {key: item for key, item in entry.items() if key != 'blob'}
+            for name, entry in value['files'].items()}
+
+
+def source_identity(value):
+    return {**value, 'files': source_files(value)}
+
+
 def fingerprint(value):
-    return digest(encode(value))
+    return digest(encode(source_identity(value)))
 
 
 def begin(task_b64):
@@ -280,8 +299,9 @@ def candidate(directory):
     current = snapshot(directory, save=True)
     atomic(directory / 'candidate.json', encode(current))
     baseline = manifest(directory, 'baseline')
-    changed = [name for name in sorted(set(baseline['files']) | set(current['files']))
-               if baseline['files'].get(name) != current['files'].get(name)]
+    before_files, after_files = source_files(baseline), source_files(current)
+    changed = [name for name in sorted(set(before_files) | set(after_files))
+               if before_files.get(name) != after_files.get(name)]
     lines = ['Baseline HEAD: ' + str(baseline['head']), 'Candidate HEAD: ' + str(current['head']),
              'Baseline fingerprint: ' + fingerprint(baseline), 'Candidate fingerprint: ' + fingerprint(current),
              'Changed paths: ' + json.dumps(changed, ensure_ascii=True), '']
@@ -289,13 +309,14 @@ def candidate(directory):
     for name in changed:
         old = baseline['files'].get(name, {})
         new = current['files'].get(name, {})
-        if old.get('size', 0) + new.get('size', 0) > 256 * 1024 or rendered > 1024 * 1024:
-            lines.append('Diff omitted for bounded rendering: ' + name + '; inspect manifest hashes and blobs.\n')
+        if (not old.get('blob', True) or not new.get('blob', True)
+                or old.get('size', 0) + new.get('size', 0) > 256 * 1024 or rendered > 1024 * 1024):
+            lines.append('Diff omitted for bounded rendering: ' + name + '; inspect manifest hashes and available blobs or source files.\n')
             continue
         before = (directory / 'blobs' / old['sha256']).read_bytes() if old.get('sha256') else b''
         after = (directory / 'blobs' / new['sha256']).read_bytes() if new.get('sha256') else b''
         if before.count(b'\n') + after.count(b'\n') > 4000:
-            lines.append('Diff omitted for bounded rendering: ' + name + '; inspect manifest hashes and blobs.\n')
+            lines.append('Diff omitted for bounded rendering: ' + name + '; inspect manifest hashes and available blobs or source files.\n')
             continue
         try:
             a, b = before.decode('utf-8'), after.decode('utf-8')
@@ -316,6 +337,62 @@ def receipt_present(journal, line):
             return any(item == line.encode('utf-8') for item in source)
     except FileNotFoundError:
         return False
+
+
+def prune_evidence_locked():
+    raw = os.environ.get('CODEXC_EVIDENCE_KEEP', '50')
+    if not re.fullmatch(r'[0-9]{1,5}', raw) or int(raw) > 10000:
+        raise ValueError('retention CODEXC_EVIDENCE_KEEP must be 0..10000')
+    keep = int(raw)
+    if keep == 0:
+        return
+    protected = set()
+    for name in ('active-leaf.json', 'acceptance.pending.json'):
+        path = STATE / name
+        if path.exists() or path.is_symlink():
+            info = read_json(path)
+            ident = info.get('id') if isinstance(info, dict) else None
+            if not isinstance(ident, str) or not re.fullmatch(r'[0-9a-f]{32}', ident):
+                raise ValueError('retention cannot verify ' + name)
+            protected.add(ident)
+    evidence = STATE / 'evidence'
+    if evidence.is_symlink():
+        raise ValueError('retention evidence directory must not be a symlink')
+    if not evidence.exists():
+        return
+    accepted = []
+    for directory in evidence.iterdir():
+        if (not re.fullmatch(r'[0-9a-f]{32}', directory.name)
+                or directory.is_symlink() or not directory.is_dir()):
+            continue
+        receipt = directory / 'accepted.json'
+        if not receipt.exists() or receipt.is_symlink() or not receipt.is_file():
+            continue  # unaccepted work remains available for recovery/review
+        info = read_json(receipt)
+        if not isinstance(info, dict) or info.get('id') != directory.name:
+            raise ValueError('retention cannot verify receipt: ' + str(receipt))
+        accepted.append((receipt.stat().st_mtime_ns, directory.name, directory))
+    # Validate all metadata before deleting anything. Protected old transactions
+    # are additional to the most recent keep receipts.
+    accepted.sort(reverse=True)
+    protected.update(item[1] for item in accepted[:keep])
+    for _, ident, directory in accepted:
+        if ident not in protected:
+            shutil.rmtree(directory)
+    shared = evidence / '.blobs'
+    if shared.is_symlink():
+        raise ValueError('retention shared blob directory must not be a symlink')
+    if shared.is_dir():
+        for path in shared.iterdir():
+            if not re.fullmatch(r'[0-9a-f]{64}', path.name):
+                continue
+            info = path.lstat()
+            # Each retained manifest owns hard links; GC only unreferenced
+            # regular blobs while snapshot writers hold this same lock.
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                path.unlink()
+        sync_dir(shared)
+    sync_dir(evidence)
 
 
 def recover_locked():
@@ -367,6 +444,12 @@ def recover_locked():
     if active.exists() and read_json(active).get('id') == tx['id']:
         active.unlink()
     sync_dir(STATE)
+    try:
+        prune_evidence_locked()
+    except (OSError, ValueError) as error:
+        # Acceptance is already durable. A storage cleanup failure cannot revoke
+        # its queue/journal receipt or make a successful task run twice.
+        print('leaf evidence retention deferred: ' + str(error), file=sys.stderr)
 
 
 def locked(action):
@@ -380,7 +463,7 @@ def locked(action):
 def accept(directory, task_b64, detail):
     if (STATE / 'loop.halt').exists():
         raise ValueError('manual halt prevents new acceptance')
-    if snapshot(directory) != manifest(directory, 'candidate'):
+    if source_identity(snapshot(directory)) != source_identity(manifest(directory, 'candidate')):
         raise ValueError('candidate changed after gate/review; refusing acceptance')
     info = read_json(directory / 'leaf.json')
     queue = STATE / 'queue.md'
@@ -399,7 +482,7 @@ def accept(directory, task_b64, detail):
         # No unresolved old transaction may be overwritten.
         if read_queue(queue) != before:
             raise ValueError('queue changed during acceptance; retry from current queue')
-        if snapshot(directory) != manifest(directory, 'candidate'):
+        if source_identity(snapshot(directory)) != source_identity(manifest(directory, 'candidate')):
             raise ValueError('candidate changed while waiting for acceptance lock')
         atomic(STATE / 'acceptance.pending.json', encode(tx))
         recover_locked()
@@ -422,19 +505,35 @@ def main():
         except ValueError:
             print('not-found'); return
         atomic(path, after, stat.S_IMODE(path.stat().st_mode)); print('marked')
+    elif command == 'halt':
+        STATE.mkdir(exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix='.halt-', dir=STATE)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(sys.argv[2])
+                stream.flush(); os.fsync(stream.fileno())
+            try:
+                os.link(temporary, STATE / 'loop.halt')
+                sync_dir(STATE)
+            except FileExistsError:
+                pass  # an existing operator/runner pause is authoritative
+        finally:
+            os.unlink(temporary)
     elif command == 'begin':
-        begin(sys.argv[2])
+        locked(lambda: begin(sys.argv[2]))
     elif command == 'recover':
         locked(recover_locked)
+    elif command == 'prune':
+        locked(prune_evidence_locked)
     else:
         directory = Path(sys.argv[2])
         if command == 'candidate':
-            candidate(directory)
+            locked(lambda: candidate(directory))
         elif command == 'verify':
-            if snapshot(directory) != manifest(directory, 'candidate'):
+            if source_identity(snapshot(directory)) != source_identity(manifest(directory, 'candidate')):
                 raise ValueError('source changed during gate/review')
         elif command == 'changed':
-            print('1' if snapshot(directory)['files'] != manifest(directory, 'baseline')['files'] else '0')
+            print('1' if source_files(snapshot(directory)) != source_files(manifest(directory, 'baseline')) else '0')
         elif command == 'accept':
             accept(directory, sys.argv[3], sys.argv[4])
         else:

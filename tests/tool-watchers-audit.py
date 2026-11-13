@@ -91,7 +91,7 @@ watch_and_run_tool "$AUDIT_TOOL" "$$" '%1'
 '''
         config = dict(os.environ, PATH=str(self.world / "bin")+":"+os.environ["PATH"],
                       AUDIT_WORLD=str(self.world), AUDIT_ROOT=str(ROOT), AUDIT_TOOL=tool,
-                      CODEX_HOME=str(self.world), OPENCODE_DATA_DIR=str(self.world),
+                      CODEX_HOME=str(self.world), CODEXC_LOG_DIR=str(self.world), OPENCODE_DATA_DIR=str(self.world),
                       CODEXC_LOOP_ROLLOUT="s" if tool == "opencode" else str(self.world / "rollout.jsonl"))
         self.process = subprocess.Popen(["bash", "-c", script, str(ROOT / "codexc")], env=config,
                                         cwd=self.world, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -17,7 +17,7 @@ mkdir -p "$ck"
 
 # 1) queue.md — 标准合同 + 引导叶 (已存在则不动)
 if [ ! -f "$ck/queue.md" ]; then
-    cat > "$ck/queue.md" <<QEOF
+    cat > "$ck/.queue.$$" <<QEOF
 # ${name} 任务队列 — codexc-headless 从 ## ready 顶部开始投喂
 # codex 每完成一个任务, 把自评后的后续任务写进 ## review-needed;
 # 你确认后把它挪到 ## ready (改成 - [ ] 即可), 循环才会执行它。
@@ -30,6 +30,8 @@ if [ ! -f "$ck/queue.md" ]; then
 ## review-needed
 (空)
 QEOF
+    mv -n "$ck/.queue.$$" "$ck/queue.md"
+    rm -f "$ck/.queue.$$"
 fi
 
 # 2) gate.sh — 指定命令则用之; 否则渐进式 (有测试基建必须全绿, 否则结构基线通过)
@@ -40,9 +42,9 @@ if [ ! -f "$ck/gate.sh" ]; then
           echo 'set -eu'
           echo 'cd "$(dirname "$0")/.."'
           printf '%s\n' "$*"
-        } > "$ck/gate.sh"
+        } > "$ck/.gate.$$"
     else
-        cat > "$ck/gate.sh" <<GEOF
+        cat > "$ck/.gate.$$" <<GEOF
 #!/bin/bash
 # ${name} gate: 渐进式 — 有测试基建则必须全绿; 否则结构基线通过. 独立于队列数量.
 set -eu
@@ -64,26 +66,31 @@ fi
 if [ "\$fails" -eq 0 ]; then echo "[gate] OK (baseline)"; else echo "[gate] \$fails 项失败"; exit 1; fi
 GEOF
     fi
-    chmod +x "$ck/gate.sh"
+    chmod +x "$ck/.gate.$$"
+    mv -n "$ck/.gate.$$" "$ck/gate.sh"
+    rm -f "$ck/.gate.$$"
 fi
 
 # 3) review-leaf.sh — 固定模板, 指向本仓库审核器
 if [ ! -f "$ck/review-leaf.sh" ]; then
-    cat > "$ck/review-leaf.sh" <<REOF
+    cat > "$ck/.review.$$" <<REOF
 #!/bin/bash
 # Shared leaf reviewer: exact candidate evidence, bounded parser, no paid probes.
 set -eu
 cd "\$(dirname "\$0")/.."
 exec python3 "${repo}/codexc-review-leaf" "\$@"
 REOF
-    chmod +x "$ck/review-leaf.sh"
+    chmod +x "$ck/.review.$$"
+    mv -n "$ck/.review.$$" "$ck/review-leaf.sh"
+    rm -f "$ck/.review.$$"
 fi
 
 # 4) 注册登记 (去重; 看门狗 fleet_furnaces() 以此为准)
-touch "$HOME/.codingkeeper/projects"
-grep -Fqx "$proj" "$HOME/.codingkeeper/projects" 2>/dev/null || echo "$proj" >> "$HOME/.codingkeeper/projects"
+CK_LANE=codexc-init-furnace
+. "$repo/ck-common.sh"
+( cd "$proj"; CODEXC_REGISTER_TEMP=1 register_project )
 
 gate_kind="渐进式"
 [ $# -gt 0 ] && gate_kind="指定"
 echo "✓ ${name} 脚手架就绪并已登记 (gate: ${gate_kind})"
-echo "  启动: cd '$proj' && CODEXC_REVIEW_CMD='$ck/review-leaf.sh' nohup zcodec run >> ~/.codex/codexc-watch.log 2>&1 &"
+echo "  启动: cd '$proj' && CODEXC_REVIEW_CMD='$ck/review-leaf.sh' nohup zcodec run >> ~/.codingkeeper/codexc-watch.log 2>&1 &"

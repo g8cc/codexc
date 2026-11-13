@@ -2,7 +2,7 @@
 # burn-watch.sh — 无 LLM 烧炉看守 (纯 bash 3.2 兼容, 5 分钟一轮)
 # 部署: ~/.codingkeeper/burn-watch.sh -> 本文件 (symlink); 改本文件前必须先杀运行实例
 # 职责: 三炉存活/瞬时 park 有界复燃/真问题告警/token 记账/日志轮转
-LOG="$HOME/.codex/codexc-watch.log"
+LOG="${CODEXC_LOG_DIR:-$HOME/.codingkeeper}/codexc-watch.log"
 ALERT="$HOME/.codingkeeper/burn-ALERTS.txt"
 ACCOUNT="$HOME/.codingkeeper/burn-log.txt"
 LOCKDIR="$HOME/.codingkeeper/watchdog.lock"
@@ -10,9 +10,9 @@ DAY="$(date +%F)"
 GREP=/usr/bin/grep
 # 凭证探测的 cjs 路径尊重 ZCODE_CJS (与 zcodec/codexc-zcode-worker 同一声明)
 ZCJS="${ZCODE_CJS:-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs}"
-# This watchdog serves ZCode only. Empty/unset configuration permits 24/7;
-# an explicit availability policy is forwarded unchanged to every restart.
-CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW:-}"   # 默认不限制 (全天燃烧)
+# Workdays run overnight; weekends are open. Explicit empty is an override.
+# Forward the effective policy unchanged to every restarted runner.
+CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
 CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
 WATCH_DIR="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]:-$0}" 2>/dev/null)"
 # 运行位副本 (bin/) 不随仓库携带 ck-window.py 等辅助脚本: 回退到 symlink
@@ -85,7 +85,7 @@ watch_window_open() {
     case "$deadline:$next_open" in *[!0-9:]*|:*|*:) return 125 ;; esac
     case "$reason" in
         disabled) [ -z "$CODEXC_ACTIVE_WINDOW" ] && [ "$deadline:$next_open" = 0:0 ] || return 125 ;;
-        allowed) [ "$deadline" -gt 0 ] 2>/dev/null || return 125 ;;
+        allowed|weekend) [ "$deadline" -gt 0 ] 2>/dev/null || return 125 ;;
         *) return 125 ;;
     esac
     return 0
@@ -198,7 +198,7 @@ cli_alive() {  # 双探重试 (间隔 5s): 单发会撞网关抖动窗口误判"
     for try in 1 2; do
         # Retry sleep may cross 09:00. Recheck immediately before every probe.
         watch_window_open || { rm -f "$out"; return 125; }
-        "$ZCJS" --prompt replyOK --cwd "$HOME/.codingkeeper/probe-cwd" --json --no-color > "$out" 2>/dev/null
+        python3 "$WATCH_DIR/ck-zcode-session.py" exec "$ZCJS" "$ZCJS" --prompt replyOK --cwd "$HOME/.codingkeeper/probe-cwd" --json --no-color > "$out" 2>/dev/null
         $GREP -q response "$out" && { ok=1; break; }
         [ "$try" = 2 ] || sleep 5
     done
@@ -275,11 +275,32 @@ cleanup_probe_sessions() {
     return 0
 }
 
+revive_parked() {
+    local project="$1" halt="$1/.codingkeeper/loop.halt" backup="$1/.codingkeeper/.watchdog-halt.$$" rc
+    # Do not consume a project pause until its window is open and its runner is gone.
+    watch_window_open || return 125
+    proj_alive "$project" && return 1
+    mv "$halt" "$backup" || return 1
+    if revive "$project"; then
+        rm -f "$backup"
+        return 0
+    else
+        rc=$?
+        # link publishes the original complete file only if no operator/new runner
+        # has created a different halt in the meantime.
+        ln "$backup" "$halt" 2>/dev/null || true
+        rm -f "$backup"
+        return "$rc"
+    fi
+}
+
 patrol_once() {
+    python3 "$WATCH_DIR/ck-log.py" "${CODEXC_LOG_DIR:-$HOME/.codingkeeper}" "${CODEX_HOME:-$HOME/.codex}" || return 1
     local proj d pid alive halted reason rcount tok acc_line
     PROJ_ALIVE_CWDS=""   # 缓存按巡逻周期重置: 上周期的扫描对本周期的生死判定是陈旧数据
     FLEET_REVIVED=0       # 本巡逻已成功复燃数 — 并发闸门的增量项 (随巡逻重置)
     FLEET_ALIVE_N=""      # 活炉计数缓存随巡逻重置 (与上同因)
+    DAY="$(date +%F)"   # refresh before any daily deduplication
     fleet_trace_registry   # 注册表死条目/空白/缺件留档 — 主壳一次, alert 按条目按日去重
     disk_watch             # 磁盘水位监控 — 低水位每日告警 (2026-11-10 死亡事故的诱因)
     DAY="$(date +%F)"   # long-running watchdogs must roll over at midnight
@@ -301,6 +322,9 @@ patrol_once() {
     while IFS= read -r d <&3; do
         proj="${d##*/}"
         [ -d "$d" ] || continue
+        if [ -d "$d/.codingkeeper/interactive" ] || [ -L "$d/.codingkeeper/interactive" ]; then
+            (cd "$d" && python3 "$WATCH_DIR/ck-interaction.py" check >/dev/null) || continue
+        fi
         halted=0; [ -f "$d/.codingkeeper/loop.halt" ] && halted=1
         if [ "$halted" = 1 ]; then
             halt_reason="$(head -c 200 "$d/.codingkeeper/loop.halt" 2>/dev/null)"
@@ -320,8 +344,7 @@ patrol_once() {
                         alert "fleet" "并发已满 ${CODEXC_FLEET_MAX} — ${proj} 配额 park 保留, 空位后自动复燃"
                         continue
                     fi
-                    rm -f "$d/.codingkeeper/loop.halt"
-                    if revive "$d"; then
+                    if revive_parked "$d"; then
                         FLEET_REVIVED=$((FLEET_REVIVED + 1))
                         echo "$(date '+%F %T') | $proj | 配额复燃#$proj#$qcount (额度重置自愈)" >> "$ALERT"
                     else
@@ -331,7 +354,7 @@ patrol_once() {
                 *"review rounds exhausted"*|*"review output unparseable"*)
                     # 审核类 park 有界自动复燃: 夜间不再整夜停摆。
                     # 预算与退出类复燃共用 2/日; 超限 = 同一叶子反复被拒, 留档待人。
-                    rcount="$(day="$DAY" key="复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+                    rcount="$(day="$DAY" key="| $proj | 复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
                     rcount=${rcount:-0}
                     if [ "$rcount" -ge 2 ]; then
                         alert "$proj" "复燃超限(2) — 审核 park 留档待人 (最后park: ${halt_reason:0:40})"
@@ -341,8 +364,7 @@ patrol_once() {
                         alert "fleet" "并发已满 ${CODEXC_FLEET_MAX} — ${proj} 审核 park 保留, 空位后自动复燃"
                         continue
                     fi
-                    rm -f "$d/.codingkeeper/loop.halt"
-                    if revive "$d"; then
+                    if revive_parked "$d"; then
                         FLEET_REVIVED=$((FLEET_REVIVED + 1))
                         echo "$(date '+%F %T') | $proj | 复燃#$proj#$rcount (审核park自愈: ${halt_reason:0:40})" >> "$ALERT"
                     else
@@ -361,7 +383,7 @@ patrol_once() {
         reason="runner exited without a halt"
         # 统一有界复燃: 每项目每日 2 次 (不依赖全局日志归因, 对一切 park 类生效);
         # 超限 = 同一问题反复出现, 真问题留档待人, 防坏叶无限烧
-        rcount="$(day="$DAY" key="复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
+        rcount="$(day="$DAY" key="| $proj | 复燃#$proj#" awk 'index($0, ENVIRON["day"] " ") == 1 && index($0, ENVIRON["key"]) { n++ } END { print n+0 }' "$ALERT" 2>/dev/null)"
         rcount=${rcount:-0}
         if [ "$rcount" -ge 2 ]; then
             alert "$proj" "复燃超限(2) — 真问题留档待人 (最后park: ${reason:0:40})"

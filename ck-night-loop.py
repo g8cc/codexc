@@ -10,6 +10,7 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
@@ -101,7 +102,7 @@ def project_ready(project):
     return True
 
 
-def run(pane, owner, tool, seconds=600, window='00:00-08:00', timezone='Asia/Singapore'):
+def run(pane, owner, tool, seconds=600, window='23:00-09:00', timezone='Asia/Singapore'):
     project = os.path.realpath(os.getcwd())
     clock = IdleClock(seconds)
     child = None
@@ -126,6 +127,11 @@ def run(pane, owner, tool, seconds=600, window='00:00-08:00', timezone='Asia/Sin
                         and snapshot(pane) == (screen, cursor)
                         and window_policy.evaluate(window, timezone)['allowed']):
                     print(f'{dt.datetime.now().isoformat()} night-loop: idle takeover {tool} {pane}', flush=True)
+                    release = subprocess.run([sys.executable, str(ROOT / 'ck-interaction.py'), 'release-owner', str(owner)],
+                                             capture_output=True, timeout=10)
+                    if release.returncode != 0:
+                        clock.ready(time.monotonic(), False, None)
+                        continue
                     env = dict(os.environ, CODEXC_TOOL=tool, CODEXC_REQUIRE_GATE='1')
                     child = subprocess.Popen([str(ROOT / 'codexc-loop'), 'run', pane], env=env)
                     while child.poll() is None and owned(pane, owner, project, tool):
@@ -155,7 +161,7 @@ def main():
     if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 86400 or args.owner <= 1:
         parser.error('CODEXC_NIGHT_IDLE must be 1..86400 seconds and owner must be a live PID')
     run(args.pane, args.owner, args.tool, int(raw),
-        os.environ.get('CODEXC_NIGHT_WINDOW', '00:00-08:00'),
+        os.environ.get('CODEXC_NIGHT_WINDOW', '23:00-09:00'),
         os.environ.get('CODEXC_NIGHT_TZ', 'Asia/Singapore'))
 
 

@@ -39,7 +39,7 @@ queue.md(## ready) → 投喂 → worker 回合 → gate.sh(真实退出码)
 项目级状态统一在 **`.codingkeeper/`**（队列/门禁/台账/停炉标记/会话接力文件），
 与 worker 无关——同一项目换任何 worker，队列与台账延续。v2.0 起自动迁移：
 旧 `.codexc/` 在 runner 启动时一次性 `mv` 为 `.codingkeeper/`（journal/queue 无损）。
-全局日志: `~/.codex/codexc-watch.log`（计划 v2.1 迁往 `~/.codingkeeper/`）。
+全局日志: `~/.codingkeeper/codexc-watch.log` 与 `codexc-daily.log`；首次使用迁移不冲突的旧日志。`CODEXC_LOG_DIR` 可覆盖目录。
 
 ## 工具适配面（加新工具时只动这里）
 
@@ -53,4 +53,4 @@ queue.md(## ready) → 投喂 → worker 回合 → gate.sh(真实退出码)
 现有实现: codex(sqlite→rollout尾)、claude(JSONL isApiErrorMessage)、pi(stopReason)、
 opencode(session_v2/message 表)、zcode(--prompt/--resume, 会话文件)、dsh(--json session/final 事件与 --session-id)。
 
-工程燃料：`ck-prompts.py` 内置十类工程指令，按项目持久化轮换并支持动态追加；任务入队与验收共用 acceptance.lock。worker/gate/review 共享进程组监护，owner 消失后停止本组，验收在获得事务锁后再检查候选。
+改进燃料：`ck-prompts.py` 内置 44 类通用改进燃料，`ck-fuel-packs.py` 提供 17 包/85 类领域燃料。Agent依据实际能力选择包；Keeper用 acceptance.lock 原子保存 fuel-packs.json、合并自定义目录并持久化轮换，目录/顺序变化重启扫描。自定义文件上限128，合并目录上限512；任务入队与验收共用 acceptance.lock。worker/gate/review 共享进程组监护，owner 消失后停止本组，验收在获得事务锁后再检查候选。

@@ -15,7 +15,7 @@
 # Env:
 #   ZCODE_CJS              zcode.cjs 路径 (默认桌面应用自带)
 #   CODEXC_HEADLESS_CMD    覆盖 worker 命令 (默认本仓库 codexc-zcode-worker)
-#   CODEXC_ACTIVE_WINDOW   自动任务可用时段 (默认不限制，全天)
+#   CODEXC_ACTIVE_WINDOW   自动任务可用时段 (默认工作日23:00-09:00，周末全天)
 #   CODEXC_ACTIVE_TZ       时段时区 (默认 Asia/Shanghai, UTC+8)
 
 set -u
@@ -31,9 +31,8 @@ hl() {  # CodingKeeper headless 车道转发 (注入默认 worker)
 
 case "${1:-}" in
     run)
-        # 时间窗默认关闭 (2026-11-06 用户要求全天燃烧): 未设置 = 不限制
-        # 需要夜间窗口时显式: CODEXC_ACTIVE_WINDOW=23:00-09:00 zcodec run
-        [ -n "${CODEXC_ACTIVE_WINDOW:-}" ] && export CODEXC_ACTIVE_WINDOW
+        # 工作日白天不下发；周末由共享策略放行。显式空值为人工覆盖。
+        export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
         export CODEXC_ACTIVE_TZ="${CODEXC_ACTIVE_TZ:-Asia/Shanghai}"
         export CODEXC_LOOP_IDLE="${CODEXC_LOOP_IDLE:-1}"
         export CODEXC_REQUIRE_GATE=1

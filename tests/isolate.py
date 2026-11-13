@@ -19,7 +19,7 @@ env = {k:v for k,v in os.environ.items() if not k.startswith(('CODEXC_', 'CODEX_
 env.update(CK_TEST_ISOLATED='1', CK_TEST_ARTIFACTS=str(base), HOME=str(base/'home'), TMPDIR=str(base/'tmp')+'/',
            CODEX_HOME=str(base/'home/.codex'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'),
            PI_DIR=str(base/'home/.pi'), OPENCODE_DATA_DIR=str(base/'home/.opencode'),
-           CODEXC_LOOP_NOTIFY='0', CODEXC_NOTIFY='0', CODEXC_AUTO_RESUME='0', CODEXC_REVIEW_PARALLEL='0', CODEXC_PROMPT_ROTATION='0', CODEXC_REQUIRE_GATE='0',
+           CODEXC_ACTIVE_WINDOW='', CODEXC_LOOP_NOTIFY='0', CODEXC_NOTIFY='0', CODEXC_AUTO_RESUME='0', CODEXC_REVIEW_PARALLEL='0', CODEXC_PROMPT_ROTATION='0', CODEXC_REQUIRE_GATE='0',
            GIT_AUTHOR_NAME='Codexc Test', GIT_AUTHOR_EMAIL='codexc-test@example.invalid',
            GIT_COMMITTER_NAME='Codexc Test', GIT_COMMITTER_EMAIL='codexc-test@example.invalid',
            SWIFT_MODULECACHE_PATH=os.environ.get('CK_SWIFT_TEST_CACHE', str(base/'swift-cache')), CLANG_MODULE_CACHE_PATH=os.environ.get('CK_CLANG_TEST_CACHE', str(base/'clang-cache')))
@@ -59,5 +59,12 @@ finally:
         try: os.killpg(child.pid,signal.SIGKILL)
         except (ProcessLookupError, PermissionError): pass
         child.wait(timeout=3)
-    subprocess.run([str(wrapper),'kill-server'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL, timeout=5)
+    try:
+        subprocess.run([str(wrapper),'kill-server'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL, timeout=5)
+    except subprocess.TimeoutExpired:
+        print('private tmux cleanup timed out after 5 seconds', file=sys.stderr)
+        if code == 0: code = 1
+    except OSError as error:
+        print('private tmux cleanup failed: ' + str(error), file=sys.stderr)
+        if code == 0: code = 1
 sys.exit(code)

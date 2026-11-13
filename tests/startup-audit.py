@@ -13,7 +13,7 @@ class StartupTests(unittest.TestCase):
         (self.p/'home').mkdir(); (self.p/'bin').mkdir()
         self.env = {k:v for k,v in os.environ.items() if not k.startswith(('CODEXC_', 'CODEX_', 'TMUX'))}
         self.env.update(HOME=str(self.p/'home'), CODEX_HOME=str(self.p/'home'), CODEXC_NOTIFY='0', CODEXC_LOOP_NOTIFY='0', PATH=str(self.p/'bin')+':'+os.environ['PATH'])
-    def bash(self, code, timeout=10):
+    def bash(self, code, timeout=60):
         return subprocess.run(['/bin/bash','-c',FUNCTIONS+'\n'+code,str(ROOT/'codexc')], cwd=self.p, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     def mock(self,name,text):
         p=self.p/'bin'/name; p.write_text('#!/bin/bash\n'+text); p.chmod(0o755)

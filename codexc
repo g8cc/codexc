@@ -209,9 +209,11 @@ TRANSIENT_RE='exceeded retry limit|Too Many Requests|stream disconnected before 
 # subscription caps only clear when the window resets or the plan upgrades.
 BLOCK_RE='usage limit|upgrade to|subscription|plan limit'
 
-WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+CK_LOG_DIR="${CODEXC_LOG_DIR:-$HOME/.codingkeeper}"
+WATCHLOG="$CK_LOG_DIR/codexc-watch.log"
 
 prepare_watch_log() {
+    python3 "$SCRIPT_DIR/ck-log.py" "$CK_LOG_DIR" "$CODEX_HOME_DIR" || return 1
     (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$WATCHLOG") || return 1
     chmod 600 "$WATCHLOG"
 }
@@ -416,6 +418,13 @@ scheduler_pane_busy() {
     esac
 }
 
+scheduler_available() {
+    (CK_LANE=codexc-scheduler
+     . "$SCRIPT_DIR/ck-common.sh"
+     CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
+     ck_run_check)
+}
+
 run_scheduler() {
     local target="$1" pane="$2" prompt="$3" spec="${4:-$1}" now left owner
     owner="$(scheduler_pane_owned "$pane")" || {
@@ -436,7 +445,11 @@ run_scheduler() {
     while :; do
         scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
         now=$(date +%s)
-        [ "$now" -ge "$target" ] && break
+        if [ "$now" -ge "$target" ]; then
+            if scheduler_available; then break; fi
+            sleep 5
+            continue
+        fi
         [ -n "$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ] || {
             echo "$(date '+%F %T') scheduler: pane gone before fire time, giving up" >> "$WATCHLOG"
             return 0
@@ -457,6 +470,7 @@ run_scheduler() {
         sleep 1
         scheduler_pane_owned "$pane" "$owner" >/dev/null || return 1
         scheduler_pane_busy "$pane" && continue
+        scheduler_available || continue
         break
     done
     echo "$(date '+%F %T') scheduler: firing scheduled prompt: $prompt" >> "$WATCHLOG"
@@ -1078,6 +1092,10 @@ if [ -n "${TMUX:-}" ]; then
     watcher="${SPAWNED_WATCHER_PID:-}"
     loop_pid=""
     night_pid=""
+    interaction_token=""
+    if [ "${CODEXC_LOOP:-0}" != 1 ] && [ -z "$CODEXC_AT" ] && [ "${CODEXC_AUTOMATED:-0}" != 1 ]; then
+        interaction_token="$(python3 "$SCRIPT_DIR/ck-interaction.py" begin --owner "$$")" || exit 1
+    fi
     if [ "${CODEXC_LOOP:-0}" = "1" ] && [ -n "$CODEXC_AT" ]; then
         echo "codexc: warning — scheduled prompt (-t) and the delivery loop both feed this TUI; they can interleave. Prefer one." >&2
     fi
@@ -1130,6 +1148,9 @@ if [ -n "${TMUX:-}" ]; then
             pi) : ;;
         esac
     fi
+    if [ "${CODEXC_AUTOMATED:-0}" = 1 ]; then
+        while ! scheduler_available; do sleep 5; done
+    fi
     case "$CODEXC_TOOL" in
         claude)   claude   $codex_flags "$@" ;;
         pi)       pi       $codex_flags "$@" ;;
@@ -1137,6 +1158,9 @@ if [ -n "${TMUX:-}" ]; then
         *)        codex    $codex_flags "$@" ;;
     esac
     rc=$?
+    if [ -n "$interaction_token" ]; then
+        python3 "$SCRIPT_DIR/ck-interaction.py" end "$interaction_token" >/dev/null || true
+    fi
     [ -n "$watcher" ] && kill "$watcher" 2>/dev/null
     [ -n "$sched_pid" ] && kill "$sched_pid" 2>/dev/null
     [ -n "$loop_pid" ] && kill "$loop_pid" 2>/dev/null

@@ -55,8 +55,8 @@ capture_pid=$!
 wait "$capture_pid"; rc=$?
 # Only the small failure tails enter shell variables. Parse successful output
 # from its file: a large final response can exceed the OS argv size limit.
-raw="$(tail -c 4096 "$turn_out" 2>/dev/null)"
-err="$(tail -c 4096 "$turn_err" 2>/dev/null)"
+raw="$(python3 "$WORKER_DIR/ck-log.py" --tail "$turn_out" 4096 2>/dev/null)"
+err="$(python3 "$WORKER_DIR/ck-log.py" --tail "$turn_err" 4096 2>/dev/null)"
 # 错误分类: runner 据此决策 — auth 立即停等人 / quota park 等窗口重置 /
 # transient 退避重试 / unknown 走既有 3 发路径。分类依据 = zcode CLI 的
 # 结构化错误输出 (stdout/stderr 原文), 判定顺序: auth → quota → transient。
@@ -95,7 +95,7 @@ if [ "$rc" != "0" ]; then
     # resume 链可能已被清扫删除 (废弃链 1 小时清理): heal 检测到死链就删
     # sid 文件, 下轮重试以全新会话起步, 不在已消失的链上无限失败
     [ -z "$sid" ] || python3 "$SESSION_HELPER" heal "$ZCODE_SESSION_FILE" "$sid" >/dev/null 2>&1 || true
-    echo "zcode turn failed (rc=$rc, class=$cls): $(printf '%s' "$raw" | tail -c 120 | tr '\n' ' ') [stderr: $(printf '%s' "$err" | tail -c 160 | tr '\n' ' ')]"
+    echo "zcode turn failed (rc=$rc, class=$cls): $(python3 "$WORKER_DIR/ck-log.py" --tail "$turn_out" 120) [stderr: $(python3 "$WORKER_DIR/ck-log.py" --tail "$turn_err" 160)]"
     echo "CK_ERROR_CLASS: $cls"
     exit 1
 fi

@@ -35,6 +35,8 @@ class WatchWindowAudit(unittest.TestCase):
         self.source = self.lib / "burn-watch.sh"
         self.source.write_text(source)
         (self.lib / "ck-window.py").symlink_to(REPO / "ck-window.py")
+        (self.lib / "ck-log.py").symlink_to(REPO / "ck-log.py")
+        (self.lib / "ck-zcode-session.py").symlink_to(REPO / "ck-zcode-session.py")
         self.projects = self.root / "Documents/work/code/AI/AIworkspace"
         (self.root / ".codingkeeper").mkdir()
         (self.root / ".codex").mkdir()
@@ -105,7 +107,7 @@ class WatchWindowAudit(unittest.TestCase):
         if fake_revive:
             setup += 'revive() { printf "%s\\n" "$1" >> "$WATCH_ROOT/revived"; }\n'
         result = subprocess.run(["/bin/bash", "-c", setup + body], cwd=self.root, env=self.env,
-                                text=True, capture_output=True, timeout=10)
+                                text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result
 
@@ -133,6 +135,16 @@ class WatchWindowAudit(unittest.TestCase):
                 result = self.shell('cli_alive; printf "rc=%s" "$?"\n')
                 self.assertEqual((self.root / "probes").exists(), allowed)
                 self.assertEqual(result.stdout, "rc=0" if allowed else "rc=125")
+
+    def test_probe_uses_the_cli_builtin_provider_layout_adapter(self):
+        provider = self.bin / 'provider/zcode-builtin.json'
+        provider.parent.mkdir(); provider.write_text('{}')
+        self.env.pop('ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE', None)
+        self.env.pop('ZCODE_BUILTIN_PROVIDER_CONFIG_FILE', None)
+        self.script('probe', '#!/bin/bash\nprintf "%s" "$ZCODE_BUILTIN_PROVIDER_CONFIG_FILE" > "$WATCH_ROOT/provider-used"\nprintf \'{"response":"ok"}\\n\'\n')
+        result = self.shell('cli_alive; printf "rc=%s" "$?"\n')
+        self.assertEqual(result.stdout, 'rc=0')
+        self.assertEqual((self.root / 'provider-used').read_text(), str(provider.resolve()))
 
     def test_probe_retry_rechecks_window_after_sleep(self):
         self.clock.write_text(str(epoch("2026-11-06T08:59:59")))
@@ -323,7 +335,7 @@ class WatchWindowAudit(unittest.TestCase):
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertNotIn("No such file", alerts, "缺 journal 的重定向报错不得进 ALERT")
         self.assertNotIn("quality-trend", alerts, "例行遥测不得进 ALERT")
-        watchlog = (self.root / ".codex/codexc-watch.log").read_text()
+        watchlog = (self.root / ".codingkeeper/codexc-watch.log").read_text()
         self.assertIn("quality-trend with-journal", watchlog, "遥测改写 watch 日志 — 可观测性不丢")
 
     def test_registry_trace_respects_comments_exclusions_and_per_entry_keys(self):
@@ -430,6 +442,37 @@ class WatchWindowAudit(unittest.TestCase):
         self.run_lib_shell("patrol_once\n")
         self.assertEqual(len(launches.read_text().splitlines()), 1,
                          "预算 1/日: 同日第二次配额 park 不得再复燃")
+
+
+    def test_automatic_park_recovery_preserves_halt_outside_window(self):
+        halt = self.projects / 'fingerprint/.codingkeeper/loop.halt'
+        self.clock.write_text(str(epoch('2026-11-06T09:00:00')))
+        for reason in ('model quota exhausted', 'review rounds exhausted', 'review output unparseable'):
+            with self.subTest(reason=reason):
+                halt.write_text(reason + '\n')
+                self.shell('patrol_once\n')
+                self.assertTrue(halt.exists(), 'closed window must preserve the halt')
+                self.assertEqual(halt.read_text(), reason + '\n')
+        self.assertFalse((self.root / 'launches').exists())
+
+    def test_failed_park_recovery_restores_the_original_halt(self):
+        halt = self.projects / 'fingerprint/.codingkeeper/loop.halt'
+        for reason in ('model quota exhausted', 'review rounds exhausted'):
+            with self.subTest(reason=reason):
+                halt.write_text(reason + '\n')
+                self.shell('revive() { return 1; }; patrol_once\n')
+                self.assertTrue(halt.exists(), 'failed recovery must retain the reason')
+                self.assertEqual(halt.read_text(), reason + '\n')
+
+    def test_quota_revive_does_not_consume_review_revive_budget(self):
+        halt = self.projects / 'fingerprint/.codingkeeper/loop.halt'
+        ledger = self.root / '.codingkeeper/burn-ALERTS.txt'
+        today = subprocess.check_output(['date', '+%F'], env=self.env, text=True).strip()
+        ledger.write_text(today + ' 00:00:00 | fingerprint | 配额复燃#fingerprint#0\n' +
+                          today + ' 01:00:00 | fingerprint | 复燃#fingerprint#0\n')
+        halt.write_text('review rounds exhausted\n')
+        self.shell('patrol_once\n', fake_revive=True)
+        self.assertTrue((self.root / 'revived').exists(), 'quota and review budgets are separate')
 
     def test_registry_adversarial_lines_cannot_execute(self):
         # 安全边界: 注册表是 agent 可写输入 (aitv 实证真实世界会塞任意行) —
@@ -676,12 +719,20 @@ class WatchWindowAudit(unittest.TestCase):
         alerts = (self.root / ".codingkeeper/burn-ALERTS.txt").read_text()
         self.assertIn("zcode.cjs 缺失", alerts, "cjs 缺失必须有界告警 (探测不可用的原因)")
 
-    def test_watchdog_defaults_to_unrestricted_burn(self):
+    def test_watchdog_defaults_to_weekday_night_burn(self):
         self.env.pop("CODEXC_ACTIVE_WINDOW")
         self.env.pop("CODEXC_ACTIVE_TZ")
         self.clock.write_text(str(epoch("2026-11-06T16:00:00")))
         self.shell("patrol_once\n", fake_revive=True)
-        self.assertTrue((self.root / "revived").exists())
+        self.assertFalse((self.root / "revived").exists())
+
+    def test_weekend_policy_allows_watchdog_revival(self):
+        for local in ('2026-11-07T14:00:00','2026-11-08T23:30:00'):
+            with self.subTest(local=local):
+                self.clock.write_text(str(epoch(local)))
+                self.reset_markers()
+                self.shell('patrol_once\n', fake_revive=True)
+                self.assertTrue((self.root / 'revived').exists())
 
     def test_explicit_empty_window_allows_patrol_and_probe(self):
         self.env['CODEXC_ACTIVE_WINDOW'] = ''

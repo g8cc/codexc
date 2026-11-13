@@ -36,6 +36,8 @@
 integration / faultinjection 耗时长（15min+），不进钩子，发布前手动
 `tests/run-all` 跑全量。紧急提交可 `git commit --no-verify` 绕过，但别养成习惯。
 
+新增 `interaction` 八项回归：项目隔离、多个人工会话、退出/PID复用、坏状态拒绝、人工会话阻止下发、结束后续做原任务、运行中worker被安全停止，以及daily从其他目录启动仍核对目标项目。桌面回归覆盖 `waiting_interaction` 的等待显示与不承诺固定恢复时间。`prompts` 补额度/投喂失败不消耗燃料；`window` 补周末连续到周一09:00的截止。`zcode-quota`/`review-leaf` 补安装包内置provider路径与用户显式覆盖；`log-location` 补中文错误尾、FIFO及链接拒绝。
+
 ## 共享库 ck-common.sh
 
 三车道（codexc-loop / codexc-headless / codexc-daily）共用的队列/gate/审查/
@@ -50,3 +52,5 @@ integration / faultinjection 耗时长（15min+），不进钩子，发布前手
 完整入口 `tests/run-all` 包含 `window-audit.py`、`zcode-window-audit.py`、`watch-window-audit.py`、`zcode-quota-audit.py`。使用假 worker/reviewer、固定测试时刻及私有项目，覆盖 23:00/09:00 边界、中途截止、人工停止、重启后配额等待、watchdog 禁止跨时段复燃以及套餐通知分类；不会通过这些用例请求真实模型。
 
 本轮新增 `leaf-runtime-audit.py`、`review-leaf-audit.py`、`leaves-audit.py`，覆盖候选绑定、脏树空跑、事务恢复、队列格式/多行合同和模型输出失败语义；均使用临时仓库与假 CLI，无真实模型请求。统一入口仍为 `tests/run-all`。
+
+新增 `evidence-retention`、`log-location`、`watchdog-install` 和 `product-fuel` 行为套件，覆盖事务后保留/共享 blob 回收、日志迁移、假 launchctl 的实际参数校验、通用燃料/提案/晨报与定时复查。它们不操作真实 launchd 或调用模型。新增 `fuel-extension` 覆盖44类通用与17包/85类领域分离、持久化/环境选择、锁与并发容量、257项目录的共享Bash适配器、游标迁移与更新、稳定决策ID和晨报时间/配置；`prompts` 另用假worker证明headless读取已保存领域配置。`burn-runtime` 另覆盖无证据回合保留既有暂存/未暂存/未跟踪内容与 worker 提交，以及首次提交前安全停炉。

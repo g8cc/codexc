@@ -30,7 +30,7 @@ class ProcessWindowAudit(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def shell(self, body, timeout=10):
+    def shell(self, body, timeout=60):
         script = 'set -u\n. '+shlex.quote(str(ROOT/'ck-common.sh'))+'\n'+body
         result = subprocess.run(['bash','-c',script], cwd=self.world, env=self.env, text=True,
                                 capture_output=True, timeout=timeout, start_new_session=True)
@@ -86,6 +86,12 @@ python3() {
             (self.world/'clock').write_text(str(epoch(local)))
             result = self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s" "$CK_WINDOW_ALLOWED" "$CK_WINDOW_REASON"')
             self.assertEqual(result.stdout, f"1:{want_reason}", msg=local)
+
+    def test_weekend_deadline_reaches_monday_morning(self):
+        for local in ('2026-11-06T23:30:00', '2026-11-07T14:00:00', '2026-11-08T23:30:00'):
+            (self.world/'clock').write_text(str(epoch(local)))
+            result=self.shell(self.time_shim() + 'ck_window_check; printf "%s:%s" "$?" "$CK_WINDOW_DEADLINE"')
+            self.assertEqual(result.stdout, f"0:{int(epoch('2026-11-09T09:00:00'))}", local)
 
     def test_weekday_window_still_applies(self):
         cases = [

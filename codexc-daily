@@ -11,7 +11,7 @@
 #      auto-retry watchdog is armed too)
 #   3. skip entirely if the last turn ended cleanly (task_complete in the
 #      rollout) — a finished task gets no pointless "continue"
-#   4. send a system notification; log to ~/.codex/codexc-daily.log
+#   4. send a system notification; log to ~/.codingkeeper/codexc-daily.log
 #
 # Usage:
 #   codexc-daily                 run one "resume last task" cycle now
@@ -33,6 +33,8 @@
 #                         (0-10080; default 30, 0 disables the check)
 
 set -u
+
+export CODEXC_ACTIVE_WINDOW="${CODEXC_ACTIVE_WINDOW-23:00-09:00}"
 
 # launchd provides a minimal PATH; add the usual install locations
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
@@ -69,8 +71,9 @@ case "$CODEXC_AUTO_YES" in
     *) echo "codexc-daily: invalid CODEXC_AUTO_YES; disabling auto-yes" >&2; CODEXC_AUTO_YES=0 ;;
 esac
 PAUSE_FILE="$CODEX_HOME_DIR/codexc-daily.pause"
-DAILYLOG="$CODEX_HOME_DIR/codexc-daily.log"
-WATCHLOG="$CODEX_HOME_DIR/codexc-watch.log"
+CK_LOG_DIR="${CODEXC_LOG_DIR:-$HOME/.codingkeeper}"
+DAILYLOG="$CK_LOG_DIR/codexc-daily.log"
+WATCHLOG="$CK_LOG_DIR/codexc-watch.log"
 LABEL="com.codexc.daily"
 PLIST="${CODEXC_DAILY_PLIST:-$HOME/Library/LaunchAgents/$LABEL.plist}"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -80,6 +83,7 @@ CK_LANE=codexc-daily
 
 
 log() {
+    python3 "$CK_COMMON_DIR/ck-log.py" "$CK_LOG_DIR" "$CODEX_HOME_DIR" || return 1
     (umask 077; mkdir -p "$CODEX_HOME_DIR" && touch "$DAILYLOG") 2>/dev/null || return 1
     chmod 600 "$DAILYLOG" || return 1
     echo "$(date '+%F %T') daily: $*" >> "$DAILYLOG"
@@ -252,12 +256,19 @@ resolve_session_name() {
 }
 
 send_text() {  # $1=pane $2=text — two-stage send; a single burst makes the TUI drop Enter
+    local target_project="${cwd:-$PWD}"
+    (cd "$target_project" && ck_run_check) || return 125
     tmux send-keys -t "$1" -l -- "$2" || return 1
     sleep 0.4
+    (cd "$target_project" && ck_run_check) || return 125
     tmux send-keys -t "$1" Enter
 }
 
 run_now() {
+    if ! ck_run_check; then
+        log "outside availability window; scheduled input suppressed"
+        return 0
+    fi
     command -v tmux  >/dev/null || { echo "codexc-daily: tmux is required" >&2; exit 1; }
     command -v python3 >/dev/null || { echo "codexc-daily: python3 is required" >&2; exit 1; }
     local cwd name pane cmd rollout session_path pane_tool pane_command pane_path
@@ -287,6 +298,10 @@ run_now() {
     if [ ! -d "$cwd" ]; then
         log "last working dir no longer exists: $cwd, skipping"
         notify "Previous working dir no longer exists, skipping"
+        return 0
+    fi
+    if ! (cd "$cwd" && ck_run_check); then
+        log "target project unavailable or in human interaction; scheduled input suppressed"
         return 0
     fi
     name="$(resolve_session_name "$cwd")"
@@ -353,13 +368,14 @@ run_now() {
     fi
     command -v codex >/dev/null || { echo "codexc-daily: codex CLI is required" >&2; return 1; }
     local run_env
-    run_env="env CODEXC_TOOL=codex CODEXC_LOOP=0 PATH=$(printf '%q' "$PATH") CODEX_HOME=$(printf '%q' "$CODEX_HOME_DIR") CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") CODEXC_EXTRA_RE=$(printf '%q' "$CODEXC_EXTRA_RE")"
+    run_env="env CODEXC_TOOL=codex CODEXC_LOOP=0 CODEXC_AUTOMATED=1 CODEXC_ACTIVE_WINDOW=$(printf '%q' "$CODEXC_ACTIVE_WINDOW") CODEXC_ACTIVE_TZ=$(printf '%q' "${CODEXC_ACTIVE_TZ:-Asia/Shanghai}") PATH=$(printf '%q' "$PATH") CODEX_HOME=$(printf '%q' "$CODEX_HOME_DIR") CODEXC_MESSAGE=$(printf '%q' "$CODEXC_MESSAGE") CODEXC_AUTO_YES=$(printf '%q' "$CODEXC_AUTO_YES") CODEXC_EXTRA_RE=$(printf '%q' "$CODEXC_EXTRA_RE")"
     if bin="$(command -v codexc)"; then
         cmd="$run_env $(printf '%q' "$bin") resume --last $(printf '%q' "$CODEXC_MESSAGE")"
     else
         cmd="$run_env codex resume --last $(printf '%q' "$CODEXC_MESSAGE")"
         log "codexc launcher not found, falling back to plain codex"
     fi
+    (cd "$cwd" && ck_run_check) || return 0
     tmux new-session -d -s "$name" -c "$cwd" "$cmd" || {
         log "cold start failed to create session '$name' (cwd $cwd)"
         notify "Could not restore the previous session"

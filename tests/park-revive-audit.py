@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """审核类 park 的夜间自愈: park 原因入 halt 文件, 看门狗有界自动复燃。"""
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -14,12 +15,25 @@ class ParkReviveAudit(unittest.TestCase):
     def read(self, name):
         return (REPO / name).read_text(encoding='utf-8')
 
-    def test_park_writes_reason_into_halt_file(self):
-        park = self.read('codexc-headless')
-        self.assertIn('printf \'%s\' "$2" > ".codingkeeper/loop.halt"',
-                      park, 'park() must carry the reason inside loop.halt')
-        self.assertNotIn('touch ".codingkeeper/loop.halt"',
-                         park, 'empty halt files cannot be classified by the watchdog')
+    def test_park_writes_reason_and_preserves_operator_halt(self):
+        text = self.read('codexc-headless').rsplit('\ncase "${1:-}" in', 1)[0]
+        text = '\n'.join('. ' + shlex.quote(str(REPO / 'ck-common.sh'))
+                         if line.startswith('. "$(dirname') else line for line in text.splitlines())
+        with tempfile.TemporaryDirectory(prefix='ck-park-', dir='/private/tmp') as tmp:
+            state = Path(tmp) / '.codingkeeper'; state.mkdir()
+            body = text + '\nnotify() { :; }; log() { :; }; headless_wait_status() { :; }\npark notice "review output unparseable"\n'
+            result = subprocess.run(['/bin/bash', '-c', body], cwd=tmp,
+                                    env={**os.environ, 'HOME': tmp}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            halt = state / 'loop.halt'
+            self.assertEqual(halt.read_text(), 'review output unparseable')
+            halt.write_text('operator pause')
+            inode = halt.stat().st_ino
+            result = subprocess.run(['/bin/bash', '-c', body], cwd=tmp,
+                                    env={**os.environ, 'HOME': tmp}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(halt.read_text(), 'operator pause')
+            self.assertEqual(halt.stat().st_ino, inode)
 
     def test_fleet_is_registry_discovered_not_hardcoded(self):
         watch = self.read('burn-watch.sh')
@@ -38,15 +52,13 @@ class ParkReviveAudit(unittest.TestCase):
             self.assertIn(required, watch,
                           f'{required} must gate fleet membership (incomplete scaffolds must not burn)')
 
-    def test_evidence_revert_failure_parks_instead_of_silently_continuing(self):
+    def test_no_evidence_change_has_no_destructive_rollback(self):
         headless = self.read('codexc-headless')
-        self.assertIn('无证据改动回滚失败', headless)
-        self.assertNotIn('git reset --hard "$base_head" >/dev/null 2>&1 || true',
-                         headless, 'revert failures must park, not vanish')
-        self.assertIn('reverted: no-evidence change rolled back', headless,
-                      'reverts must leave a trace in parks.log')
+        self.assertNotIn('git reset --hard', headless,
+                         'missing evidence never authorizes loss of user WIP')
+        self.assertIn('idle change missing evidence; work preserved', headless)
         self.assertIn('>> ".codingkeeper/parks.log"', headless,
-                      'park/revert observability must not pollute the receipt-only journal')
+                      'unaccepted work must be observable outside receipt-only journal')
 
     def test_evidence_check_rejects_verbatim_template_echo(self):
         headless = self.read('codexc-headless')
@@ -57,7 +69,7 @@ class ParkReviveAudit(unittest.TestCase):
         watch = self.read('burn-watch.sh')
         for needle in ('*"review rounds exhausted"*', '*"review output unparseable"*'):
             self.assertIn(needle, watch, f'sweep must auto-revive {needle}')
-        self.assertIn('rm -f "$d/.codingkeeper/loop.halt"', watch)
+        self.assertGreaterEqual(watch.count('if revive_parked "$d"; then'), 2)
         self.assertIn('复燃#$proj#', watch, 'review-park revive must share the 2/day budget')
         self.assertIn('复燃超限(2) — 审核 park 留档待人', watch)
 

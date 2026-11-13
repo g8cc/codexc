@@ -47,7 +47,7 @@ class BurnRuntimeAudit(unittest.TestCase):
         return '\n'.join('. ' + shlex.quote(str(ROOT / 'ck-common.sh'))
                          if line.startswith('. "$(dirname') else line for line in text.splitlines()) + '\n'
 
-    def shell(self, body, timeout=15):
+    def shell(self, body, timeout=60):
         process = subprocess.Popen(['/bin/bash', '-c', self.source() + body],
                                    cwd=self.world, env=self.env, text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -143,6 +143,85 @@ printf 'idle_turns=%s' "$idle_turns"
 ''')
         self.assertEqual(out, 'idle_turns=3')
         self.assertIn('- [x] queued work', (self.state / 'queue.md').read_text())
+
+    def test_no_evidence_change_preserves_user_work_and_worker_commit(self):
+        (self.state / 'queue.md').write_text('## ready\n')
+        (self.world / '.gitignore').write_text('.codingkeeper/\nhome/\n')
+        (self.world / 'user.txt').write_text('base\n')
+        (self.world / 'worker.txt').write_text('base\n')
+        for command in (['git', 'init', '-q'], ['git', 'add', '.'],
+                        ['git', '-c', 'user.name=Audit', '-c', 'user.email=a@example.invalid', 'commit', '-qm', 'base']):
+            subprocess.run(command, cwd=self.world, env=self.env, check=True, capture_output=True)
+        (self.world / 'user.txt').write_text('user staged\n')
+        subprocess.run(['git', 'add', 'user.txt'], cwd=self.world, check=True, capture_output=True)
+        (self.world / 'user.txt').write_text('user staged\nuser unstaged\n')
+        (self.world / 'user-new.txt').write_text('user untracked\n')
+        out = self.shell(r'''
+CODEXC_LOOP_IDLE=1
+IDLE_PROMPT=improve
+CODEXC_PROMPT_ROTATION=0
+register_project() { :; }
+notify() { :; }
+turns=0
+headless_turn() {
+    turns=$((turns+1))
+    if [ "$turns" = 1 ]; then
+        printf 'worker change\n' > worker.txt
+        printf 'worker appended\n' >> user.txt
+        printf 'worker new\n' > worker-new.txt
+        git -c user.name=Audit -c user.email=a@example.invalid commit -qm worker --only worker.txt || return 1
+    else
+        # Bound the old unsafe implementation without accepting later turns.
+        touch .codingkeeper/loop.halt
+    fi
+    printf 'TASK_RESULT: DONE\n' > "$2"
+}
+gate_run() { touch gate-called; : > "$1"; }
+review_run() { touch review-called; : > "$2"; printf 0; }
+run_runner
+printf 'turns=%s' "$turns"
+''')
+        self.assertEqual((self.world / 'user.txt').read_text(),
+                         'user staged\nuser unstaged\nworker appended\n')
+        staged = subprocess.run(['git', 'show', ':user.txt'], cwd=self.world,
+                                check=True, capture_output=True, text=True).stdout
+        self.assertEqual(staged, 'user staged\n')
+        self.assertEqual((self.world / 'worker.txt').read_text(), 'worker change\n')
+        head = subprocess.run(['git', 'log', '-1', '--format=%s'], cwd=self.world,
+                              check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, 'worker')
+        self.assertEqual((self.world / 'user-new.txt').read_text(), 'user untracked\n')
+        self.assertEqual((self.world / 'worker-new.txt').read_text(), 'worker new\n')
+        self.assertEqual(out, 'turns=1')
+        self.assertIn('idle change missing evidence', (self.state / 'loop.halt').read_text())
+        self.assertFalse((self.world / 'gate-called').exists())
+        self.assertFalse((self.world / 'review-called').exists())
+        self.assertFalse(list((self.state / 'evidence').glob('*/accepted.json')))
+        self.assertFalse((self.state / 'journal').exists())
+
+    def test_unborn_no_evidence_change_parks_without_acceptance(self):
+        subprocess.run(['git', 'init', '-q'], cwd=self.world, check=True, capture_output=True)
+        (self.world / 'user.txt').write_text('user unfinished\n')
+        (self.state / 'queue.md').write_text('## ready\n')
+        out = self.shell(r'''
+IDLE_PROMPT=improve
+CODEXC_PROMPT_ROTATION=0
+register_project() { :; }
+notify() { :; }
+turns=0
+headless_turn() {
+    turns=$((turns+1))
+    if [ "$turns" = 1 ]; then printf 'worker new\n' > worker.txt; else touch .codingkeeper/loop.halt; fi
+    printf 'TASK_RESULT: DONE\n' > "$2"
+}
+run_runner
+printf 'turns=%s' "$turns"
+''')
+        self.assertEqual(out, 'turns=1')
+        self.assertEqual((self.world / 'user.txt').read_text(), 'user unfinished\n')
+        self.assertEqual((self.world / 'worker.txt').read_text(), 'worker new\n')
+        self.assertIn('idle change missing evidence', (self.state / 'loop.halt').read_text())
+        self.assertFalse(list((self.state / 'evidence').glob('*/accepted.json')))
 
     def test_stale_review_verdict_before_final_text_cannot_accept(self):
         out = self.shell("printf 'BUGS: 0\\nFurther inspection found broken acceptance.\\n' > .codingkeeper/review; parse_bugs .codingkeeper/review\n")

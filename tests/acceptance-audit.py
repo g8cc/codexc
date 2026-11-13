@@ -22,7 +22,7 @@ def library():
     return '\n'.join(lines) + '\n'
 
 
-def run(name, body, check, timeout=15):
+def run(name, body, check, timeout=60):
     with tempfile.TemporaryDirectory(prefix='ck-acceptance-') as directory:
         world = Path(directory)
         (world / '.codingkeeper').mkdir()

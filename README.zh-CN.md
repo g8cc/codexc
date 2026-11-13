@@ -59,7 +59,7 @@ codexc                  # 在以本目录命名的 tmux 会话里打开 codex
 | `codexc-daily pause` / `resume` | 暂停 / 恢复每日任务 |
 | `codexc-daily status` / `uninstall` | 查看状态 / 移除注册 |
 
-`zcodec run` / `ck zcode run` 默认 **全天可运行，并持续投喂工程 Prompt 燃料**。`CODEXC_LOOP_IDLE=0` 改为只执行队列。需要夜间运行时，显式设置 `CODEXC_ACTIVE_WINDOW=23:00-09:00`、`CODEXC_ACTIVE_TZ=Asia/Shanghai`；截止会停止 headless worker、gate 和 reviewer 的受管进程组。无效配置停止执行，人工 `loop.halt` 优先，配额等待跨重启保留。未配置时段时，额度耗尽会停炉等待人工恢复，不推测重置时间。
+`zcodec run` / `ck zcode run` 默认 **工作日23:00–09:00、周末全天可运行，并持续投喂改进燃料**。`CODEXC_LOOP_IDLE=0` 改为只执行队列。需要覆盖时段时，设置 `CODEXC_ACTIVE_WINDOW=23:00-09:00`、`CODEXC_ACTIVE_TZ=Asia/Shanghai`；截止会停止 headless worker、gate 和 reviewer 的受管进程组。无效配置停止执行，人工 `loop.halt` 优先，配额等待跨重启保留。未配置时段时，额度耗尽会停炉等待人工恢复，不推测重置时间。
 
 
 ### 会话命名规则
@@ -102,25 +102,27 @@ codexc-loop init     # 显式初始化（内容相同, 用于脚本化场景）
 - `.codingkeeper/gate.sh` — 项目真实的测试命令。外环在 shell 里运行它、只认退出码；失败会把输出回灌给 codex 修复（次数受 `CODEXC_GATE_RETRIES` 限制）。
 - 每个完成的任务由独立的只读 `codex exec --ephemeral` 审查上下文。连续 `CODEXC_REVIEW_PASS`（默认 2）次零 bug 才算通过；发现 bug 就回灌修复。重试耗尽会挂起循环（`touch .codingkeeper/loop.halt` 暂停，`rm` 恢复）并发通知。
 - `CODEXC_LOOP_DRY=1 codexc loop` — 只记录动作、不触碰 TUI 的安全试跑。
-- **burn 模式（默认开启）**：队列空时轮换 10 类工程 Prompt，每轮要求真实问题、小步修改与验证。完整扫描燃料库两遍仍无源文件变化时进入不请求模型的 `waiting_fuel`（内置库为 20 个空转回合）。`CODEXC_LOOP_IDLE=0` 关闭；自定义文本替换轮换；`CODEXC_IDLE_PARK` 设置无产出的扫描遍数（自定义 Prompt 则为回合数）。`CODEXC_PROMPT_ROTATION=0` 恢复单条通用指令。桌面面板读取状态与回合心跳。
+- **burn 模式（默认开启）**：队列空时轮换 44 类通用改进燃料及已启用的领域包，每轮要求真实问题、小步修改与验证。完整扫描燃料库两遍仍无源文件变化时进入不请求模型的 `waiting_fuel`（仅通用目录为 88 个无改动回合，阈值随生效方向数量变化），默认每小时复查；源码或燃料变化时立即重新扫描。`CODEXC_LOOP_IDLE=0` 关闭；自定义文本替换轮换；`CODEXC_IDLE_PARK` 设置无产出的扫描遍数（自定义 Prompt 则为回合数）。`CODEXC_PROMPT_ROTATION=0` 恢复单条通用指令。桌面面板读取状态与回合心跳。
 - 工具说明：`codexc-daily` 的冷启动仅支持 codex。Claude 的续命基于会话 JSONL（`isApiErrorMessage`）；pi 基于 `stopReason: "error"`；opencode 基于 `opencode.db` 中的错误 assistant 行。审查使用独立的 Codex 上下文；底层模型可能与 worker 相同。没有终端 TUI 的工具走 **headless 通道**：`codexc-headless` 每任务一次阻塞子进程，队列/gate/审查/burn 语义完全一致。`ck zcode run` 就是以这种方式桥接 ZCode CLI 的；`dsh --profile headless` 配好凭证后同理（`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`）。
 
-## 工程 Prompt 燃料
+## 改进燃料
 
 CodingKeeper 是编码工具外面的运行管控层：选择任务、管理生命周期、校验交付；工程实现交给编码工具。`ck fuel` 保留 provider/token 消耗查询，工程 Prompt 燃料使用：
 
 ```bash
 ck prompts list
 ck prompts show reliability
+ck prompts packs
+ck prompts enable developer-tools automation  # 项目已有能力适用时启用
 ck prompts add recovery --file ./recovery-prompt.md
 ck enqueue --prompt reliability
 ck enqueue "修复已复现的重启问题，并补行为回归"
 ck enqueue --file ./task.md
-ck zcode run              # headless 持续燃烧，默认全天
+ck zcode run              # headless 持续燃烧：工作日夜间、周末全天
 ck codex loop             # Codex TUI 监督循环
 ```
 
-内置正确性、可靠性、安全、边界、行为测试、性能、可观测、依赖、可维护、文档十类指令。项目级追加保存在 `.codingkeeper/prompts/`，`burn-cursor.json` 保留轮换进度。`ready` 任务优先；入队保留多行合同，与验收共享锁，并发加料不会覆盖彼此。燃料耗尽后 runner 在线等待，不请求模型；新队列任务或新增/修改项目 Prompt 会自动恢复。人工停炉标记仍保留；解除人工暂停需清除 `loop.halt`，已退出的 headless runner 还需重新启动。首次使用先 `ck init` 并核对 `.codingkeeper/gate.sh`。
+内置 44 类通用改进燃料，覆盖工程质量、首次使用、可访问性、恢复与数据自主权、核心产品流程、用户激活与重复使用、商业转化、成本和交付。另有 17 个可组合的领域包、85 类领域燃料，覆盖 AI、检索、SaaS、交易、金融、内容、实时协作、数据、原生应用、开发工具、推荐发现、自动化、身份风控、搜索增长、媒体、学习和浏览器扩展。Agent 根据实际能力证据选择，Keeper 只校验、保存与轮换，见 [领域目录与项目示例](docs/FUEL-DOMAINS.md) 和 [本轮复审](docs/AUDIT-FUEL-EXTENSION-2026-11-12.md)。方向称为「改进燃料」，具体可验收的任务称为「改进工单」；完整目录和夜间策略见 [改进燃料与人机交接](docs/FUEL.md)。项目级追加保存在 `.codingkeeper/prompts/`，`burn-cursor.json` 保留轮换进度。`ready` 任务优先；入队保留多行合同，与验收共享锁，并发加料不会覆盖彼此。燃料耗尽后 runner 在线等待，不请求模型；新队列任务、源码变化或新增/修改项目 Prompt 会自动恢复；`CODEXC_FUEL_RECHECK` 默认 3600 秒后复查无产出的目录，0 关闭定时复查。用 `ck propose --file decision.md` 留下待决策工单，早上 `ck morning` 汇总跨项目成果与决策。人工停炉标记仍保留；解除人工暂停需清除 `loop.halt`，已退出的 headless runner 还需重新启动。首次使用先 `ck init` 并核对 `.codingkeeper/gate.sh`。
 
 ## 自动 Yes
 

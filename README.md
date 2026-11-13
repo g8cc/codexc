@@ -57,7 +57,7 @@ Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All comma
 | `codexc-daily pause` / `resume` | disable / re-enable the daily job |
 | `codexc-daily status` / `uninstall` | inspect / remove the daily job |
 
-`zcodec run` / `ck zcode run` default to **24/7 availability and continuous engineering fuel**. Set `CODEXC_LOOP_IDLE=0` for queue-only work. An explicit `CODEXC_ACTIVE_WINDOW=23:00-09:00` and `CODEXC_ACTIVE_TZ=Asia/Shanghai` restores overnight scheduling; managed headless worker, gate and review groups stop at its deadline. Invalid policies stop execution, manual `loop.halt` takes priority, and quota waits persist across restarts, and the watchdog auto-resumes them once per day after the daily quota resets (rather than inventing a reset time).
+`zcodec run` / `ck zcode run` default to **weekday overnight availability (23:00–09:00) and full weekends**, with continuous improvement fuel. Set `CODEXC_LOOP_IDLE=0` for queue-only work. `CODEXC_ACTIVE_WINDOW` and `CODEXC_ACTIVE_TZ` override the policy; managed headless worker, gate and review groups stop at its deadline. Invalid policies stop execution, manual `loop.halt` takes priority, and quota waits persist across restarts, and the watchdog auto-resumes them once per day after the daily quota resets (rather than inventing a reset time).
 
 
 ### Per-project sessions
@@ -100,26 +100,30 @@ codexc-loop init     # explicit scaffold (same thing, for scripted setups)
 - `.codingkeeper/gate.sh` — your project's real test command. The loop runs it in the shell and only trusts its exit code; failures are fed back to codex (bounded by `CODEXC_GATE_RETRIES`).
 - Each finished task is reviewed by a separate read-only `codex exec --ephemeral` reviewer context. `CODEXC_REVIEW_PASS` (default 2) consecutive zero-bug reviews accept the task; any found bug goes back to codex for fixing. Exhausted retries park the loop (touch `.codingkeeper/loop.halt` pauses; `rm` it resumes) and send a notification.
 - `CODEXC_LOOP_DRY=1 codexc loop` — log every action without touching the TUI.
-- **Burn mode (default ON)**: rotate ten engineering recipes when the queue is empty. Each recipe requires a demonstrated gap, a small change and real verification. Two complete sweeps without source changes enter inactive `waiting_fuel` (20 no-op turns with the built-in catalog). `CODEXC_LOOP_IDLE=0` disables burn; custom text replaces the recipe rotation. `CODEXC_IDLE_PARK` controls the number of empty sweeps, or empty turns for a custom prompt; `CODEXC_PROMPT_ROTATION=0` restores the single standing prompt. The desktop panel consumes runner status and heartbeat snapshots.
+- **Burn mode (default ON)**: rotate 44 general product, user experience, business and engineering recipes plus enabled domain packs when the queue is empty. Each recipe requires a demonstrated gap, a small change and real verification. Two complete sweeps without source changes enter inactive `waiting_fuel` (88 no-op turns with the general catalog; the active recipe count sets the threshold); exhausted fuel is reconsidered hourly or immediately when source or recipes change. `CODEXC_LOOP_IDLE=0` disables burn; custom text replaces the recipe rotation. `CODEXC_IDLE_PARK` controls the number of empty sweeps, or empty turns for a custom prompt; `CODEXC_PROMPT_ROTATION=0` restores the single standing prompt. The desktop panel consumes runner status and heartbeat snapshots.
 - Tool notes: `codexc-daily` cold-starts codex sessions only. Claude's watcher keys off session JSONL (`isApiErrorMessage`, post-retry-exhaustion); pi's off `stopReason: "error"`; opencode's off errored assistant rows in `opencode.db`. Reviews run in independent Codex contexts; the underlying model may be the same as the worker. Tools without a terminal TUI run on the **headless lane** instead: `codexc-headless` runs one blocking subprocess per task with the same queue/gate/review/burn semantics. `ck zcode run` is the bridge to ZCode's CLI this way; `dsh --profile headless` works the same once its credentials are configured (`CODEXC_HEADLESS_CMD="dsh --profile headless --session-id night -" codexc-headless run`).
 - **Overnight self-heal (since 2026-11-12)**: the watchdog patrols every 5 minutes and revives furnaces up to `CODEXC_FLEET_MAX` (default 6); "model quota exhausted" parks auto-resume once per day after the daily quota resets; a watchdog start after >20 minutes of silence logs the death gap into the alert ledger; the overnight watch checks watchdog liveness and refills furnaces every 30 minutes (trace: `~/.codingkeeper/overnight-watch.log`). `worker auth failure` parks still wait for a human.
 
-## Engineering prompt fuel
+## Improvement fuel
 
-CodingKeeper is an outer runtime for coding tools: it chooses work, manages lifetime and verifies acceptance; the coding tool implements the changes. `ck fuel` remains the provider/token usage report. Engineering fuel is managed with:
+CodingKeeper is an outer runtime for coding tools: it chooses work, manages lifetime and verifies acceptance; the coding tool implements the changes. `ck fuel` remains the provider/token usage report. Improvement fuel is managed with:
 
 ```bash
 ck prompts list
 ck prompts show reliability
+ck prompts packs
+ck prompts enable developer-tools automation  # when existing project capabilities fit
 ck prompts add recovery --file ./recovery-prompt.md
 ck enqueue --prompt reliability
 ck enqueue "Fix the reproduced restart bug and add a regression"
 ck enqueue --file ./task.md
-ck zcode run              # headless burn, 24/7 by default
+ck zcode run              # headless burn: weekday nights and full weekends
 ck codex loop             # supervised Codex TUI burn
 ```
 
-Recipes cover correctness, reliability, security, edge cases, behavior tests, performance, observability, dependencies, maintainability and documentation. Project additions live in `.codingkeeper/prompts/`; `burn-cursor.json` persists rotation. Ready tasks always take priority. Enqueue preserves multiline text and serializes with acceptance so concurrent additions are retained. Exhausted fuel leaves the runner online without model requests; new ready tasks or changed project prompts resume it automatically. A manual halt still requires removing `loop.halt` and restarting an exited headless runner. Run `ck init` and review `.codingkeeper/gate.sh` before starting.
+The 44 general recipes cover engineering quality, first-use success, accessibility, recovery, data portability, core product flows, activation, repeat use, conversion, cost and delivery. Another 85 recipes in 17 composable domain packs cover AI, retrieval, SaaS, commerce, finance, content, realtime, data, native apps, developer tools, discovery, automation, identity, search growth, media, learning and browser extensions. The Agent selects packs from actual capability evidence; Keeper validates and rotates them. See [domain selection and examples](docs/FUEL-DOMAINS.md). Project additions live in `.codingkeeper/prompts/`; `burn-cursor.json` persists rotation. Ready tasks always take priority. Enqueue preserves multiline text and serializes with acceptance so concurrent additions are retained. Exhausted fuel leaves the runner online without model requests; new ready tasks or changed project prompts resume it automatically. A manual halt still requires removing `loop.halt` and restarting an exited headless runner. Run `ck init` and review `.codingkeeper/gate.sh` before starting.
+
+The direction is **improvement fuel**; a concrete deliverable is an **improvement work order**. `ck propose --file decision.md` records human decisions without scheduling them, and `ck morning` summarizes recent accepted work, decisions and blockers across projects. `CODEXC_FUEL_RECHECK` defaults to 3600 seconds; 0 disables timed rescans. See [the complete fuel guide](docs/FUEL.md) and [the extension audit](docs/AUDIT-FUEL-EXTENSION-2026-11-12.md).
 
 ## Auto-yes
 

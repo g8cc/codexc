@@ -23,6 +23,9 @@ class PromptsAudit(unittest.TestCase):
                         CODEXC_NOTIFY='0', CODEXC_AUTO_RESUME='0', CODEXC_ACTIVE_WINDOW='',
                         CODEXC_BANNER='0', CODEXC_PROMPT_ROTATION='1')
 
+        self.env.pop('CODEXC_FUEL_PACKS', None)
+        self.env.pop('CODEXC_PROMPT_IDS', None)
+
     def tearDown(self):
         self.tmp.cleanup()
 
@@ -37,7 +40,7 @@ class PromptsAudit(unittest.TestCase):
 
     def test_rotation_covers_all_recipes_and_survives_restarts(self):
         names = [line.split('\t')[0] for line in self.cli('prompts', 'list').stdout.splitlines()]
-        self.assertEqual(len(names), 10)
+        self.assertEqual(len(names), 44)
         chosen = [json.loads(self.cli('prompts', 'next').stdout)['id'] for _ in names]
         self.assertEqual(chosen, names)
         self.assertEqual(json.loads(self.cli('prompts', 'next').stdout)['id'], names[0])
@@ -46,11 +49,11 @@ class PromptsAudit(unittest.TestCase):
         first = json.loads(self.cli('prompts', 'next').stdout)
         (self.world / 'recipe.md').write_text('检查恢复幂等性；先复现再修复。\n')
         self.cli('prompts', 'add', 'recovery', '--file', 'recipe.md')
-        outputs = [json.loads(self.cli('prompts', 'next').stdout) for _ in range(11)]
-        self.assertEqual(outputs[0]['id'], 'reliability')
+        outputs = [json.loads(self.cli('prompts', 'next').stdout) for _ in range(45)]
+        self.assertEqual(outputs[0]['id'], 'correctness')
         self.assertTrue(any(x['id'] == 'recovery' and '恢复幂等性' in x['prompt'] for x in outputs))
-        self.assertEqual(first['count'], 10)
-        self.assertTrue(all(x['count'] == 11 for x in outputs))
+        self.assertEqual(first['count'], 44)
+        self.assertTrue(all(x['count'] == 45 for x in outputs))
 
     def test_invalid_fuel_and_cursor_fail_without_destroying_existing_data(self):
         self.cli('prompts', 'next')
@@ -133,6 +136,63 @@ class PromptsAudit(unittest.TestCase):
                                 str(self.state / 'queue.md')], capture_output=True, text=True, check=True)
         self.assertEqual(count.stdout.strip(), '2')
 
+    def test_headless_quota_retry_keeps_the_same_fuel(self):
+        (self.state / 'queue.md').write_text('## ready\n')
+        source = (ROOT / 'codexc-headless').read_text().rsplit('\ncase "${1:-}" in', 1)[0]
+        body = r'''
+register_project() { :; }
+notify() { :; }
+ck_window_check() {
+    CK_WINDOW_ALLOWED=1; CK_WINDOW_REASON=allowed
+    CK_WINDOW_DEADLINE=$(( $(date +%s) + 60 ))
+    CK_WINDOW_NEXT_OPEN=$(( $(date +%s) + 600 ))
+    return 0
+}
+headless_turn() {
+    printf '%s\n' "$BURN_PROMPT_ID" >> selected
+    if [ "$(wc -l < selected)" -eq 1 ]; then
+        printf 'CK_ERROR_CLASS: quota\n' > "$2"
+        return 1
+    fi
+    touch .codingkeeper/loop.halt
+    return 125
+}
+sleep() { printf '1\n' > .codingkeeper/quota-until; }
+run_runner
+'''
+        env = self.env | {'CODEXC_HEADLESS_CMD': 'true', 'CODEXC_LOOP_IDLE': '1',
+                          'CODEXC_AUTO_RESUME': '1', 'CODEXC_REQUIRE_GATE': '0',
+                          'CODEXC_PROMPT_IDS': 'correctness,security'}
+        result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-headless')],
+                                cwd=self.world, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.world / 'selected').read_text().splitlines(), ['correctness','correctness'])
+        self.assertFalse((self.state / 'journal').exists())
+
+    def test_failed_tui_feed_does_not_consume_the_fuel(self):
+        (self.state / 'queue.md').write_text('## ready\n')
+        source = (ROOT / 'codexc-loop').read_text().rsplit('# ---- dispatch', 1)[0]
+        body = r'''
+register_project() { :; }
+notify() { :; }
+banner_set() { :; }
+sleep() { :; }
+pane_idle() { return 0; }
+pane_alive() { [ ! -e .codingkeeper/loop.halt ]; }
+feed_turn() {
+    printf '%s\n' "$BURN_PROMPT_ID" >> selected
+    if [ "$(wc -l < selected)" -ge 2 ]; then touch .codingkeeper/loop.halt; fi
+    return 1
+}
+run_driver fake-pane
+'''
+        env = self.env | {'CODEXC_TOOL': 'codex', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0',
+                          'CODEXC_PROMPT_IDS': 'correctness,security'}
+        result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-loop')],
+                                cwd=self.world, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.world / 'selected').read_text().splitlines(), ['correctness','correctness'])
+
     def test_headless_burn_rotates_then_waits_for_fuel_without_halting(self):
         (self.state / 'queue.md').write_text('## ready\n')
         source = (ROOT / 'codexc-headless').read_text().rsplit('\ncase "${1:-}" in', 1)[0]
@@ -143,20 +203,51 @@ headless_turn() { printf '%s\n' "$BURN_PROMPT_ID" >> selected; printf 'TASK_RESU
 sleep() { cp .codingkeeper/status.json waiting.json; touch .codingkeeper/loop.halt; }
 run_runner
 '''
-        env = self.env | {'CODEXC_HEADLESS_CMD': 'true', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0'}
+        env = self.env | {'CODEXC_HEADLESS_CMD': 'true', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0',
+                          'CODEXC_PROMPT_IDS': 'correctness,reliability,security'}
         result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-headless')],
                                 # Twenty real queue/snapshot/status cycles spawn many
                                 # Python helpers; under load they exceed 30 seconds.
                                 cwd=self.world, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         selected = (self.world / 'selected').read_text().splitlines()
-        self.assertEqual(len(selected), 20)
-        self.assertEqual(len(set(selected[:10])), 10)
-        self.assertEqual(selected[:10], selected[10:])
+        self.assertEqual(len(selected), 6)
+        self.assertEqual(len(set(selected[:3])), 3)
+        self.assertEqual(selected[:3], selected[3:])
         self.assertFalse((self.state / 'journal').exists())
         self.assertTrue((self.state / 'burn-exhausted.json').exists())
         self.assertFalse(json.loads((self.world / 'waiting.json').read_text())['parked'])
         self.assertEqual(json.loads((self.world / 'waiting.json').read_text())['phase'], 'waiting_fuel')
+
+    def test_headless_uses_saved_domain_profile_without_recipe_filter(self):
+        (self.state / 'queue.md').write_text('## ready\n')
+        self.cli('prompts', 'enable', 'retrieval')
+        # Legacy cursors can resume at a domain recipe; no selection override.
+        (self.state / 'burn-cursor.json').write_text('{"next":44}')
+        source = (ROOT / 'codexc-headless').read_text().rsplit('\ncase "${1:-}" in', 1)[0]
+        body = r'''
+register_project() { :; }
+notify() { :; }
+headless_turn() {
+    printf '%s\n' "$BURN_PROMPT_ID" >> selected
+    printf '%s\n' "$BURN_NOOP_LIMIT" >> limits
+    printf '%s\n' "$1" > last-prompt
+    printf 'TASK_RESULT: DONE (idle)\n' > "$2"
+    if [ "$BURN_PROMPT_ID" = correctness ]; then
+        printf 'test finished\n' > .codingkeeper/loop.halt
+    fi
+}
+run_runner
+'''
+        env = self.env | {'CODEXC_HEADLESS_CMD': 'true', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0'}
+        result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-headless')],
+                                cwd=self.world, env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.world / 'selected').read_text().splitlines(),
+                         ['rag-ingestion', 'rag-relevance', 'rag-citations', 'rag-access', 'rag-freshness', 'correctness'])
+        self.assertEqual((self.world / 'limits').read_text().splitlines(), ['98'] * 6)
+        self.assertIn('CodingKeeper 燃料: correctness', (self.world / 'last-prompt').read_text())
+        self.assertFalse((self.state / 'journal').exists())
 
     def test_tui_burn_uses_same_recipe_rotation_and_exhaustion(self):
         (self.state / 'queue.md').write_text('## ready\n')
@@ -177,14 +268,15 @@ feed_msg() {
 }
 run_driver fake-pane
 '''
-        env = self.env | {'CODEXC_TOOL': 'codex', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0'}
+        env = self.env | {'CODEXC_TOOL': 'codex', 'CODEXC_LOOP_IDLE': '1', 'CODEXC_REQUIRE_GATE': '0',
+                          'CODEXC_PROMPT_IDS': 'correctness,reliability,security'}
         result = subprocess.run(['/bin/bash', '-c', source + body, str(ROOT / 'codexc-loop')],
                                 cwd=self.world, env=env, capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr)
         selected = (self.world / 'selected').read_text().splitlines()
-        self.assertEqual(len(selected), 20)
-        self.assertEqual(len(set(selected[:10])), 10)
-        self.assertEqual(selected[:10], selected[10:])
+        self.assertEqual(len(selected), 6)
+        self.assertEqual(len(set(selected[:3])), 3)
+        self.assertEqual(selected[:3], selected[3:])
         self.assertFalse((self.state / 'loop.halt').exists())
         self.assertTrue((self.state / 'burn-exhausted.json').exists())
 

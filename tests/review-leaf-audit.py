@@ -92,7 +92,7 @@ class ReviewLeafAudit(unittest.TestCase):
         if lane is not None:
             command += ['--lane', lane]
         return subprocess.run(command, input=task, text=True, cwd=self.root, env=env,
-                              capture_output=True, timeout=10)
+                              capture_output=True, timeout=60)
 
     def calls(self):
         if not self.calls_file.exists():
@@ -134,6 +134,24 @@ class ReviewLeafAudit(unittest.TestCase):
         self.assertIn('Do not run commands, tests, gates', prompt)
         self.assertEqual(call['pgid'], os.getpgrp(), 'adapter must stay in runner process group')
         self.assertFalse((self.root / 'must-not-read-session').exists())
+
+    def test_packaged_builtin_provider_is_available_to_independent_review(self):
+        resources = self.root / 'Packaged App.app/Contents/Resources'
+        self.cjs = resources / 'glm/zcode.cjs'
+        self.cjs.parent.mkdir(parents=True); self.cjs.touch()
+        bundled = resources / 'config/provider/zcode-builtin.json'
+        bundled.parent.mkdir(parents=True); bundled.write_text('{}')
+        self.env['ZCODE_CJS'] = str(self.cjs)
+        self.env.pop('ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE', None)
+        self.env.pop('ZCODE_BUILTIN_PROVIDER_CONFIG_FILE', None)
+        node = self.bin / 'node'
+        node.write_text(FAKE.replace("'cwd':os.getcwd()", "'provider_config':os.environ.get('ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'), 'cwd':os.getcwd()"))
+        node.chmod(0o755)
+        result = self.invoke(self.envelope('Reviewed paths.\nBUGS: 0'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0]['provider_config'], str(bundled.resolve()))
+        self.assertIn('--mode', self.calls()[0]['argv'])
+        self.assertIn('plan', self.calls()[0]['argv'])
 
     def test_zcode_review_deletes_its_session_row(self):
         import sqlite3

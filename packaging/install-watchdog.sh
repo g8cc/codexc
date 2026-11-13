@@ -1,45 +1,86 @@
 #!/bin/bash
-# install-watchdog.sh — 看门狗 launchd 部署/重装 (交接手册 §7.8 三步的固化 + 运行位副本)。
-#
-# 前置 (一次性, 须人工): System Settings → Privacy & Security → Full Disk Access
-# 添加 /bin/bash。launchd 拉起的进程没有 ~/Documents 的 TCC 授权 (2026-11-09 探针
-# 实证: 脚本与炉子状态文件一律 DENIED), 未授权时实例能起但巡逻必然被内核拒绝。
+# Deploy self-contained runtime scripts, then verify launchd's loaded arguments.
+# Documents access still requires the host's existing Full Disk Access grant.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
 bin_dir="$HOME/.codingkeeper/bin"
-runtime="$bin_dir/burn-watch.sh"
+agents="$HOME/Library/LaunchAgents"
+domain="gui/$(id -u)"
+mkdir -p "$bin_dir" "$agents"
 
-mkdir -p "$bin_dir"
-cp "$repo/burn-watch.sh" "$runtime"                                  # 运行位副本
-chmod +x "$runtime"
-ln -sfn "$repo/burn-watch.sh" "$HOME/.codingkeeper/burn-watch.sh"    # 手动入口仍指仓库真源
+atomic_copy() {
+    local source="$1" target="$2" temporary
+    temporary="$(mktemp "$target.new.XXXXXX")"
+    cp -p "$source" "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$target"
+}
 
-pkill -f 'burn-watch.sh __locked-run' 2>/dev/null || true            # 让位给 launchd 实例
-sleep 1
+# Old Bash processes retain their inode. Shared helpers must travel with the
+# daily runtime copy; a bin-only daily previously could not source ck-common.
+atomic_copy "$repo/burn-watch.sh" "$bin_dir/burn-watch.sh"
+atomic_copy "$repo/codexc-daily" "$bin_dir/codexc-daily"
+atomic_copy "$repo/ck-watchdog-alive.sh" "$bin_dir/ck-watchdog-alive.sh"
+for helper in "$repo"/ck-*.py "$repo"/ck-*.sh; do
+    atomic_copy "$helper" "$bin_dir/${helper##*/}"
+done
+ln -sfn "$repo/burn-watch.sh" "$HOME/.codingkeeper/burn-watch.sh"
 
-bootout gui/$(id -u)/com.codingkeeper.watchdog 2>/dev/null || true
-cp "$here/com.codingkeeper.watchdog.plist" "$HOME/Library/LaunchAgents/"
-bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.codingkeeper.watchdog.plist"
-
-# 同病同修: com.codexc.daily (每日 10:00) 也曾直指 Documents 下脚本, 从未跑成过
-cp "$repo/codexc-daily" "$bin_dir/codexc-daily" && chmod +x "$bin_dir/codexc-daily"
-bootout gui/$(id -u)/com.codexc.daily 2>/dev/null || true
-cp "$here/com.codexc.daily.plist" "$HOME/Library/LaunchAgents/"
-bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.codexc.daily.plist"
-
-# 心跳守夜员: 只读 ~/.codingkeeper, 无 FDA 也能被 launchd 托管 — 主看门狗死亡的兜底监控
-cp "$repo/ck-watchdog-alive.sh" "$bin_dir/ck-watchdog-alive.sh" && chmod +x "$bin_dir/ck-watchdog-alive.sh"
-bootout gui/$(id -u)/com.codingkeeper.watchdog-alive 2>/dev/null || true
-cp "$here/com.codingkeeper.watchdog-alive.plist" "$HOME/Library/LaunchAgents/"
-bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.codingkeeper.watchdog-alive.plist"
-
-sleep 3
-if LC_ALL=C ps ax -o command | LC_ALL=C grep -q '__locked-run'; then
-    echo "✓ 看门狗已由 launchd 托管 (心跳 $HOME/.codingkeeper/watchdog.heartbeat, 15 分钟不更新即异常)"
-    echo "✓ com.codexc.daily 已注册 (每日 10:00 触发, 日志 $HOME/.codex/codexc-daily.log)"
-else
-    echo "✗ launchd 实例未存活 — 查 $HOME/.codingkeeper/burn-watch.log"
-    echo "  十有八九是 /bin/bash 未获完全磁盘访问 (TCC deny 记录在内核日志: System Policy: bash deny file-read-data)"
-    exit 1
-fi
+for label in com.codingkeeper.watchdog com.codexc.daily com.codingkeeper.watchdog-alive; do
+    plist="$agents/$label.plist"
+    python3 - "$here/$label.plist" "$plist" "$HOME" <<'PYPLIST'
+import os, plistlib, sys, tempfile
+source, target, home = sys.argv[1:]
+with open(source, 'rb') as stream: value = plistlib.load(stream)
+def relocate(item):
+    if isinstance(item, str): return item.replace('/Users/wardonguo', home)
+    if isinstance(item, list): return [relocate(v) for v in item]
+    if isinstance(item, dict): return {k: relocate(v) for k, v in item.items()}
+    return item
+value = relocate(value)
+fd, temporary = tempfile.mkstemp(prefix='.launchd-', dir=os.path.dirname(target))
+try:
+    with os.fdopen(fd, 'wb') as stream: plistlib.dump(value, stream)
+    os.replace(temporary, target)
+finally:
+    if os.path.exists(temporary): os.unlink(temporary)
+PYPLIST
+    if launchctl print "$domain/$label" >/dev/null 2>&1; then
+        if ! launchctl bootout "$domain/$label"; then
+            sleep 1
+            if launchctl print "$domain/$label" >/dev/null 2>&1; then
+                launchctl bootout "$domain/$label" || {
+                    echo "✗ $label bootout failed; old job is still loaded" >&2
+                    exit 1
+                }
+            fi
+        fi
+    fi
+    launchctl bootstrap "$domain" "$plist" || {
+        echo "✗ $label bootstrap failed" >&2
+        exit 1
+    }
+    loaded="$(mktemp "$bin_dir/.launchd-loaded.XXXXXX")"
+    if ! launchctl print "$domain/$label" > "$loaded"; then
+        rm -f "$loaded"
+        echo "✗ $label missing after bootstrap" >&2
+        exit 1
+    fi
+    if ! python3 - "$plist" "$loaded" "$label" <<'PYCHECK'
+import plistlib, re, sys
+with open(sys.argv[1], 'rb') as stream: expected = plistlib.load(stream)['ProgramArguments']
+with open(sys.argv[2]) as stream: output = stream.read()
+program = re.search(r'^\s*program = (.+)$', output, re.M)
+arguments = re.search(r'arguments = \{\s*\n(.*?)\n\s*\}', output, re.S)
+actual = [line.strip().strip('"') for line in arguments[1].splitlines() if line.strip()] if arguments else []
+if not program or program[1].strip().strip('"') != expected[0] or actual != expected:
+    sys.exit('✗ ' + sys.argv[3] + ': loaded program/arguments differ from runtime plist')
+PYCHECK
+    then
+        rm -f "$loaded"
+        exit 1
+    fi
+    rm -f "$loaded"
+    echo "✓ $label loaded arguments verified"
+done
+echo "✓ 三个 launchd 作业路径已核验；心跳 $HOME/.codingkeeper/watchdog.heartbeat"

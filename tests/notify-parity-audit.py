@@ -69,7 +69,8 @@ class NotifyParityAudit(unittest.TestCase):
 
     def ck_script(self):
         fn = re.search(r'notify\(\) \{.*?\n\}', (REPO / 'ck-common.sh').read_text(), re.S).group(0)
-        return CK_NOTIFY.format(watchlog=str(self.watchlog), home=str(self.home), fn=fn)
+        normalize = re.search(r'normalize_uint\(\) \{.*?\n\}', (REPO / 'ck-common.sh').read_text(), re.S).group(0)
+        return 'CK_LANE=headless\n' + normalize + '\n' + CK_NOTIFY.format(watchlog=str(self.watchlog), home=str(self.home), fn=fn)
 
     def codex_script(self):
         src = (REPO / 'codexc').read_text()
@@ -77,6 +78,36 @@ class NotifyParityAudit(unittest.TestCase):
         fn = re.search(r'notify\(\) \{.*?\n\}', src, re.S).group(0)
         return CODEX_NOTIFY.format(watchlog=str(self.watchlog), home=str(self.home),
                                    normalize=normalize, fn=fn)
+
+
+    def test_gap_overflow_and_leading_zeroes_are_safe(self):
+        for gap in ('9' * 80, '08', '0003'):
+            for script in (self.ck_script, self.codex_script):
+                with self.subTest(gap=gap, lane=script.__name__):
+                    self.osa.unlink(missing_ok=True)
+                    self.notify_last.write_text(str(int(time.time()) - 90000))
+                    result = self.run_lane('lane', script().replace('99999999', gap))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn('integer expression', result.stderr)
+                    self.assertNotIn('value too great for base', result.stderr)
+                    self.assertEqual(len(self.delivered()), 1)
+
+    def test_each_lane_independently_delivers_and_logs_suppression(self):
+        for script in (self.ck_script, self.codex_script):
+            with self.subTest(lane=script.__name__):
+                self.osa.unlink(missing_ok=True)
+                self.watchlog.unlink(missing_ok=True)
+                self.notify_last.write_text(str(int(time.time()) - 90000))
+                result = self.run_lane('lane', script())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.delivered()), 1)
+                self.osa.unlink(missing_ok=True)
+                self.watchlog.unlink(missing_ok=True)
+                self.notify_last.write_text(str(int(time.time())))
+                result = self.run_lane('lane', script())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.delivered()), 0)
+                self.assertIn('notification suppressed', self.watchlog.read_text())
 
     def delivered(self, result=None):
         # 假 osascript 把通知记录到 OSA_LOG (不占 stdout) — 从记录文件数送达

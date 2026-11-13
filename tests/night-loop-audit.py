@@ -110,7 +110,8 @@ class NightTests(unittest.TestCase):
         clock.ready.return_value = True
         child = Mock()
         child.poll.return_value = 0
-        with patch.object(night, 'IdleClock', return_value=clock), \
+        with patch.object(night.subprocess, 'run', return_value=Mock(returncode=0)), \
+             patch.object(night, 'IdleClock', return_value=clock), \
              patch.object(night, 'owned', return_value=True), \
              patch.object(night, 'snapshot', return_value=('empty', 2)), \
              patch.object(night, 'empty_composer', return_value=True), \
@@ -127,7 +128,8 @@ class NightTests(unittest.TestCase):
     def test_recheck_prevents_handoff_after_input(self):
         clock = Mock()
         clock.ready.return_value = True
-        with patch.object(night, 'IdleClock', return_value=clock), \
+        with patch.object(night.subprocess, 'run', return_value=Mock(returncode=0)), \
+             patch.object(night, 'IdleClock', return_value=clock), \
              patch.object(night, 'owned', side_effect=[True, True, False]), \
              patch.object(night, 'snapshot', side_effect=[('empty', 2), ('draft', 2)]), \
              patch.object(night, 'empty_composer', return_value=True), \
