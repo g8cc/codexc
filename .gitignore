@@ -10,3 +10,6 @@ data/*.db-shm
 data/*.db-wal
 data/
 .workbuddy/
+
+# Local furnace state and acceptance evidence; prepared documentation stays tracked.
+/.codingkeeper/

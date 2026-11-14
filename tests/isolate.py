@@ -36,6 +36,7 @@ wrapper.chmod(0o755)
 # Tests publish status but must never display desktop notifications.
 notify=base/'bin/osascript'; notify.write_text('#!/bin/bash\nexit 0\n'); notify.chmod(0o755)
 env['PATH'] = str(base/'bin')+':'+str(root)+':'+env['PATH']
+code=1
 child=None
 def interrupted(_signum, _frame):
     raise KeyboardInterrupt
@@ -67,4 +68,10 @@ finally:
     except OSError as error:
         print('private tmux cleanup failed: ' + str(error), file=sys.stderr)
         if code == 0: code = 1
+    # Green runs remove their scratch world; failed runs keep stage logs on
+    # disk because run-all's failure report points at "full log:" paths inside.
+    if code == 0:
+        shutil.rmtree(base, ignore_errors=True)
+    else:
+        print(f'test artifacts kept for triage: {base}', file=sys.stderr)
 sys.exit(code)

@@ -51,6 +51,7 @@
 #                         for this many seconds (default 300; catches stuck
 #                         modals like the trust/login gates)
 #   CODEXC_REVIEW_ROUNDS  max total review runs/task   (default 6)
+#   CODEXC_REVIEW_PARSE_RETRIES  in-loop re-runs after unparseable review (default 1)
 #   CODEXC_REVIEW_PASS    consecutive zero-bug reviews (default 2)
 #   CODEXC_LOOP_DRY       1 = log the first task it would feed, then exit
 #                         (never sends keys; default 0)
@@ -92,6 +93,8 @@ CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1
 CODEXC_GATE_TIMEOUT="$(normalize_uint CODEXC_GATE_TIMEOUT "${CODEXC_GATE_TIMEOUT:-900}" 900 5 86400)"
 CODEXC_GATE_RETRIES="$(normalize_uint CODEXC_GATE_RETRIES "${CODEXC_GATE_RETRIES:-3}" 3 0 50)"
 CODEXC_REVIEW_ROUNDS="$(normalize_uint CODEXC_REVIEW_ROUNDS "${CODEXC_REVIEW_ROUNDS:-6}" 6 1 100)"
+# 无响应/缺裁定 review 轮内有界重试 (lane 抖动不再 park+复燃重启整循环); 0=保留旧行为
+CODEXC_REVIEW_PARSE_RETRIES="$(normalize_uint CODEXC_REVIEW_PARSE_RETRIES "${CODEXC_REVIEW_PARSE_RETRIES:-1}" 1 0 5)"
 CODEXC_REVIEW_PASS="$(normalize_uint CODEXC_REVIEW_PASS "${CODEXC_REVIEW_PASS:-2}" 2 1 10)"
 CODEXC_REVIEW_TIMEOUT="$(normalize_uint CODEXC_REVIEW_TIMEOUT "${CODEXC_REVIEW_TIMEOUT:-1800}" 1800 5 86400)"
 CODEXC_LOOP_STALL="$(normalize_uint CODEXC_LOOP_STALL "${CODEXC_LOOP_STALL:-300}" 300 5 86400)"
@@ -510,7 +513,7 @@ feed_turn() {
 # 项目登记表: 桌面面板发现项目的机制
 run_driver() {  # $1=pane
     local pane="$1" rollout msgfile status marker
-    local mode="idle" phase="" task="" task_b64="" gate_rounds=0 review_rounds=0
+    local mode="idle" phase="" task="" task_b64="" gate_rounds=0 review_rounds=0 parse_retries=0
     local zero_streak=0 errored_since=0 empty_logged=0 halted_logged=0
     # watermark of the already-consumed task_complete event: a stale
     # completion must never be re-processed after feeding a fix back
@@ -653,7 +656,7 @@ run_driver() {  # $1=pane
                     continue
                 fi
                 mode="task"; phase="work"
-                gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
+                gate_rounds=0; review_rounds=0; zero_streak=0; parse_retries=0; errored_since=0
                 done_path=""; done_size=0
                 head_at_feed=$(git rev-parse HEAD 2>/dev/null || echo none)
                 CK_TURN_TS=$(date +%s)
@@ -680,7 +683,7 @@ run_driver() {  # $1=pane
                 continue
             fi
             mode="task"; phase="work"
-            gate_rounds=0; review_rounds=0; zero_streak=0; errored_since=0
+            gate_rounds=0; review_rounds=0; zero_streak=0; parse_retries=0; errored_since=0
             done_path=""; done_size=0
             ready_n="$(python3 "$CK_COMMON_DIR/ck-leaf.py" count .codingkeeper/queue.md 2>/dev/null || true)"
             ready_n="${ready_n:-0}"   # grep -c 无匹配时打 0 但退出 1, 不能再 || echo 0 (会变成两行)
@@ -882,6 +885,14 @@ run_driver() {  # $1=pane
             fi
             case "$bugs" in ''|*[!0-9]*) review_valid=0 ;; *) review_valid=1 ;; esac
             if [ "$review_valid" = "0" ]; then
+                zero_streak=0
+                if [ "$parse_retries" -lt "$CODEXC_REVIEW_PARSE_RETRIES" ]; then
+                    parse_retries=$((parse_retries + 1))
+                    log "review output unparseable (tail: $(review_tail "$review_out")) — 轮内重试 $parse_retries/$CODEXC_REVIEW_PARSE_RETRIES"
+                    last_progress_ts=$(date +%s)
+                    phase="review"
+                    continue
+                fi
                 notify "循环挂起: 审查输出无法解析 (无 BUGS: 行) — $task"
                 log "parked: review output unparseable (tail: $(review_tail "$review_out"))"
                 mode="halt"; phase=""
@@ -1659,6 +1670,57 @@ EOF
     sleep 2
     it_append_complete "$rolloc" "还是没事 TASK_RESULT: DONE (idle)"
     it_wait_file "boiler parked (idle exhaustion)" "$root/proj/.codingkeeper/loop.halt" 40
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 14: invalid review resets consecutive passes, then accept =="
+    root="$(it_world "$base-s14")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s14-$$"
+    printf '# q\n## ready\n- [ ] 任务N\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    {
+        echo '#!/bin/bash'
+        echo 'cat > /dev/null   # consume instructions from stdin'
+        printf 'calls_file=%q\n' "$root/review.sh.calls"
+        echo 'n=$(cat "$calls_file" 2>/dev/null || echo 0); n=$((n+1)); printf "%s" "$n" > "$calls_file"'
+        echo 'if [ "$n" = 2 ]; then echo "prose without verdict"; else echo "review findings..."; echo "BUGS: 0"; fi'
+    } > "$root/review.sh"; chmod +x "$root/review.sh"
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" CODEXC_REVIEW_PASS=2 \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait "unparseable review retried in-loop and accepted" "$root/proj/.codingkeeper/queue.md" '\- \[x\] 任务N' 60
+    calls="$(cat "$root/review.sh.calls" 2>/dev/null || echo 0)"
+    if [ "$calls" = "4" ]; then echo "  ok: zero + garbage + two consecutive zero reviews (4 calls)"; else echo "  FAIL: expected 4 review calls, got $calls"; IT_FAILURES=$((IT_FAILURES + 1)); fi
+    kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
+    tmux kill-session -t "$sess" 2>/dev/null
+
+    echo "== scenario 15: always-unparseable review parks after exactly one retry =="
+    root="$(it_world "$base-s15")"; if [ "$IT_TOOL" = opencode ]; then rolloc=""; worker_cmd="sh -c 'echo \"ctrl+p commands\"; cat > $root/fed.log'"; export OPENCODE_DATA_DIR="$root/home/oc"; else rolloc="$root/home/sessions-w.jsonl"; worker_cmd="cat > $root/fed.log"; fi; sess="loopit-s15-$$"
+    printf '# q\n## ready\n- [ ] 任务O\n' > "$root/proj/.codingkeeper/queue.md"
+    printf '#!/bin/bash\necho ok\n' > "$root/proj/.codingkeeper/gate.sh"; chmod +x "$root/proj/.codingkeeper/gate.sh"
+    {
+        echo '#!/bin/bash'
+        echo 'cat > /dev/null   # consume instructions from stdin'
+        printf 'calls_file=%q\n' "$root/review.sh.calls"
+        echo 'n=$(cat "$calls_file" 2>/dev/null || echo 0); n=$((n+1)); printf "%s" "$n" > "$calls_file"'
+        echo 'echo "prose without verdict"'
+    } > "$root/review.sh"; chmod +x "$root/review.sh"
+    tmux new-session -d -s "$sess" -c "$root/proj" "$worker_cmd"
+    ( cd "$root/proj" && CODEX_HOME="$root/home" CODEXC_LOG_DIR="$root/home" OPENCODE_DATA_DIR="$root/home/oc" CODEXC_LOOP_POLL=1 CODEXC_LOOP_NOTIFY=0 CODEXC_LOOP_ROLLOUT="$rolloc" \
+      CODEXC_REVIEW_CMD="$root/review.sh" \
+      "$SELF" run "$sess" >> "$root/driver.log" 2>&1 ) &
+    driver_pid=$!
+    it_wait "task fed" "$root/fed.log" 'TASK_RESULT' 20
+    sleep 2
+    it_append_complete "$rolloc" "TASK_RESULT: DONE"
+    it_wait_file "halt after bounded retry park" "$root/proj/.codingkeeper/loop.halt" 40
+    calls="$(cat "$root/review.sh.calls" 2>/dev/null || echo 0)"
+    if [ "$calls" = "2" ]; then echo "  ok: exactly one in-loop retry before park"; else echo "  FAIL: expected 2 review calls, got $calls"; IT_FAILURES=$((IT_FAILURES + 1)); fi
+    if grep -q '\- \[ \] 任务O' "$root/proj/.codingkeeper/queue.md"; then echo "  ok: task left unaccepted"; else echo "  FAIL: task state changed"; IT_FAILURES=$((IT_FAILURES + 1)); fi
     kill "$driver_pid" 2>/dev/null; wait "$driver_pid" 2>/dev/null
     tmux kill-session -t "$sess" 2>/dev/null
 

@@ -1,10 +1,10 @@
-# codexc
+# CodingKeeper
 
 [English](README.md) | 中文
 
-让 [Codex CLI](https://developers.openai.com/codex/) 在你不在时也能继续跑。
+让编码 Agent 在你不在时继续工作。CodingKeeper 通过 `ck` 统一管理 Codex、Claude Code、Pi、OpenCode、ZCode 和 dsh，提供任务队列、测试门禁、独立审查和晨报。
 
-`codexc` 把 codex 装进按项目划分的 tmux 会话里，并补上原生 codex 缺的三件事：
+原有 `codexc` 命令继续作为 Codex 适配器：把 codex 装进按项目划分的 tmux 会话，并提供：
 
 1. **自动 continue 看门狗** — 回合因瞬时错误挂掉时（429 限流、流断开、5xx、网络抖动），自动替你输入 `continue`，任务从断点继续。配额类错误会被识别并**故意不**自动续。
 2. **定时与每日执行** — `codexc -t 10:00` 定时发 prompt；`codexc-daily install 10:00` 注册每日任务，每天早上自动续跑最近的会话——重启过电脑也行——但你在电脑前时会礼貌跳过。
@@ -12,22 +12,24 @@
 
 > 仅支持 macOS（依赖 launchd、osascript、BSD 工具链）。
 
+本地源码目录使用 `codingKeeper`；GitHub 仓库地址、旧命令和 `CODEXC_*` 配置继续兼容。已有安装的路径迁移见[改名检查清单](docs/LOCAL-RENAME-2026-11-14.md)。
+
 ## 环境要求
 
 - macOS
 - [tmux](https://github.com/tmux/tmux) ≥ 3.5（CSI-u 扩展键需要）、`sqlite3`、Python 3.11+（`python3`）
-- [Codex CLI](https://developers.openai.com/codex/)（`npm i -g @openai/codex`）且已登录
+- 至少安装并登录一种受支持的编码工具；Codex 示例使用 [Codex CLI](https://developers.openai.com/codex/)。
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/g8cc/codexc.git
-cd codexc
+git clone https://github.com/g8cc/codexc.git codingKeeper
+cd codingKeeper
 ./install.sh            # 软链脚本到 ~/.codex/bin
 exec $SHELL             # ~/.codex/bin 尚不在 PATH 时重载
 
 cd ~/projects/myapp
-codexc                  # 在以本目录命名的 tmux 会话里打开 codex
+ck codex                # 选择 Codex 适配器；ck --help 查看其他工具
 ```
 
 `Ctrl-a` `d` 脱离（codex 继续后台跑），再敲 `codexc` 接回来。纯 SSH 环境下所有命令同样可用。

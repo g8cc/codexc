@@ -1,4 +1,4 @@
-# codexc / CodingKeeper — 智能全部在 Agent 内, 机械全部在 Keeper 内
+# CodingKeeper — 智能全部在 Agent 内, 机械全部在 Keeper 内
 
 本仓库是 CodingKeeper 控制器本体。改这里之前:
 

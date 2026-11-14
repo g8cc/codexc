@@ -1,5 +1,5 @@
 #!/bin/bash
-# codexc installer — symlinks the scripts into ~/.codex/bin
+# CodingKeeper installer — symlinks the scripts into ~/.codex/bin
 #
 # Usage:
 #   ./install.sh                install codexc + codexc-daily (no tmux changes)

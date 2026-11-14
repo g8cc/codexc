@@ -1,8 +1,8 @@
-# codexc
+# CodingKeeper
 
-Keep [Codex CLI](https://developers.openai.com/codex/) running when you can't.
+Keep coding agents working while you are away. CodingKeeper coordinates Codex, Claude Code, Pi, OpenCode, ZCode and dsh through the `ck` entry point, with task queues, test gates, independent review and a morning report.
 
-`codexc` wraps `codex` in a per-project tmux session and adds three things plain Codex doesn't have:
+The original `codexc` command remains the Codex adapter. It wraps `codex` in a per-project tmux session and provides:
 
 1. **Auto-continue watchdog** — when a turn dies from a transient failure (429 rate limits, dropped streams, 5xx, network hiccups), codexc types `continue` for you and the task picks up where it stopped. Quota errors are recognized and deliberately *not* auto-continued.
 2. **Scheduled & daily runs** — queue a prompt at a specific time (`codexc -t 10:00`), or register a daily job (`codexc-daily install 10:00`) that resumes your most recent session every morning — even after a restart — but politely skips if you're at the computer.
@@ -10,22 +10,24 @@ Keep [Codex CLI](https://developers.openai.com/codex/) running when you can't.
 
 > macOS-only (uses launchd, osascript, BSD tools). Chinese docs: [README.zh-CN.md](README.zh-CN.md)
 
+The local source directory is named `codingKeeper`; the existing GitHub repository URL, legacy commands and `CODEXC_*` settings remain compatible. For moving an existing installation, see [the relocation checklist](docs/LOCAL-RENAME-2026-11-14.md).
+
 ## Requirements
 
 - macOS
 - [tmux](https://github.com/tmux/tmux) ≥ 3.5 (for CSI-u extended keys), `sqlite3`, Python 3.11+ (`python3`)
-- [Codex CLI](https://developers.openai.com/codex/) (`npm i -g @openai/codex`) — logged in
+- At least one supported coding tool, installed and authenticated. The Codex examples use [Codex CLI](https://developers.openai.com/codex/).
 
 ## Quick start
 
 ```bash
-git clone https://github.com/g8cc/codexc.git
-cd codexc
+git clone https://github.com/g8cc/codexc.git codingKeeper
+cd codingKeeper
 ./install.sh            # symlinks scripts into ~/.codex/bin
 exec $SHELL             # reload PATH if ~/.codex/bin is not on it yet
 
 cd ~/projects/myapp
-codexc                  # codex opens in a tmux session named after this dir
+ck codex                # select the Codex adapter; ck --help lists all tools
 ```
 
 Detach (`Ctrl-a` `d`) to leave it running; `codexc` again to reattach. All commands work from plain SSH sessions too.

@@ -41,6 +41,7 @@
 #   CODEXC_GATE_RETRIES    max gate-failure fix rounds  (default 3)
 #   CODEXC_REVIEW_ROUNDS   max total review runs/task   (default 6)
 #   CODEXC_REVIEW_PASS     consecutive zero-bug reviews to accept (default 2)
+#   CODEXC_REVIEW_PARSE_RETRIES  in-loop re-runs after unparseable review (default 1)
 #   CODEXC_LOOP_DRY        1 = log actions, never run the worker
 #   CODEXC_ACTIVE_WINDOW   HH:MM-HH:MM; default 23:00-09:00 on weekdays, weekends open
 #   CODEXC_ACTIVE_TZ       IANA timezone for the window (default Asia/Shanghai)
@@ -62,6 +63,8 @@ CODEXC_REVIEW_TIMEOUT="$(normalize_uint CODEXC_REVIEW_TIMEOUT "${CODEXC_REVIEW_T
 CODEXC_REVIEW_PASS="$(normalize_uint CODEXC_REVIEW_PASS "${CODEXC_REVIEW_PASS:-2}" 2 1 10)"
 CODEXC_GATE_RETRIES="$(normalize_uint CODEXC_GATE_RETRIES "${CODEXC_GATE_RETRIES:-3}" 3 0 50)"
 CODEXC_REVIEW_ROUNDS="$(normalize_uint CODEXC_REVIEW_ROUNDS "${CODEXC_REVIEW_ROUNDS:-6}" 6 1 100)"
+# 无响应/缺裁定 review 轮内有界重试 (lane 抖动不再 park+复燃重启整循环); 0=保留旧行为
+CODEXC_REVIEW_PARSE_RETRIES="$(normalize_uint CODEXC_REVIEW_PARSE_RETRIES "${CODEXC_REVIEW_PARSE_RETRIES:-1}" 1 0 5)"
 CODEXC_IDLE_PARK="$(normalize_uint CODEXC_IDLE_PARK "${CODEXC_IDLE_PARK:-2}" 2 1 10)"
 CODEXC_LOOP_POLL="$(normalize_uint CODEXC_LOOP_POLL "${CODEXC_LOOP_POLL:-5}" 5 1 60)"
 CODEXC_LOOP_DRY="$(normalize_uint CODEXC_LOOP_DRY "${CODEXC_LOOP_DRY:-0}" 0 0 1)"
@@ -490,7 +493,7 @@ run_runner() {
         # ---- review: CODEXC_REVIEW_PASS consecutive zero-bug reports accept
         # the task; review_rounds counts every run for this task (fix cycles
         # included) and bounds the whole phase ----
-        review_rounds=0; zero_streak=0
+        review_rounds=0; zero_streak=0; parse_retries=0
         while true; do
             [ ! -e ".codingkeeper/loop.halt" ] || break
             batch_count=1
@@ -523,6 +526,12 @@ run_runner() {
                     park "循环挂起: 审查超时 (${CODEXC_REVIEW_TIMEOUT}s) — $task" "review timed out (tail: $(review_tail "$review_out"))"
                     break ;;
                 ''|*[!0-9]*)
+                    zero_streak=0
+                    if [ "$parse_retries" -lt "$CODEXC_REVIEW_PARSE_RETRIES" ]; then
+                        parse_retries=$((parse_retries + 1))
+                        log "review output unparseable (tail: $(review_tail "$review_out")) — 轮内重试 $parse_retries/$CODEXC_REVIEW_PARSE_RETRIES"
+                        continue
+                    fi
                     park "循环挂起: 审查失败或输出无法解析 — $task" "review output unparseable (tail: $(review_tail "$review_out"))"
                     break ;;
             esac
@@ -568,7 +577,7 @@ run_runner() {
             notify "任务通过验收: $task"
             banner_set "✅ 已验收: $task ｜ 燃烧继续"
             log "task accepted: $task"
-            mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0; idle_count=0
+            mode="idle"; task_kind=""; gate_rounds=0; review_rounds=0; zero_streak=0; parse_retries=0; idle_count=0
             auto_resume=0; fail_streak=0
             rm -f .codingkeeper/burn-exhausted.json
             CK_TURN_TS=0   # 验收完成, 时长归零 (下一个投喂重新起算)

@@ -227,6 +227,74 @@ printf 'turns=%s' "$turns"
         out = self.shell("printf 'BUGS: 0\\nFurther inspection found broken acceptance.\\n' > .codingkeeper/review; parse_bugs .codingkeeper/review\n")
         self.assertEqual(out, 'parse-fail')
 
+    def test_unparseable_review_retries_in_loop_then_accepts(self):
+        (self.state / 'queue.md').write_text('## ready\n- [ ] bounded task\n')
+        self.env['CODEXC_LOOP_IDLE'] = '1'     # bounded burn noops end the loop after acceptance
+        self.env['CODEXC_PROMPT_ROTATION'] = '0'
+        out = self.shell(r'''
+register_project() { :; }
+notify() { :; }
+headless_turn() { printf 'TASK_RESULT: DONE\n' > "$2"; }
+gate_run() { : > "$1"; return 0; }
+review_run() {
+    # review_collect backgrounds this in a subshell — count via file, not var;
+    # stdout mirrors the real review_run: parse_bugs verdict, not raw content
+    n=$(( $(cat .codingkeeper/review.calls 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > .codingkeeper/review.calls
+    : > "$2"
+    if [ "$n" = 1 ]; then printf 'prose without verdict\n' > "$2"; printf 'parse-fail'; else printf 'no findings\nBUGS: 0\n' > "$2"; printf '0'; fi
+}
+run_runner
+printf 'review_calls=%s' "$(cat .codingkeeper/review.calls 2>/dev/null || echo 0)"
+''')
+        self.assertEqual(out, 'review_calls=3')
+        self.assertIn('- [x] bounded task', (self.state / 'queue.md').read_text())
+        halt = (self.state / 'loop.halt').read_text() if (self.state / 'loop.halt').exists() else ''
+        self.assertNotIn('review output unparseable', halt)
+
+    def test_always_unparseable_review_parks_after_bounded_retries(self):
+        (self.state / 'queue.md').write_text('## ready\n- [ ] garbage task\n')
+        out = self.shell(r'''
+register_project() { :; }
+notify() { :; }
+headless_turn() { printf 'TASK_RESULT: DONE\n' > "$2"; }
+gate_run() { : > "$1"; return 0; }
+review_run() {
+    n=$(( $(cat .codingkeeper/review.calls 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > .codingkeeper/review.calls
+    : > "$2"
+    printf 'prose without verdict\n' > "$2"; printf 'parse-fail'
+}
+run_runner
+printf 'review_calls=%s' "$(cat .codingkeeper/review.calls 2>/dev/null || echo 0)"
+''')
+        self.assertEqual(out, 'review_calls=2')
+        self.assertIn('review output unparseable', (self.state / 'loop.halt').read_text())
+        self.assertIn('- [ ] garbage task', (self.state / 'queue.md').read_text())
+
+    def test_unparseable_review_breaks_consecutive_zero_streak(self):
+        (self.state / 'queue.md').write_text('## ready\n- [ ] consecutive task\n')
+        self.env.update(CODEXC_LOOP_IDLE='1', CODEXC_PROMPT_ROTATION='0')
+        out = self.shell(r'''
+register_project() { :; }
+notify() { :; }
+headless_turn() { printf 'TASK_RESULT: DONE\n' > "$2"; }
+gate_run() { : > "$1"; return 0; }
+review_run() {
+    n=$(( $(cat .codingkeeper/review.calls 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > .codingkeeper/review.calls
+    if [ "$n" = 2 ]; then
+        printf 'no verdict\n' > "$2"; printf 'parse-fail'
+    else
+        printf 'BUGS: 0\n' > "$2"; printf '0'
+    fi
+}
+run_runner
+printf 'review_calls=%s' "$(cat .codingkeeper/review.calls)"
+''')
+        self.assertEqual(out, 'review_calls=4')
+        self.assertIn('- [x] consecutive task', (self.state / 'queue.md').read_text())
+
     def test_default_reviewer_uses_cli_final_message_instead_of_transcript(self):
         bindir = self.world / 'bin'; bindir.mkdir()
         fake = bindir / 'codex'

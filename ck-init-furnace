@@ -12,7 +12,7 @@ shift
 name="$(basename "$proj")"
 ck="$proj/.codingkeeper"
 repo="$(cd "$(dirname "$0")" && pwd)"
-[ -x "$repo/codexc-review-leaf" ] || { echo "✗ 生成器必须在 codexc 仓库内运行 (找不到 codexc-review-leaf)" >&2; exit 1; }
+[ -x "$repo/codexc-review-leaf" ] || { echo "✗ 生成器必须在 CodingKeeper 仓库内运行 (找不到 codexc-review-leaf)" >&2; exit 1; }
 mkdir -p "$ck"
 
 # 1) queue.md — 标准合同 + 引导叶 (已存在则不动)
@@ -73,13 +73,26 @@ fi
 
 # 3) review-leaf.sh — 固定模板, 指向本仓库审核器
 if [ ! -f "$ck/review-leaf.sh" ]; then
-    cat > "$ck/.review.$$" <<REOF
+    {
+        cat <<'REOF'
 #!/bin/bash
-# Shared leaf reviewer: exact candidate evidence, bounded parser, no paid probes.
+# Shared leaf reviewer: resolve the stable installation after repository moves.
 set -eu
-cd "\$(dirname "\$0")/.."
-exec python3 "${repo}/codexc-review-leaf" "\$@"
+cd "$(dirname "$0")/.."
+reviewer="$HOME/.codex/bin/codexc-review-leaf"
+if [ ! -f "$reviewer" ]; then
+    reviewer="$(command -v codexc-review-leaf 2>/dev/null || true)"
+fi
 REOF
+        # Direct repository use before installation remains supported. %q also
+        # quotes dollar signs, backticks and quotes in a source directory name.
+        printf 'fallback=%q\n' "$repo/codexc-review-leaf"
+        cat <<'REOF'
+[ -n "$reviewer" ] && [ -f "$reviewer" ] || reviewer="$fallback"
+[ -f "$reviewer" ] || { echo 'CodingKeeper reviewer missing; rerun install.sh from its new directory' >&2; exit 127; }
+exec python3 "$reviewer" "$@"
+REOF
+    } > "$ck/.review.$$"
     chmod +x "$ck/.review.$$"
     mv -n "$ck/.review.$$" "$ck/review-leaf.sh"
     rm -f "$ck/.review.$$"
